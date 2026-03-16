@@ -4,9 +4,9 @@ import tempfile
 
 import pytest
 
-from engram.core.db import Database
-from engram.core.embed import EmbeddingProvider
-from engram.extraction.resolve import EntityResolver
+from smrti.core.db import Database
+from smrti.core.embed import EmbeddingProvider
+from smrti.extraction.resolve import EntityResolver
 
 
 @pytest.fixture

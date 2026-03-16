@@ -18,17 +18,17 @@ pytest tests/test_atomspace.py -v
 pytest tests/test_retrieval.py::test_remember_and_recall -s
 
 # CLI
-engram init --db ~/.engram/memory.db --personality balanced --agent-id default
-engram status
-engram serve mcp        # MCP stdio server
-engram serve rest       # FastAPI on :8420
+smrti init --db ~/.smrti/memory.db --personality balanced --agent-id default
+smrti status
+smrti serve mcp        # MCP stdio server
+smrti serve rest       # FastAPI on :8420
 ```
 
 ## Architecture
 
-Engram is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing (sqlite-vec).
+Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing (sqlite-vec).
 
-**Entry point:** `src/engram/__init__.py` — `Engram` class is the public facade (`remember`, `recall`, `believe`, `reflect`, `status`).
+**Entry point:** `src/smrti/__init__.py` — `Smrti` class is the public facade (`remember`, `recall`, `believe`, `reflect`, `status`).
 
 **Core layers (`core/`):**
 - `models.py` — Pydantic data structures: `Atom`, `TruthValue`, `AttentionValue`, `Valence`, `Evidence`, `RecallResult`
@@ -44,7 +44,7 @@ Engram is an AtomSpace-inspired memory engine for AI agents. It stores beliefs a
 
 **Personality (`personality/`):** `PersonalityProfile` dataclass with 16 hyperparameters. Five presets (`balanced`, `analytical`, `curious`, `empathetic`, `maverick`) stored as JSON in `presets/` and loaded into the `personality` DB table per agent.
 
-**Servers (`servers/`):** `mcp.py` wraps Engram as MCP stdio tools. `rest.py` is a FastAPI stub. `tools.py` defines the 6 shared tool schemas (remember, recall, reflect, believe, forget, status).
+**Servers (`servers/`):** `mcp.py` wraps Smrti as MCP stdio tools. `rest.py` is a FastAPI stub. `tools.py` defines the 6 shared tool schemas (remember, recall, reflect, believe, forget, status).
 
 ## Key Design Decisions
 

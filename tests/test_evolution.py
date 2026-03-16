@@ -4,9 +4,9 @@ import tempfile
 
 import pytest
 
-from engram import Engram
-from engram.core.models import TruthValue
-from engram.evolution.truth import update_truth
+from smrti import Smrti
+from smrti.core.models import TruthValue
+from smrti.evolution.truth import update_truth
 
 
 def test_truth_update_increases_confidence():
@@ -34,7 +34,7 @@ def test_pln_merge():
 def mem():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
-    engine = Engram(db_path=db_path, tenant_id="test", write_space="default")
+    engine = Smrti(db_path=db_path, tenant_id="test", write_space="default")
     yield engine
     engine.close()
     os.unlink(db_path)

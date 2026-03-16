@@ -1,4 +1,4 @@
-"""OpenAI-compatible proxy server that transparently injects Engram memory."""
+"""OpenAI-compatible proxy server that transparently injects Smrti memory."""
 from __future__ import annotations
 
 import asyncio
@@ -10,42 +10,42 @@ import httpx
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
-from engram import Engram
-from engram.servers.mcp import create_engram
+from smrti import Smrti
+from smrti.servers.mcp import create_smrti
 
-app = FastAPI(title="Engram Proxy", version="0.1.0")
+app = FastAPI(title="Smrti Proxy", version="0.1.0")
 
-# Per-(tenant_id, write_space) Engram instances
-_instances: dict[tuple[str, str], Engram] = {}
+# Per-(tenant_id, write_space) Smrti instances
+_instances: dict[tuple[str, str], Smrti] = {}
 _default_tenant_id: Optional[str] = None
 _default_write_space: Optional[str] = None
 _default_db_path: Optional[str] = None
 _http: Optional[httpx.AsyncClient] = None
 
-_UPSTREAM = os.environ.get("ENGRAM_UPSTREAM_URL", "https://api.openai.com")
-_RECALL_TOP_K = int(os.environ.get("ENGRAM_RECALL_TOP_K", "5"))
-_RECALL_MIN_CONF = float(os.environ.get("ENGRAM_RECALL_MIN_CONFIDENCE", "0.3"))
+_UPSTREAM = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
+_RECALL_TOP_K = int(os.environ.get("SMRTI_RECALL_TOP_K", "5"))
+_RECALL_MIN_CONF = float(os.environ.get("SMRTI_RECALL_MIN_CONFIDENCE", "0.3"))
 
 
 def _bootstrap() -> tuple[str, str, str]:
     """Return (tenant_id, write_space, db_path), initialising from env vars once."""
     global _default_tenant_id, _default_write_space, _default_db_path
     if _default_tenant_id is None:
-        default = create_engram()
+        default = create_smrti()
         _default_tenant_id = default.tenant_id
         _default_write_space = default.write_space
-        _default_db_path = os.environ.get("ENGRAM_DB", "~/.engram/memory.db")
+        _default_db_path = os.environ.get("SMRTI_DB", "~/.smrti/memory.db")
         _instances[(_default_tenant_id, _default_write_space)] = default
     return _default_tenant_id, _default_write_space, _default_db_path  # type: ignore[return-value]
 
 
-def get_mem(tenant_id: str, write_space: str) -> Engram:
+def get_mem(tenant_id: str, write_space: str) -> Smrti:
     key = (tenant_id, write_space)
     if key not in _instances:
         _, _, db_path = _bootstrap()
-        _instances[key] = Engram(
+        _instances[key] = Smrti(
             db_path=db_path,
-            personality=os.environ.get("ENGRAM_PERSONALITY", "balanced"),
+            personality=os.environ.get("SMRTI_PERSONALITY", "balanced"),
             tenant_id=tenant_id,
             write_space=write_space,
         )
@@ -63,10 +63,10 @@ def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
     """Extract (tenant_id, write_space, read_spaces) from request headers."""
     default_tenant, default_space, _ = _bootstrap()
 
-    tenant_id = request.headers.get("x-engram-tenant-id") or default_tenant
-    write_space = request.headers.get("x-engram-write-space") or default_space
+    tenant_id = request.headers.get("x-smrti-tenant-id") or default_tenant
+    write_space = request.headers.get("x-smrti-write-space") or default_space
 
-    raw_read = request.headers.get("x-engram-read-spaces", "")
+    raw_read = request.headers.get("x-smrti-read-spaces", "")
     read_spaces = [s.strip() for s in raw_read.split(",") if s.strip()]
     if not read_spaces:
         read_spaces = [write_space]

@@ -1,0 +1,254 @@
+# Smrti
+
+AtomSpace-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing.
+
+## Features
+
+- **Graph-structured memory** — Concepts, beliefs, episodes, and goals as typed atoms with relation edges
+- **Bayesian truth maintenance** — Probabilistic Logic Networks (PLN) for merging independent observations
+- **Personality-driven retrieval** — 5 presets with 16 tunable hyperparameters that shape what gets surfaced
+- **Multi-tenant isolation** — Tenant/space overlay model with cross-space reads and single-space writes
+- **Three server modes** — MCP (stdio), REST API, and OpenAI-compatible proxy
+- **Entity resolution** — 4-tier cascade: exact match, alias lookup, fuzzy (RapidFuzz), embedding similarity
+- **Zero external services** — Single SQLite file with sqlite-vec for KNN search, ONNX embeddings on CPU
+
+## Install
+
+```bash
+pip install -e .
+```
+
+## Quick Start
+
+### Python API
+
+```python
+from smrti import Smrti
+
+mem = Smrti(db_path="~/.smrti/memory.db", personality="balanced")
+
+# Store memories
+mem.remember("Alice prefers TypeScript", probability=0.9, valence=0.3)
+mem.remember("The deploy pipeline is broken", probability=0.95, valence=-0.7)
+
+# Recall by semantic similarity + salience
+results = mem.recall("programming languages")
+for r in results:
+    print(f"{r.atom.label} (salience={r.salience:.2f}, confidence={r.atom.truth.confidence:.2f})")
+
+# Assert a belief with evidence
+mem.believe("Python is the best language for ML", probability=0.85, evidence="Team survey results")
+
+# Consolidate: decay, promote, prune, resolve contradictions
+epoch = mem.reflect()
+print(f"Updated {epoch.beliefs_updated} beliefs, pruned {epoch.atoms_pruned} atoms")
+
+mem.close()
+```
+
+### CLI
+
+```bash
+# Initialize a database
+smrti init --db ~/.smrti/memory.db --personality balanced
+
+# Check status
+smrti status
+
+# Start servers
+smrti serve mcp           # MCP stdio server (for Claude, etc.)
+smrti serve rest           # FastAPI on :8420
+smrti serve proxy          # OpenAI-compatible proxy on :8421
+```
+
+## Server Modes
+
+### MCP Server
+
+Exposes 6 tools over stdio for direct LLM integration (Claude, etc.):
+
+| Tool | Description |
+|------|-------------|
+| `remember` | Store an observation or episode |
+| `recall` | Semantic search with salience scoring |
+| `believe` | Assert a belief with truth value |
+| `reflect` | Run a consolidation epoch |
+| `forget` | Lower confidence on a memory |
+| `status` | Get memory statistics |
+
+```bash
+smrti serve mcp
+```
+
+Configure via environment variables:
+
+```bash
+export SMRTI_DB=~/.smrti/memory.db
+export SMRTI_PERSONALITY=balanced
+export SMRTI_TENANT_ID=default
+export SMRTI_SPACE=default
+export SMRTI_READ_SPACES=default,shared   # comma-separated
+```
+
+### REST API
+
+Full CRUD over HTTP on port 8420:
+
+```bash
+smrti serve rest --host 0.0.0.0 --port 8420
+```
+
+```bash
+# Store a memory
+curl -X POST http://localhost:8420/remember \
+  -H "Content-Type: application/json" \
+  -d '{"content": "Alice prefers TypeScript", "probability": 0.9}'
+
+# Recall
+curl -X POST http://localhost:8420/recall \
+  -d '{"query": "programming languages", "top_k": 5}'
+
+# Run consolidation
+curl -X POST http://localhost:8420/reflect
+
+# Get status
+curl http://localhost:8420/status
+```
+
+### OpenAI-Compatible Proxy
+
+Drop-in replacement for `https://api.openai.com/v1/chat/completions`. Intercepts requests, injects relevant memories into the system prompt, and stores the exchange afterward.
+
+```bash
+smrti serve proxy --host 0.0.0.0 --port 8421 --upstream https://api.openai.com
+```
+
+Use it from any OpenAI-compatible client:
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="http://localhost:8421/v1",
+    api_key="sk-..."  # forwarded to upstream
+)
+
+response = client.chat.completions.create(
+    model="gpt-4o",
+    messages=[{"role": "user", "content": "What do you know about Alice?"}],
+    extra_headers={
+        "X-Smrti-Tenant-Id": "user_123",
+        "X-Smrti-Write-Space": "work",
+        "X-Smrti-Read-Spaces": "work,personal",
+    }
+)
+```
+
+The proxy automatically:
+1. Recalls relevant memories from the specified read spaces
+2. Injects them into the system prompt before forwarding
+3. Stores user messages and the assistant response as episodes
+
+Configure with:
+
+```bash
+export SMRTI_UPSTREAM_URL=https://api.openai.com  # or any OpenAI-compatible API
+export SMRTI_RECALL_TOP_K=5
+export SMRTI_RECALL_MIN_CONFIDENCE=0.3
+```
+
+## Multi-Tenant / Space Model
+
+Smrti uses a two-level isolation model:
+
+- **Tenant** — Hard boundary. Different tenants never share atoms. Maps to a user or organization.
+- **Space** — Soft boundary within a tenant. Memories are written to one space but can be read from multiple.
+
+```python
+# Read from multiple spaces, write to one
+mem = Smrti(
+    tenant_id="user_123",
+    write_space="work",
+    read_spaces=["work", "personal", "shared"]
+)
+
+# Each space can have its own personality
+mem.set_personality("analytical")
+```
+
+## Personality System
+
+Five built-in presets control retrieval behavior, decay rates, and emotional dynamics:
+
+| Preset | Bias | Use Case |
+|--------|------|----------|
+| `balanced` | Equal weights across all signals | General-purpose agents |
+| `analytical` | High confidence weight, low valence | Logical reasoning, data-driven decisions |
+| `curious` | High STI weight, fast decay | Exploration, novelty-seeking |
+| `empathetic` | High valence weight, emotional propagation | Relationship-focused agents |
+| `maverick` | Slow decay, high propagation | Independent, contrarian reasoning |
+
+Each preset tunes 16 hyperparameters affecting:
+- **Salience weights** — How similarity, attention, confidence, and valence contribute to retrieval ranking
+- **Belief dynamics** — Confidence decay rate, learning rate, minimum surfacing threshold
+- **Attention dynamics** — STI decay/boost, LTI promotion threshold
+- **Emotional dynamics** — Valence weight, propagation, mood inertia
+
+## Architecture
+
+```
+┌──────────────────────────────────────────────┐
+│                  Smrti (facade)              │
+│          remember / recall / believe /        │
+│            reflect / status / forget          │
+├──────────┬───────────┬───────────┬───────────┤
+│  core/   │retrieval/ │evolution/ │extraction/│
+│ AtomSpace│  fan_out  │   epoch   │  resolve  │
+│ Database │  salience │   truth   │  aliases  │
+│ Embedder │           │connections│           │
+│  Models  │           │           │           │
+├──────────┴───────────┴───────────┴───────────┤
+│          SQLite + sqlite-vec (single file)    │
+│     BAAI/bge-small-en-v1.5 (384d, ONNX CPU)  │
+└──────────────────────────────────────────────┘
+```
+
+**Retrieval pipeline:** Embed query → KNN over tenant partition → filter to read spaces → 1-hop graph expansion → salience scoring → top-k
+
+**Salience formula:**
+```
+S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w_val × |valence| × intensity
+```
+
+**Consolidation epoch** (triggered by `reflect()`):
+1. Process pending evidence via Bayesian update
+2. Decay STI and confidence
+3. Promote high-STI atoms to LTI
+4. Resolve contradictions (weaken less confident belief)
+5. Discover cross-domain connections (every 10th epoch)
+6. Prune atoms below confidence/LTI floors
+
+## Data Model
+
+| Atom Type | Purpose | Example |
+|-----------|---------|---------|
+| `concept` | Reusable entities | "Alice", "Python", "OpenAI" |
+| `belief` | Probabilistic facts | "Alice prefers TypeScript" |
+| `episode` | Timestamped observations | "User asked about deployment" |
+| `goal` | Desired states | "Finish the migration by Friday" |
+| `relation` | Edges between atoms | Alice → works_at → Acme Corp |
+
+Each atom carries:
+- **TruthValue** — `probability` [0,1] and `confidence` [0,1], merged via PLN revision
+- **AttentionValue** — `sti` (short-term importance, decays fast) and `lti` (long-term, accumulates)
+- **Valence** — emotional tone [-1,1] and intensity [0,1]
+
+## Testing
+
+```bash
+pytest tests/ -v
+```
+
+## License
+
+MIT

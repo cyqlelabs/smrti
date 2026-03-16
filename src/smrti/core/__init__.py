@@ -1,7 +1,7 @@
-from engram.core.db import Database
-from engram.core.embed import EmbeddingProvider
-from engram.core.atomspace import AtomSpace
-from engram.core.models import (
+from smrti.core.db import Database
+from smrti.core.embed import EmbeddingProvider
+from smrti.core.atomspace import AtomSpace
+from smrti.core.models import (
     Atom,
     AtomType,
     AttentionValue,

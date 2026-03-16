@@ -3,9 +3,9 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from engram.core.db import Database
-from engram.core.embed import EmbeddingProvider
-from engram.core.models import (
+from smrti.core.db import Database
+from smrti.core.embed import EmbeddingProvider
+from smrti.core.models import (
     Atom,
     AtomType,
     Evidence,

@@ -1,0 +1,19 @@
+{
+  "preset_name": "curious",
+  "description": "High STI propagation = lateral thinking. Fast decay = moves on quickly. Surfaces novel low-confidence ideas.",
+  "confidence_decay_rate": 0.03,
+  "confidence_update_lr": 0.5,
+  "min_confidence_to_surface": 0.1,
+  "sti_decay_rate": 0.2,
+  "sti_boost_on_access": 0.8,
+  "sti_propagation_factor": 0.3,
+  "lti_promotion_threshold": 0.5,
+  "valence_weight": 0.15,
+  "valence_propagation": 0.1,
+  "mood_inertia": 0.5,
+  "w_similarity": 0.25,
+  "w_sti": 0.35,
+  "w_confidence": 0.15,
+  "w_lti": 0.10,
+  "w_valence": 0.15
+}

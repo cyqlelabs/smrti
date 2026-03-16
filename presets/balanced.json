@@ -1,0 +1,19 @@
+{
+  "preset_name": "balanced",
+  "description": "General-purpose balanced memory. Equal weight to facts, recency, and confidence.",
+  "confidence_decay_rate": 0.02,
+  "confidence_update_lr": 0.3,
+  "min_confidence_to_surface": 0.1,
+  "sti_decay_rate": 0.1,
+  "sti_boost_on_access": 0.5,
+  "sti_propagation_factor": 0.15,
+  "lti_promotion_threshold": 0.7,
+  "valence_weight": 0.2,
+  "valence_propagation": 0.1,
+  "mood_inertia": 0.8,
+  "w_similarity": 0.35,
+  "w_sti": 0.25,
+  "w_confidence": 0.20,
+  "w_lti": 0.10,
+  "w_valence": 0.10
+}

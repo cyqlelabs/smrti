@@ -1,0 +1,19 @@
+{
+  "preset_name": "analytical",
+  "description": "Slow to change beliefs, low emotional reactivity, trusts high-confidence facts above all.",
+  "confidence_decay_rate": 0.01,
+  "confidence_update_lr": 0.15,
+  "min_confidence_to_surface": 0.1,
+  "sti_decay_rate": 0.05,
+  "sti_boost_on_access": 0.5,
+  "sti_propagation_factor": 0.05,
+  "lti_promotion_threshold": 0.9,
+  "valence_weight": 0.05,
+  "valence_propagation": 0.05,
+  "mood_inertia": 0.95,
+  "w_similarity": 0.30,
+  "w_sti": 0.15,
+  "w_confidence": 0.40,
+  "w_lti": 0.10,
+  "w_valence": 0.05
+}

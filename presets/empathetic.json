@@ -1,0 +1,19 @@
+{
+  "preset_name": "empathetic",
+  "description": "High valence weight = mood-matching. Low mood inertia = emotionally reactive. Remembers feelings.",
+  "confidence_decay_rate": 0.02,
+  "confidence_update_lr": 0.4,
+  "min_confidence_to_surface": 0.1,
+  "sti_decay_rate": 0.08,
+  "sti_boost_on_access": 0.5,
+  "sti_propagation_factor": 0.2,
+  "lti_promotion_threshold": 0.7,
+  "valence_weight": 0.4,
+  "valence_propagation": 0.25,
+  "mood_inertia": 0.4,
+  "w_similarity": 0.25,
+  "w_sti": 0.20,
+  "w_confidence": 0.10,
+  "w_lti": 0.10,
+  "w_valence": 0.35
+}

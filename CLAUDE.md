@@ -1,0 +1,54 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+## Commands
+
+```bash
+# Install (editable)
+pip install -e .
+
+# Run all tests
+pytest tests/
+
+# Run a single test file
+pytest tests/test_atomspace.py -v
+
+# Run a single test
+pytest tests/test_retrieval.py::test_remember_and_recall -s
+
+# CLI
+engram init --db ~/.engram/memory.db --personality balanced --agent-id default
+engram status
+engram serve mcp        # MCP stdio server
+engram serve rest       # FastAPI on :8420
+```
+
+## Architecture
+
+Engram is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing (sqlite-vec).
+
+**Entry point:** `src/engram/__init__.py` — `Engram` class is the public facade (`remember`, `recall`, `believe`, `reflect`, `status`).
+
+**Core layers (`core/`):**
+- `models.py` — Pydantic data structures: `Atom`, `TruthValue`, `AttentionValue`, `Valence`, `Evidence`, `RecallResult`
+- `atomspace.py` — Graph operations: add/update atoms, link atoms, boost STI
+- `db.py` — SQLite schema (WAL mode). Tables: `atoms`, `vec_atoms` (virtual vec0 for KNN), `evidence` (append-only observation log), `personality`
+- `embed.py` — Thread-safe FastEmbed singleton (BAAI/bge-small-en-v1.5, 384 dims, ONNX CPU)
+
+**Retrieval (`retrieval/`):** `fan_out.py` does KNN → 1-hop graph expansion → salience scoring. `salience.py` formula: `w_sim×sim + w_sti×sti + w_conf×conf + w_lti×lti + w_val×|valence|×intensity`
+
+**Evolution (`evolution/`):** `epoch.py` runs consolidation cycles: process evidence log → decay STI/LTI → promote high-LTI nodes → resolve contradictions → prune low-salience atoms. `truth.py` implements PLN (Probabilistic Logic Networks) for merging independent probability estimates.
+
+**Extraction (`extraction/`):** `resolve.py` cascades entity resolution: exact match → alias lookup → fuzzy (RapidFuzz) → embedding similarity → create new.
+
+**Personality (`personality/`):** `PersonalityProfile` dataclass with 16 hyperparameters. Five presets (`balanced`, `analytical`, `curious`, `empathetic`, `maverick`) stored as JSON in `presets/` and loaded into the `personality` DB table per agent.
+
+**Servers (`servers/`):** `mcp.py` wraps Engram as MCP stdio tools. `rest.py` is a FastAPI stub. `tools.py` defines the 6 shared tool schemas (remember, recall, reflect, believe, forget, status).
+
+## Key Design Decisions
+
+- **Append-only evidence log:** Truth values are never mutated directly — observations are logged to `evidence` and merged during epochs via PLN
+- **Multi-agent isolation:** Every query is partitioned by `agent_id`
+- **Lazy embedding init:** FastEmbed model loads on first use, not at import time
+- **Salience over recency:** Retrieval ranks by a weighted salience score, not timestamps

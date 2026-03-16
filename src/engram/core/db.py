@@ -24,7 +24,8 @@ CREATE TABLE IF NOT EXISTS atoms (
     source_id   TEXT REFERENCES atoms(id),
     target_id   TEXT REFERENCES atoms(id),
     relation    TEXT,
-    agent_id    TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL,
+    space       TEXT NOT NULL,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
     metadata    TEXT DEFAULT '{}',
@@ -32,7 +33,7 @@ CREATE TABLE IF NOT EXISTS atoms (
 );
 
 CREATE INDEX IF NOT EXISTS idx_atoms_type ON atoms(type);
-CREATE INDEX IF NOT EXISTS idx_atoms_agent ON atoms(agent_id);
+CREATE INDEX IF NOT EXISTS idx_atoms_tenant_space ON atoms(tenant_id, space);
 CREATE INDEX IF NOT EXISTS idx_atoms_entity_type ON atoms(entity_type);
 CREATE INDEX IF NOT EXISTS idx_atoms_source ON atoms(source_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_target ON atoms(target_id);
@@ -42,26 +43,28 @@ CREATE INDEX IF NOT EXISTS idx_atoms_sti ON atoms(sti DESC);
 CREATE VIRTUAL TABLE IF NOT EXISTS vec_atoms USING vec0(
     atom_id     TEXT,
     embedding   float[384],
-    agent_id    TEXT partition key,
+    tenant_id   TEXT partition key,
     +label      TEXT
 );
 
 CREATE TABLE IF NOT EXISTS evidence (
-    id                  TEXT PRIMARY KEY,
-    atom_id             TEXT NOT NULL REFERENCES atoms(id),
+    id                   TEXT PRIMARY KEY,
+    atom_id              TEXT NOT NULL REFERENCES atoms(id),
     observed_probability REAL NOT NULL,
-    weight              REAL DEFAULT 1.0,
-    source_episode_id   TEXT,
-    agent_id            TEXT NOT NULL,
-    created_at          TEXT DEFAULT (datetime('now')),
-    processed           INTEGER DEFAULT 0
+    weight               REAL DEFAULT 1.0,
+    source_episode_id    TEXT,
+    tenant_id            TEXT NOT NULL,
+    space                TEXT NOT NULL,
+    created_at           TEXT DEFAULT (datetime('now')),
+    processed            INTEGER DEFAULT 0
 );
 
-CREATE INDEX IF NOT EXISTS idx_evidence_pending ON evidence(processed, agent_id);
+CREATE INDEX IF NOT EXISTS idx_evidence_pending ON evidence(processed, tenant_id, space);
 CREATE INDEX IF NOT EXISTS idx_evidence_atom ON evidence(atom_id);
 
 CREATE TABLE IF NOT EXISTS personality (
-    agent_id                TEXT PRIMARY KEY,
+    tenant_id               TEXT NOT NULL,
+    space                   TEXT NOT NULL,
     confidence_decay_rate   REAL DEFAULT 0.02,
     confidence_update_lr    REAL DEFAULT 0.3,
     min_confidence_to_surface REAL DEFAULT 0.1,
@@ -79,15 +82,17 @@ CREATE TABLE IF NOT EXISTS personality (
     w_valence               REAL DEFAULT 0.10,
     preset_name             TEXT DEFAULT 'balanced',
     epoch_count             INTEGER DEFAULT 0,
-    created_at              TEXT DEFAULT (datetime('now'))
+    created_at              TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (tenant_id, space)
 );
 
 CREATE TABLE IF NOT EXISTS aliases (
     alias       TEXT NOT NULL,
     atom_id     TEXT NOT NULL REFERENCES atoms(id),
-    agent_id    TEXT NOT NULL,
+    tenant_id   TEXT NOT NULL,
+    space       TEXT NOT NULL,
     created_at  TEXT DEFAULT (datetime('now')),
-    PRIMARY KEY (alias, agent_id)
+    PRIMARY KEY (alias, tenant_id, space)
 );
 
 CREATE INDEX IF NOT EXISTS idx_aliases_atom ON aliases(atom_id);

@@ -23,17 +23,17 @@ def resolver():
 
 
 def test_creates_new_atom(resolver):
-    atom_id = resolver.resolve("Python", "tool", "test")
+    atom_id = resolver.resolve("Python", "tool", "test", "default", ["default"])
     assert atom_id is not None
 
 
 def test_exact_match_returns_same_id(resolver):
-    id1 = resolver.resolve("Alice", "person", "test")
-    id2 = resolver.resolve("Alice", "person", "test")
+    id1 = resolver.resolve("Alice", "person", "test", "default", ["default"])
+    id2 = resolver.resolve("Alice", "person", "test", "default", ["default"])
     assert id1 == id2
 
 
 def test_fuzzy_match(resolver):
-    id1 = resolver.resolve("JavaScript", "tool", "test")
-    id2 = resolver.resolve("Javascript", "tool", "test")
+    id1 = resolver.resolve("JavaScript", "tool", "test", "default", ["default"])
+    id2 = resolver.resolve("Javascript", "tool", "test", "default", ["default"])
     assert id1 == id2

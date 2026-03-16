@@ -70,7 +70,8 @@ class Atom(BaseModel):
     source_id: Optional[str] = None
     target_id: Optional[str] = None
     relation: Optional[str] = None
-    agent_id: str = "default"
+    tenant_id: str = "default"
+    space: str = "default"
     metadata: dict = Field(default_factory=dict)
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
@@ -82,7 +83,8 @@ class Evidence(BaseModel):
     observed_probability: float
     weight: float = 1.0
     source_episode_id: Optional[str] = None
-    agent_id: str = "default"
+    tenant_id: str = "default"
+    space: str = "default"
 
 
 class RecallResult(BaseModel):
@@ -123,7 +125,8 @@ def atom_from_row(row) -> Atom:
         source_id=d.get("source_id"),
         target_id=d.get("target_id"),
         relation=d.get("relation"),
-        agent_id=d.get("agent_id", "default"),
+        tenant_id=d.get("tenant_id", "default"),
+        space=d.get("space", "default"),
         metadata=json.loads(d.get("metadata") or "{}"),
         created_at=d.get("created_at"),
         updated_at=d.get("updated_at"),

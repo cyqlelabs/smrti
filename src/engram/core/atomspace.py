@@ -26,13 +26,13 @@ class AtomSpace:
                 id, type, label, content, probability, confidence,
                 sti, lti, valence, intensity,
                 source_id, target_id, relation,
-                agent_id, metadata, entity_type,
+                tenant_id, space, metadata, entity_type,
                 created_at, updated_at
             ) VALUES (
                 ?, ?, ?, ?, ?, ?,
                 ?, ?, ?, ?,
                 ?, ?, ?,
-                ?, ?, ?,
+                ?, ?, ?, ?,
                 COALESCE(
                     (SELECT created_at FROM atoms WHERE id = ?),
                     datetime('now')
@@ -54,7 +54,8 @@ class AtomSpace:
                 atom.source_id,
                 atom.target_id,
                 atom.relation,
-                atom.agent_id,
+                atom.tenant_id,
+                atom.space,
                 json.dumps(atom.metadata),
                 atom.entity_type.value if atom.entity_type else None,
                 atom.id,
@@ -71,16 +72,16 @@ class AtomSpace:
                 text_to_embed = f"{atom.label} {atom.content}"
             embedding = self._embed.embed(text_to_embed)
             self._db.execute(
-                "INSERT INTO vec_atoms (atom_id, embedding, agent_id, label) VALUES (?, ?, ?, ?)",
-                (atom.id, json.dumps(embedding), atom.agent_id, atom.label),
+                "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, label) VALUES (?, ?, ?, ?)",
+                (atom.id, json.dumps(embedding), atom.tenant_id, atom.label),
             )
 
         return atom.id
 
-    def get_atom(self, atom_id: str, agent_id: str) -> Atom | None:
+    def get_atom(self, atom_id: str, tenant_id: str, space: str) -> Atom | None:
         row = self._db.fetchone(
-            "SELECT * FROM atoms WHERE id = ? AND agent_id = ?",
-            (atom_id, agent_id),
+            "SELECT * FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+            (atom_id, tenant_id, space),
         )
         if row is None:
             return None
@@ -97,7 +98,7 @@ class AtomSpace:
                 source_id = ?, target_id = ?, relation = ?,
                 metadata = ?, entity_type = ?,
                 updated_at = datetime('now')
-            WHERE id = ? AND agent_id = ?
+            WHERE id = ? AND tenant_id = ? AND space = ?
             """,
             (
                 atom.type.value,
@@ -115,7 +116,8 @@ class AtomSpace:
                 json.dumps(atom.metadata),
                 atom.entity_type.value if atom.entity_type else None,
                 atom.id,
-                atom.agent_id,
+                atom.tenant_id,
+                atom.space,
             ),
         )
 
@@ -124,7 +126,8 @@ class AtomSpace:
         source_id: str,
         target_id: str,
         relation: str,
-        agent_id: str,
+        tenant_id: str,
+        space: str,
         truth: Optional[TruthValue] = None,
     ) -> str:
         if truth is None:
@@ -137,76 +140,83 @@ class AtomSpace:
             target_id=target_id,
             relation=relation,
             truth=truth,
-            agent_id=agent_id,
+            tenant_id=tenant_id,
+            space=space,
         )
         return self.add_atom(link_atom)
 
     def get_neighbors(
         self,
         atom_id: str,
-        agent_id: str,
+        tenant_id: str,
+        spaces: list[str],
         direction: str = "both",
     ) -> list[Atom]:
+        ph = ",".join("?" * len(spaces))
         neighbor_ids: list[str] = []
 
         if direction in ("out", "both"):
             rows = self._db.fetchall(
-                "SELECT target_id FROM atoms WHERE source_id = ? AND agent_id = ? AND type = 'relation' AND target_id IS NOT NULL",
-                (atom_id, agent_id),
+                f"SELECT target_id FROM atoms WHERE source_id = ? AND tenant_id = ? AND space IN ({ph}) AND type = 'relation' AND target_id IS NOT NULL",
+                (atom_id, tenant_id, *spaces),
             )
             neighbor_ids.extend(r["target_id"] for r in rows)
 
         if direction in ("in", "both"):
             rows = self._db.fetchall(
-                "SELECT source_id FROM atoms WHERE target_id = ? AND agent_id = ? AND type = 'relation' AND source_id IS NOT NULL",
-                (atom_id, agent_id),
+                f"SELECT source_id FROM atoms WHERE target_id = ? AND tenant_id = ? AND space IN ({ph}) AND type = 'relation' AND source_id IS NOT NULL",
+                (atom_id, tenant_id, *spaces),
             )
             neighbor_ids.extend(r["source_id"] for r in rows)
 
         if not neighbor_ids:
             return []
 
-        seen = set()
+        seen: set[str] = set()
         unique_ids = []
         for nid in neighbor_ids:
             if nid not in seen:
                 seen.add(nid)
                 unique_ids.append(nid)
 
-        placeholders = ",".join("?" * len(unique_ids))
+        id_ph = ",".join("?" * len(unique_ids))
         rows = self._db.fetchall(
-            f"SELECT * FROM atoms WHERE id IN ({placeholders}) AND agent_id = ?",
-            (*unique_ids, agent_id),
+            f"SELECT * FROM atoms WHERE id IN ({id_ph}) AND tenant_id = ? AND space IN ({ph})",
+            (*unique_ids, tenant_id, *spaces),
         )
         return [atom_from_row(r) for r in rows]
 
-    def get_relations(self, atom_id: str, agent_id: str) -> list[Atom]:
+    def get_relations(self, atom_id: str, tenant_id: str, spaces: list[str]) -> list[Atom]:
+        ph = ",".join("?" * len(spaces))
         rows = self._db.fetchall(
-            """
+            f"""
             SELECT * FROM atoms
             WHERE type = 'relation'
-              AND agent_id = ?
+              AND tenant_id = ?
+              AND space IN ({ph})
               AND (source_id = ? OR target_id = ?)
             """,
-            (agent_id, atom_id, atom_id),
+            (tenant_id, *spaces, atom_id, atom_id),
         )
         return [atom_from_row(r) for r in rows]
 
     def search_by_label(
         self,
         label: str,
-        agent_id: str,
+        tenant_id: str,
+        spaces: list[str],
         entity_type: Optional[str] = None,
     ) -> list[Atom]:
+        ph = ",".join("?" * len(spaces))
         if entity_type:
             rows = self._db.fetchall(
-                "SELECT * FROM atoms WHERE label LIKE ? AND agent_id = ? AND entity_type = ?",
-                (f"%{label}%", agent_id, entity_type),
+                f"SELECT * FROM atoms WHERE label LIKE ? AND tenant_id = ? AND space IN ({ph}) AND entity_type = ?",
+                (f"%{label}%", tenant_id, *spaces, entity_type),
             )
         else:
             rows = self._db.fetchall(
-                "SELECT * FROM atoms WHERE label LIKE ? AND agent_id = ?",
-                (f"%{label}%", agent_id),
+                f"SELECT * FROM atoms WHERE label LIKE ? AND tenant_id = ? AND space IN ({ph})",
+                (f"%{label}%", tenant_id, *spaces),
             )
         return [atom_from_row(r) for r in rows]
 
@@ -219,8 +229,8 @@ class AtomSpace:
     def add_evidence(self, evidence: Evidence) -> None:
         self._db.execute(
             """
-            INSERT INTO evidence (id, atom_id, observed_probability, weight, source_episode_id, agent_id)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO evidence (id, atom_id, observed_probability, weight, source_episode_id, tenant_id, space)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 evidence.id,
@@ -228,14 +238,15 @@ class AtomSpace:
                 evidence.observed_probability,
                 evidence.weight,
                 evidence.source_episode_id,
-                evidence.agent_id,
+                evidence.tenant_id,
+                evidence.space,
             ),
         )
 
-    def get_pending_evidence(self, agent_id: str) -> list[Evidence]:
+    def get_pending_evidence(self, tenant_id: str, space: str) -> list[Evidence]:
         rows = self._db.fetchall(
-            "SELECT * FROM evidence WHERE processed = 0 AND agent_id = ? ORDER BY created_at ASC",
-            (agent_id,),
+            "SELECT * FROM evidence WHERE processed = 0 AND tenant_id = ? AND space = ? ORDER BY created_at ASC",
+            (tenant_id, space),
         )
         return [
             Evidence(
@@ -244,7 +255,8 @@ class AtomSpace:
                 observed_probability=r["observed_probability"],
                 weight=r["weight"],
                 source_episode_id=r["source_episode_id"],
-                agent_id=r["agent_id"],
+                tenant_id=r["tenant_id"],
+                space=r["space"],
             )
             for r in rows
         ]

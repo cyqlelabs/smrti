@@ -16,8 +16,17 @@ from engram.servers.tools import TOOLS
 def create_engram() -> Engram:
     db_path = os.environ.get("ENGRAM_DB", "~/.engram/memory.db")
     personality = os.environ.get("ENGRAM_PERSONALITY", "balanced")
-    agent_id = os.environ.get("ENGRAM_AGENT_ID", "default")
-    return Engram(db_path=db_path, personality=personality, agent_id=agent_id)
+    tenant_id = os.environ.get("ENGRAM_TENANT_ID", "default")
+    write_space = os.environ.get("ENGRAM_SPACE", "default")
+    read_spaces_raw = os.environ.get("ENGRAM_READ_SPACES", "")
+    read_spaces = [s.strip() for s in read_spaces_raw.split(",") if s.strip()] or None
+    return Engram(
+        db_path=db_path,
+        personality=personality,
+        tenant_id=tenant_id,
+        write_space=write_space,
+        read_spaces=read_spaces,
+    )
 
 
 def handle_tool(mem: Engram, name: str, args: dict) -> dict:
@@ -50,6 +59,7 @@ def handle_tool(mem: Engram, name: str, args: dict) -> dict:
                     "valence": r.atom.valence.valence,
                     "salience": r.salience,
                     "similarity": r.similarity,
+                    "space": r.atom.space,
                 }
                 for r in results
             ]
@@ -82,7 +92,8 @@ def handle_tool(mem: Engram, name: str, args: dict) -> dict:
         action = args["action"]
         if action == "get":
             row = mem.db.fetchone(
-                "SELECT * FROM personality WHERE agent_id = ?", (mem.agent_id,)
+                "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
+                (mem.tenant_id, mem.write_space),
             )
             return dict(row) if row else {}
         elif action in ("set", "preset"):

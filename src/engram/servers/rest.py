@@ -98,10 +98,16 @@ async def status():
 @app.get("/atoms/{atom_id}")
 async def get_atom(atom_id: str):
     mem = get_mem()
-    atom = mem.atomspace.get_atom(atom_id, mem.agent_id)
+    atom = mem.atomspace.get_atom(atom_id, mem.tenant_id, mem.write_space)
     if not atom:
         raise HTTPException(status_code=404, detail="Atom not found")
     return atom.model_dump()
+
+
+@app.delete("/spaces/current")
+async def clear_current_space():
+    count = get_mem().clear_space()
+    return {"status": "ok", "deleted": count}
 
 
 def run_rest_server(host: str = "0.0.0.0", port: int = 8420) -> None:

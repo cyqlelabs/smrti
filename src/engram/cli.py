@@ -67,5 +67,23 @@ def serve_rest(
     run_rest_server(host=host, port=port)
 
 
+@serve_app.command("proxy")
+def serve_proxy(
+    host: str = typer.Option("0.0.0.0", help="Host"),
+    port: int = typer.Option(8421, help="Port"),
+    upstream: str = typer.Option("", help="Upstream LLM base URL (overrides ENGRAM_UPSTREAM_URL)"),
+) -> None:
+    """Start OpenAI-compatible proxy server with transparent memory injection."""
+    if upstream:
+        os.environ["ENGRAM_UPSTREAM_URL"] = upstream.rstrip("/")
+
+    from engram.servers.proxy import run_proxy_server
+
+    effective_upstream = os.environ.get("ENGRAM_UPSTREAM_URL", "https://api.openai.com")
+    typer.echo(f"Starting Engram proxy on http://{host}:{port}/v1")
+    typer.echo(f"Upstream: {effective_upstream}")
+    run_proxy_server(host=host, port=port)
+
+
 if __name__ == "__main__":
     app()

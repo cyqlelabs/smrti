@@ -182,15 +182,16 @@ mem.set_personality("analytical")
 
 ## Personality System
 
-Five built-in presets control retrieval behavior, decay rates, and emotional dynamics:
+Six built-in presets control retrieval behavior, decay rates, and emotional dynamics:
 
-| Preset       | Bias                                       | Use Case                                 |
-| ------------ | ------------------------------------------ | ---------------------------------------- |
-| `balanced`   | Equal weights across all signals           | General-purpose agents                   |
-| `analytical` | High confidence weight, low valence        | Logical reasoning, data-driven decisions |
-| `curious`    | High STI weight, fast decay                | Exploration, novelty-seeking             |
-| `empathetic` | High valence weight, emotional propagation | Relationship-focused agents              |
-| `maverick`   | Slow decay, high propagation               | Independent, contrarian reasoning        |
+| Preset          | Bias                                       | Use Case                                 |
+| --------------- | ------------------------------------------ | ---------------------------------------- |
+| `balanced`      | Equal weights across all signals           | General-purpose agents                   |
+| `analytical`    | High confidence weight, low valence        | Logical reasoning, data-driven decisions |
+| `curious`       | High STI weight, fast decay                | Exploration, novelty-seeking             |
+| `empathetic`    | High valence weight, emotional propagation | Relationship-focused agents              |
+| `maverick`      | Slow decay, high propagation               | Independent, contrarian reasoning        |
+| `deterministic` | Fast learning, slow decay, laser focus     | Agentic workflows, code gen, deployments |
 
 Each preset tunes 16 hyperparameters affecting:
 

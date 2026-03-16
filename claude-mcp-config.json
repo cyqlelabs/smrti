@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "engram": {
+      "command": "engram",
+      "args": ["serve", "mcp"],
+      "env": {
+        "ENGRAM_DB": "~/.engram/memory.db",
+        "ENGRAM_PERSONALITY": "balanced",
+        "ENGRAM_AGENT_ID": "default"
+      }
+    }
+  }
+}

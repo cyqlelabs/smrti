@@ -1,0 +1,19 @@
+{
+  "preset_name": "maverick",
+  "description": "Very slow confidence decay = stubborn core beliefs. High STI propagation = wild associations. Charismatic: connects disparate concepts with conviction.",
+  "confidence_decay_rate": 0.005,
+  "confidence_update_lr": 0.1,
+  "min_confidence_to_surface": 0.1,
+  "sti_decay_rate": 0.15,
+  "sti_boost_on_access": 0.5,
+  "sti_propagation_factor": 0.35,
+  "lti_promotion_threshold": 0.4,
+  "valence_weight": 0.25,
+  "valence_propagation": 0.1,
+  "mood_inertia": 0.7,
+  "w_similarity": 0.20,
+  "w_sti": 0.30,
+  "w_confidence": 0.15,
+  "w_lti": 0.15,
+  "w_valence": 0.20
+}

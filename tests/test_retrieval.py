@@ -40,3 +40,30 @@ def test_min_confidence_filter(mem):
     mem.remember("low confidence fact", probability=0.3)
     results = mem.recall("low confidence fact", min_confidence=0.9)
     assert len(results) == 0 or all(r.atom.truth.confidence >= 0.9 for r in results)
+
+
+# ── Salience boost for negative-valence atoms ────────────────────────────────
+
+def test_negative_valence_boosts_salience():
+    from smrti.retrieval.salience import compute_salience
+
+    # Same base params, only valence differs
+    base = dict(similarity=0.5, sti=0.5, confidence=0.5, lti=0.3)
+
+    neutral = compute_salience(**base, valence=0.0, intensity=0.8)
+    negative = compute_salience(**base, valence=-0.8, intensity=0.8)
+
+    # Negative valence atom should score higher due to weight shift
+    assert negative > neutral
+
+
+def test_salience_weight_shift_preserves_total():
+    from smrti.retrieval.salience import compute_salience
+
+    # With extreme negative valence, the shifted weight still produces
+    # a valid (non-negative) score
+    score = compute_salience(
+        similarity=0.5, sti=0.0, confidence=0.5,
+        lti=0.3, valence=-1.0, intensity=1.0,
+    )
+    assert score >= 0

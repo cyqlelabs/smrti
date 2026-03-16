@@ -10,6 +10,7 @@ When calling this tool, you MUST:
 - Correct obvious typos ("pythn" → "Python", "k8s" → "Kubernetes")
 - Break complex statements into the most atomic form possible
 - Include emotional valence when sentiment is expressed (-1.0 to 1.0)
+- Use negative valence (-0.5 to -1.0) for errors, failures, and things to avoid
 
 The system extracts entities, assigns truth values, and links to existing knowledge.""",
         "inputSchema": {
@@ -25,7 +26,7 @@ The system extracts entities, assigns truth values, and links to existing knowle
     },
     {
         "name": "smrti_recall",
-        "description": "Retrieve relevant memories using salience-scored search. Returns memories with their truth values, confidence, and emotional context.",
+        "description": "Retrieve relevant memories using salience-scored search. Returns memories with their truth values, confidence, and emotional context. Each memory includes a `severity` field: `critical_warning` means a past mistake — DO NOT repeat; `known_antipattern` means a disproven belief — avoid this approach; `context` is neutral background.",
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -1,6 +1,6 @@
 # smrti
 
-[AtomSpace](https://wiki.opencog.org/w/AtomSpace)-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing.
+[AtomSpace](https://wiki.opencog.org/w/AtomSpace)-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing. No extra infra to maintain. Just Plug & Play.
 
 ## Features
 
@@ -67,14 +67,14 @@ smrti serve proxy          # OpenAI-compatible proxy on :8421
 
 Exposes 6 tools over stdio for direct LLM integration (Claude, etc.):
 
-| Tool | Description |
-|------|-------------|
-| `remember` | Store an observation or episode |
-| `recall` | Semantic search with salience scoring |
-| `believe` | Assert a belief with truth value |
-| `reflect` | Run a consolidation epoch |
-| `forget` | Lower confidence on a memory |
-| `status` | Get memory statistics |
+| Tool       | Description                           |
+| ---------- | ------------------------------------- |
+| `remember` | Store an observation or episode       |
+| `recall`   | Semantic search with salience scoring |
+| `believe`  | Assert a belief with truth value      |
+| `reflect`  | Run a consolidation epoch             |
+| `forget`   | Lower confidence on a memory          |
+| `status`   | Get memory statistics                 |
 
 ```bash
 smrti serve mcp
@@ -145,8 +145,9 @@ response = client.chat.completions.create(
 ```
 
 The proxy automatically:
-1. Recalls relevant memories from the specified read spaces
-2. Injects them into the system prompt before forwarding
+
+1. Recalls relevant memories from the specified read spaces (using recent conversation context, not just the last message)
+2. Classifies each memory by severity (`critical_warning`, `known_antipattern`, `context`) and injects them as structured XML tags into the system prompt
 3. Stores user messages and the assistant response as episodes
 
 Configure with:
@@ -155,6 +156,9 @@ Configure with:
 export SMRTI_UPSTREAM_URL=https://api.openai.com  # or any OpenAI-compatible API
 export SMRTI_RECALL_TOP_K=5
 export SMRTI_RECALL_MIN_CONFIDENCE=0.3
+export SMRTI_QUERY_MODE=concat        # "concat" (default) or "last" for last-message-only
+export SMRTI_QUERY_CONTEXT_MSGS=5     # number of recent messages to include in query
+export SMRTI_QUERY_MAX_CHARS=500      # max characters for the recall query
 ```
 
 ## Multi-Tenant / Space Model
@@ -180,15 +184,16 @@ mem.set_personality("analytical")
 
 Five built-in presets control retrieval behavior, decay rates, and emotional dynamics:
 
-| Preset | Bias | Use Case |
-|--------|------|----------|
-| `balanced` | Equal weights across all signals | General-purpose agents |
-| `analytical` | High confidence weight, low valence | Logical reasoning, data-driven decisions |
-| `curious` | High STI weight, fast decay | Exploration, novelty-seeking |
-| `empathetic` | High valence weight, emotional propagation | Relationship-focused agents |
-| `maverick` | Slow decay, high propagation | Independent, contrarian reasoning |
+| Preset       | Bias                                       | Use Case                                 |
+| ------------ | ------------------------------------------ | ---------------------------------------- |
+| `balanced`   | Equal weights across all signals           | General-purpose agents                   |
+| `analytical` | High confidence weight, low valence        | Logical reasoning, data-driven decisions |
+| `curious`    | High STI weight, fast decay                | Exploration, novelty-seeking             |
+| `empathetic` | High valence weight, emotional propagation | Relationship-focused agents              |
+| `maverick`   | Slow decay, high propagation               | Independent, contrarian reasoning        |
 
 Each preset tunes 16 hyperparameters affecting:
+
 - **Salience weights** — How similarity, attention, confidence, and valence contribute to retrieval ranking
 - **Belief dynamics** — Confidence decay rate, learning rate, minimum surfacing threshold
 - **Attention dynamics** — STI decay/boost, LTI promotion threshold
@@ -216,11 +221,15 @@ Each preset tunes 16 hyperparameters affecting:
 **Retrieval pipeline:** Embed query → KNN over tenant partition → filter to read spaces → 1-hop graph expansion → salience scoring → top-k
 
 **Salience formula:**
+
 ```
 S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w_val × |valence| × intensity
+
+When valence < -0.5, weight shifts dynamically from w_sti to w_val so critical errors outrank recent trivia.
 ```
 
 **Consolidation epoch** (triggered by `reflect()`):
+
 1. Process pending evidence via Bayesian update
 2. Decay STI and confidence
 3. Promote high-STI atoms to LTI
@@ -230,15 +239,16 @@ S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w
 
 ## Data Model
 
-| Atom Type | Purpose | Example |
-|-----------|---------|---------|
-| `concept` | Reusable entities | "Alice", "Python", "OpenAI" |
-| `belief` | Probabilistic facts | "Alice prefers TypeScript" |
-| `episode` | Timestamped observations | "User asked about deployment" |
-| `goal` | Desired states | "Finish the migration by Friday" |
-| `relation` | Edges between atoms | Alice → works_at → Acme Corp |
+| Atom Type  | Purpose                  | Example                          |
+| ---------- | ------------------------ | -------------------------------- |
+| `concept`  | Reusable entities        | "Alice", "Python", "OpenAI"      |
+| `belief`   | Probabilistic facts      | "Alice prefers TypeScript"       |
+| `episode`  | Timestamped observations | "User asked about deployment"    |
+| `goal`     | Desired states           | "Finish the migration by Friday" |
+| `relation` | Edges between atoms      | Alice → works_at → Acme Corp     |
 
 Each atom carries:
+
 - **TruthValue** — `probability` [0,1] and `confidence` [0,1], merged via PLN revision
 - **AttentionValue** — `sti` (short-term importance, decays fast) and `lti` (long-term, accumulates)
 - **Valence** — emotional tone [-1,1] and intensity [0,1]

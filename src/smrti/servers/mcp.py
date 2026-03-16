@@ -10,6 +10,7 @@ from mcp.server.stdio import stdio_server
 from mcp import types
 
 from smrti import Smrti
+from smrti.retrieval.classify import classify_memory
 from smrti.servers.tools import TOOLS
 
 
@@ -57,6 +58,8 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                     "sti": r.atom.attention.sti,
                     "lti": r.atom.attention.lti,
                     "valence": r.atom.valence.valence,
+                    "intensity": r.atom.valence.intensity,
+                    "severity": classify_memory(r),
                     "salience": r.salience,
                     "similarity": r.similarity,
                     "space": r.atom.space,

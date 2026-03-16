@@ -7,18 +7,38 @@ import httpx
 import pytest
 from starlette.requests import Request as StarletteRequest
 
-from smrti.servers.proxy import _inject_context, _store_exchange, _parse_request_identity, app
+from smrti.core.models import (
+    Atom,
+    AtomType,
+    AttentionValue,
+    RecallResult,
+    TruthValue,
+    Valence,
+)
+from smrti.servers.proxy import (
+    _inject_context,
+    _store_exchange,
+    _parse_request_identity,
+    _format_memory,
+    _build_query,
+    app,
+)
 
 
 def run(coro):
     return asyncio.run(coro)
 
 
-def _mem_recall_result(content, confidence=0.8):
-    r = MagicMock()
-    r.atom.content = content
-    r.atom.truth.confidence = confidence
-    return r
+def _mem_recall_result(content, confidence=0.8, valence=0.0, intensity=0.0, probability=0.8):
+    atom = Atom(
+        type=AtomType.EPISODE,
+        label=content,
+        content=content,
+        truth=TruthValue(probability=probability, confidence=confidence),
+        attention=AttentionValue(sti=0.5, lti=0.3),
+        valence=Valence(valence=valence, intensity=intensity),
+    )
+    return RecallResult(atom=atom, salience=0.5, similarity=0.7)
 
 
 def _mock_mem():
@@ -107,7 +127,7 @@ def test_inject_all_memories_appear_in_block():
     assert "User dislikes Java" in content
 
 
-def test_inject_uses_last_user_message_as_recall_query():
+def test_inject_uses_concat_query_by_default():
     body = {
         "messages": [
             {"role": "user", "content": "First question"},
@@ -124,7 +144,9 @@ def test_inject_uses_last_user_message_as_recall_query():
     with patch("smrti.servers.proxy._recall", capturing_recall):
         run(_inject_context(body, "t1", "s1", ["s1"]))
 
-    assert queries == ["Second question"]
+    assert len(queries) == 1
+    assert "First question" in queries[0]
+    assert "Second question" in queries[0]
 
 
 def test_inject_skips_multimodal_content():
@@ -413,3 +435,88 @@ def test_stream_upstream_error_yields_sse_error_frame():
     err_payload = json.loads(data_lines[0])
     assert err_payload["error"]["type"] == "proxy_error"
     assert "[DONE]" in body
+
+
+# ── _format_memory severity-aware formatting ─────────────────────────────────
+
+def test_format_critical_warning():
+    r = _mem_recall_result("Never use eval()", valence=-0.9, intensity=0.9, confidence=0.85)
+    formatted = _format_memory(r)
+    assert "<critical_warning>" in formatted
+    assert "PAST MISTAKE" in formatted
+    assert "Never use eval()" in formatted
+    assert "DO NOT repeat" in formatted
+
+
+def test_format_known_antipattern():
+    r = _mem_recall_result("This API is reliable", valence=0.0, intensity=0.0, probability=0.1, confidence=0.6)
+    formatted = _format_memory(r)
+    assert "<known_antipattern>" in formatted
+    assert "DISPROVEN" in formatted
+    assert "Avoid this approach" in formatted
+
+
+def test_format_context():
+    r = _mem_recall_result("User prefers dark mode", confidence=0.9)
+    formatted = _format_memory(r)
+    assert "<context>" in formatted
+    assert "User prefers dark mode" in formatted
+    assert "confidence=0.90" in formatted
+
+
+def test_inject_adds_warning_preamble_for_critical():
+    body = {"messages": [{"role": "user", "content": "Hello"}]}
+    memories = [_mem_recall_result("Bad deploy broke prod", valence=-0.9, intensity=0.9, confidence=0.8)]
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
+        result = run(_inject_context(body, "t1", "s1", ["s1"]))
+    content = result["messages"][0]["content"]
+    assert "MUST pay attention" in content
+    assert "<critical_warning>" in content
+
+
+def test_inject_no_preamble_for_context_only():
+    body = {"messages": [{"role": "user", "content": "Hello"}]}
+    memories = [_mem_recall_result("User likes Python", confidence=0.9)]
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
+        result = run(_inject_context(body, "t1", "s1", ["s1"]))
+    content = result["messages"][0]["content"]
+    assert "MUST pay attention" not in content
+    assert "<context>" in content
+
+
+# ── _build_query contextual reformulation ─────────────────────────────────────
+
+def test_build_query_concat_mode():
+    messages = [
+        {"role": "user", "content": "What is Python?"},
+        {"role": "assistant", "content": "A programming language."},
+        {"role": "user", "content": "How does it compare to Ruby?"},
+    ]
+    with patch("smrti.servers.proxy._QUERY_MODE", "concat"), \
+         patch("smrti.servers.proxy._QUERY_CONTEXT_MSGS", 5), \
+         patch("smrti.servers.proxy._QUERY_MAX_CHARS", 500):
+        query = _build_query(messages)
+    assert "Python" in query
+    assert "Ruby" in query
+    assert "programming language" in query
+
+
+def test_build_query_last_mode():
+    messages = [
+        {"role": "user", "content": "What is Python?"},
+        {"role": "assistant", "content": "A programming language."},
+        {"role": "user", "content": "How does it compare to Ruby?"},
+    ]
+    with patch("smrti.servers.proxy._QUERY_MODE", "last"):
+        query = _build_query(messages)
+    assert query == "How does it compare to Ruby?"
+    assert "Python" not in query
+
+
+def test_build_query_truncates_to_max_chars():
+    messages = [{"role": "user", "content": "x" * 600}]
+    with patch("smrti.servers.proxy._QUERY_MODE", "concat"), \
+         patch("smrti.servers.proxy._QUERY_CONTEXT_MSGS", 5), \
+         patch("smrti.servers.proxy._QUERY_MAX_CHARS", 100):
+        query = _build_query(messages)
+    assert len(query) <= 100

@@ -37,7 +37,7 @@ Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as
 - `db.py` — SQLite schema (WAL mode). Tables: `atoms`, `vec_atoms` (virtual vec0 for KNN), `evidence` (append-only observation log), `personality`
 - `embed.py` — Thread-safe FastEmbed singleton (BAAI/bge-small-en-v1.5, 384 dims, ONNX CPU)
 
-**Retrieval (`retrieval/`):** `fan_out.py` does KNN → 1-hop graph expansion → salience scoring. `salience.py` formula: `w_sim×sim + w_sti×sti + w_conf×conf + w_lti×lti + w_val×|valence|×intensity`
+**Retrieval (`retrieval/`):** `fan_out.py` does KNN → 1-hop graph expansion → salience scoring. `salience.py` formula: `w_sim×sim + w_sti×sti + w_conf×conf + w_lti×lti + w_val×|valence|×intensity`. When valence < -0.5, weight dynamically shifts from `w_sti` to `w_valence` so old-but-critical errors outrank recent trivia. `classify.py` classifies recall results into severity levels (`critical_warning`, `known_antipattern`, `context`) based on valence/intensity/probability thresholds.
 
 **Evolution (`evolution/`):** `epoch.py` runs consolidation cycles: process evidence log → decay STI/LTI → promote high-LTI nodes → resolve contradictions → prune low-salience atoms. `truth.py` implements PLN (Probabilistic Logic Networks) for merging independent probability estimates.
 
@@ -45,7 +45,7 @@ Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as
 
 **Personality (`personality/`):** `PersonalityProfile` dataclass with 16 hyperparameters. Five presets (`balanced`, `analytical`, `curious`, `empathetic`, `maverick`) stored as JSON in `presets/` and loaded into the `personality` DB table per tenant/space pair.
 
-**Servers (`servers/`):** `mcp.py` wraps Smrti as MCP stdio tools. `rest.py` is a FastAPI REST server. `proxy.py` is an OpenAI-compatible proxy with transparent memory injection. `tools.py` defines the 6 shared tool schemas (remember, recall, reflect, believe, forget, status).
+**Servers (`servers/`):** `mcp.py` wraps Smrti as MCP stdio tools; `handle_tool()` recall response includes `severity` and `intensity` fields. `rest.py` is a FastAPI REST server. `proxy.py` is an OpenAI-compatible proxy with severity-aware memory injection (XML tags: `<critical_warning>`, `<known_antipattern>`, `<context>`) and contextual query reformulation (configurable via `SMRTI_QUERY_MODE`, `SMRTI_QUERY_CONTEXT_MSGS`, `SMRTI_QUERY_MAX_CHARS`). `tools.py` defines the 6 shared tool schemas (remember, recall, reflect, believe, forget, status).
 
 ## Key Design Decisions
 
@@ -53,3 +53,4 @@ Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as
 - **Multi-tenant isolation:** Every query is partitioned by `tenant_id` and `space`
 - **Lazy embedding init:** FastEmbed model loads on first use, not at import time
 - **Salience over recency:** Retrieval ranks by a weighted salience score, not timestamps
+- **Error-avoidance memory:** Severe negative-valence atoms (valence < -0.7, intensity > 0.7) get an LTI floor of 0.5 on creation, preventing epoch pruning. Salience weights shift dynamically for negative-valence atoms. Recall results carry a `severity` classification used by all serving modes.

@@ -24,6 +24,13 @@ def compute_salience(
 
     STI and LTI are normalized by dividing by 2.0 and clamping to [0, 1].
     """
+    # Dynamic weight scaling: severe negative-valence atoms shift weight
+    # from STI to valence so old-but-critical errors outrank recent trivia.
+    if valence < -0.5:
+        boost = abs(valence) * intensity * 0.15
+        w_sti = max(w_sti - boost, 0.0)
+        w_valence = w_valence + boost
+
     return (
         w_similarity * similarity
         + w_sti * min(sti / 2.0, 1.0)

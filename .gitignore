@@ -10,3 +10,4 @@ venv/
 *.db-shm
 .env
 src/smrti/_version.py
+.coverage

@@ -56,7 +56,7 @@ class Smrti:
         self.extractor = extractor
         try:
             self._ignore_re: list[re.Pattern] = [
-                re.compile(p) for p in (ignore_patterns or [])
+                re.compile(p, re.MULTILINE) for p in (ignore_patterns or [])
             ]
         except re.error as exc:
             raise ValueError(f"SMRTI_IGNORE_PATTERNS contains an invalid regex: {exc}") from exc

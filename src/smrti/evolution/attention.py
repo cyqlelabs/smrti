@@ -15,7 +15,7 @@ def promote_lti(sti: float, lti: float, threshold: float) -> float:
 
 
 def propagate_sti(
-    atom_id: str, boost: float, propagation_factor: float, db, agent_id: str
+    atom_id: str, boost: float, propagation_factor: float, db, tenant_id: str
 ) -> None:
     """Spread a fraction of STI to 1-hop neighbors.
 
@@ -26,12 +26,12 @@ def propagate_sti(
         return
 
     forward = db.fetchall(
-        "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND agent_id = ?",
-        (atom_id, agent_id),
+        "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ?",
+        (atom_id, tenant_id),
     )
     backward = db.fetchall(
-        "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND agent_id = ?",
-        (atom_id, agent_id),
+        "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND tenant_id = ?",
+        (atom_id, tenant_id),
     )
 
     neighbor_ids = [r["target_id"] for r in forward if r["target_id"]]

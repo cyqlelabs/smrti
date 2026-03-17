@@ -101,12 +101,19 @@ class EntityResolver:
             (atom_id,),
         )
 
+    _ENTITY_TYPE_TO_ATOM_TYPE = {
+        "goal": "goal",
+        "preference": "belief",
+        "constraint": "belief",
+    }
+
     def _create_atom(self, name: str, entity_type: str, tenant_id: str, space: str) -> str:
         atom_id = str(uuid.uuid4())
+        atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
         self.db.execute(
             """INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti)
-               VALUES (?, 'concept', ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)""",
-            (atom_id, name, entity_type, tenant_id, space),
+               VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)""",
+            (atom_id, atom_type, name, entity_type, tenant_id, space),
         )
 
         try:

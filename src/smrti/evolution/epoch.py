@@ -136,12 +136,12 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     if epoch_count % 10 == 0:
         new_connections = discover_connections(tenant_id, space, db, embed_engine)
 
-    # 6. Prune atoms below both confidence and LTI floors (episodes are exempt)
+    # 6. Prune atoms below both confidence and LTI floors (episodes and beliefs are exempt)
     min_conf = p.get("min_confidence_to_surface", 0.1)
     dead_rows = db.fetchall(
         """SELECT id FROM atoms
            WHERE tenant_id = ? AND space = ?
-             AND confidence < ? AND lti < 0.05 AND type != 'episode'""",
+             AND confidence < ? AND lti < 0.05 AND type NOT IN ('episode', 'belief')""",
         (tenant_id, space, min_conf),
     )
     atoms_pruned = len(dead_rows)

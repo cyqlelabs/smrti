@@ -8,7 +8,7 @@ def propagate_valence(
     intensity: float,
     propagation_factor: float,
     db,
-    agent_id: str,
+    tenant_id: str,
 ) -> None:
     """Propagate emotional valence to 1-hop connected atoms, attenuated by factor.
 
@@ -22,12 +22,12 @@ def propagate_valence(
         return
 
     forward = db.fetchall(
-        "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND agent_id = ?",
-        (atom_id, agent_id),
+        "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ?",
+        (atom_id, tenant_id),
     )
     backward = db.fetchall(
-        "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND agent_id = ?",
-        (atom_id, agent_id),
+        "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND tenant_id = ?",
+        (atom_id, tenant_id),
     )
 
     neighbor_ids = [r["target_id"] for r in forward if r["target_id"]]

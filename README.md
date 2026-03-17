@@ -203,12 +203,44 @@ Six built-in presets control retrieval behavior, decay rates, and emotional dyna
 | `maverick`      | Slow decay, high propagation               | Independent, contrarian reasoning        |
 | `deterministic` | Fast learning, slow decay, laser focus     | Agentic workflows, code gen, deployments |
 
-Each preset tunes 16 hyperparameters affecting:
+Each preset tunes 16 hyperparameters. To create a custom personality, start from a preset and override individual values via the `personality` DB table or the `/personality` API endpoint.
 
-- **Salience weights** — How similarity, attention, confidence, and valence contribute to retrieval ranking
-- **Belief dynamics** — Confidence decay rate, learning rate, minimum surfacing threshold
-- **Attention dynamics** — STI decay/boost, LTI promotion threshold
-- **Emotional dynamics** — Valence weight, propagation, mood inertia
+### Hyperparameter Reference
+
+**Salience weights** — control how retrieval ranks results (should sum to ~1.0):
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `w_similarity` | 0.35 | Weight of embedding cosine similarity |
+| `w_sti` | 0.25 | Weight of short-term importance (recency/access) |
+| `w_confidence` | 0.20 | Weight of truth value confidence |
+| `w_lti` | 0.10 | Weight of long-term importance |
+| `w_valence` | 0.10 | Weight of emotional intensity (dynamically boosted when valence < -0.5) |
+
+**Belief dynamics** — govern how confidence evolves over time:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `confidence_decay_rate` | 0.02 | Per-epoch confidence decay. Higher = memories fade faster |
+| `confidence_update_lr` | 0.3 | Learning rate for PLN evidence merges. Higher = new evidence has more impact |
+| `min_confidence_to_surface` | 0.1 | Floor below which atoms are excluded from recall results |
+
+**Attention dynamics** — control what stays in focus:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `sti_decay_rate` | 0.1 | Per-epoch STI decay. Higher = faster attention loss |
+| `sti_boost_on_access` | 0.5 | STI added each time an atom is recalled. Higher = stronger recency bias |
+| `sti_propagation_factor` | 0.15 | Fraction of STI boost propagated to linked atoms. Higher = broader activation |
+| `lti_promotion_threshold` | 0.7 | Cumulative STI required to increment LTI. Higher = harder to become permanent |
+
+**Emotional dynamics** — shape how valence influences behavior:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `valence_weight` | 0.2 | Global scaling factor for emotional influence on salience |
+| `valence_propagation` | 0.1 | Fraction of valence propagated to linked atoms during epochs |
+| `mood_inertia` | 0.8 | Resistance to mood shifts (0 = reactive, 1 = stable) |
 
 ## Architecture
 

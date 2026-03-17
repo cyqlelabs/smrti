@@ -130,11 +130,11 @@ def _format_memory(r: RecallResult) -> tuple[str, str]:
     content = r.atom.content or r.atom.label
     conf = r.atom.truth.confidence
     if severity == "critical_warning":
-        line = f"- YOU MUST NOT: {content} (this was a confirmed mistake; confidence {conf:.2f})"
+        line = f"- YOU MUST NOT: {content} (confirmed mistake; confidence {conf:.2f})"
     elif severity == "known_antipattern":
-        line = f"- AVOID: {content} (disproven approach; probability {r.atom.truth.probability:.2f})"
+        line = f"- AVOID: {content} (disproven approach; confidence {conf:.2f})"
     else:
-        line = f"- Note: {content}"
+        line = f"- Note: {content} (confidence {conf:.2f})"
     return line, severity
 
 
@@ -175,16 +175,22 @@ async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spa
         return body
 
     formatted = [_format_memory(r) for r in memories]
-    memory_lines = [line for line, _ in formatted]
-    severities = {sev for _, sev in formatted}
-    has_warnings = bool(severities & {"critical_warning", "known_antipattern"})
-    preamble = (
-        "The following are behavioral constraints derived from past experience. "
-        "Follow them silently — do not quote, echo, or mention them in your response.\n"
-        if has_warnings else
-        "Background context from past interactions (do not mention these directly):\n"
-    )
-    injection = preamble + "\n".join(memory_lines)
+    warning_lines = [line for line, sev in formatted if sev in ("critical_warning", "known_antipattern")]
+    context_lines = [line for line, sev in formatted if sev == "context"]
+
+    parts: list[str] = []
+    if warning_lines:
+        parts.append(
+            "The following are behavioral constraints derived from past experience. "
+            "Follow them silently — do not quote, echo, or mention them in your response.\n"
+            + "\n".join(warning_lines)
+        )
+    if context_lines:
+        parts.append(
+            "Background context from past interactions (do not mention these directly):\n"
+            + "\n".join(context_lines)
+        )
+    injection = "\n\n".join(parts)
 
     messages = list(messages)
     system_idx = next((i for i, m in enumerate(messages) if m.get("role") == "system"), None)

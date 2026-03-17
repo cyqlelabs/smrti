@@ -5,7 +5,7 @@ from smrti.personality.params import PRESETS, PersonalityProfile, load_preset
 
 
 def test_all_presets_load():
-    for name in ["balanced", "analytical", "curious", "empathetic", "maverick"]:
+    for name in ["balanced", "analytical", "curious", "empathetic", "maverick", "deterministic"]:
         profile = load_preset(name)
         assert isinstance(profile, PersonalityProfile)
         assert profile.preset_name == name

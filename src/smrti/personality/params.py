@@ -90,6 +90,24 @@ PRESETS = {
         w_valence=0.20,
         preset_name="maverick",
     ),
+    "deterministic": PersonalityProfile(
+        confidence_decay_rate=0.005,
+        confidence_update_lr=0.4,
+        min_confidence_to_surface=0.3,
+        sti_decay_rate=0.08,
+        sti_boost_on_access=0.8,
+        sti_propagation_factor=0.05,
+        lti_promotion_threshold=0.85,
+        valence_weight=0.20,
+        valence_propagation=0.05,
+        mood_inertia=0.95,
+        w_similarity=0.35,
+        w_sti=0.10,
+        w_confidence=0.30,
+        w_lti=0.13,
+        w_valence=0.12,
+        preset_name="deterministic",
+    ),
 }
 
 

@@ -43,7 +43,7 @@ Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as
 
 **Extraction (`extraction/`):** `resolve.py` cascades entity resolution: exact match → alias lookup → fuzzy (RapidFuzz) → embedding similarity → create new.
 
-**Personality (`personality/`):** `PersonalityProfile` dataclass with 16 hyperparameters. Five presets (`balanced`, `analytical`, `curious`, `empathetic`, `maverick`) stored as JSON in `presets/` and loaded into the `personality` DB table per tenant/space pair.
+**Personality (`personality/`):** `PersonalityProfile` dataclass with 16 hyperparameters. Six presets (`balanced`, `analytical`, `curious`, `empathetic`, `maverick`, `deterministic`) stored as JSON in `presets/` and loaded into the `personality` DB table per tenant/space pair. `deterministic` is optimized for agentic workflows: fast learning (lr=0.4) + slow decay (0.005), high LTI promotion threshold (0.85), laser-focus attention (boost=0.8, propagation=0.05), and similarity-gated confidence ranking.
 
 **Servers (`servers/`):** `mcp.py` wraps Smrti as MCP stdio tools; `handle_tool()` recall response includes `severity` and `intensity` fields. `rest.py` is a FastAPI REST server. `proxy.py` is an OpenAI-compatible proxy with severity-aware memory injection (XML tags: `<critical_warning>`, `<known_antipattern>`, `<context>`) and contextual query reformulation (configurable via `SMRTI_QUERY_MODE`, `SMRTI_QUERY_CONTEXT_MSGS`, `SMRTI_QUERY_MAX_CHARS`). `tools.py` defines the 6 shared tool schemas (remember, recall, reflect, believe, forget, status).
 

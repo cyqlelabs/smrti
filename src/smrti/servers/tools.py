@@ -74,7 +74,7 @@ The system extracts entities, assigns truth values, and links to existing knowle
             "type": "object",
             "properties": {
                 "action": {"type": "string", "enum": ["get", "set", "preset"]},
-                "preset": {"type": "string", "enum": ["balanced", "analytical", "curious", "empathetic", "maverick"]},
+                "preset": {"type": "string", "enum": ["balanced", "analytical", "curious", "empathetic", "maverick", "deterministic"]},
                 "params": {"type": "object", "description": "Custom personality parameters"},
             },
             "required": ["action"],

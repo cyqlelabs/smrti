@@ -11,6 +11,10 @@ SPACE: str = os.environ.get("SMRTI_SPACE", "default")
 _read_raw: str = os.environ.get("SMRTI_READ_SPACES", "")
 READ_SPACES: list[str] | None = [s.strip() for s in _read_raw.split(",") if s.strip()] or None
 
+# Ignore patterns — newline-separated regex patterns; matching content is silently dropped
+_ignore_raw: str = os.environ.get("SMRTI_IGNORE_PATTERNS", "")
+IGNORE_PATTERNS: list[str] = [p.strip() for p in _ignore_raw.splitlines() if p.strip()]
+
 # Extraction — LLM-based entity/claim extraction after remember() calls
 EXTRACT: bool = os.environ.get("SMRTI_EXTRACT", "1") == "1"
 EXTRACT_URL: str = (

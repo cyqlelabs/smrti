@@ -23,16 +23,20 @@ def create_smrti() -> Smrti:
         tenant_id=cfg.TENANT_ID,
         write_space=cfg.SPACE,
         read_spaces=cfg.READ_SPACES,
+        ignore_patterns=cfg.IGNORE_PATTERNS or None,
     )
 
 
 def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     if name == "smrti_remember":
+        content = args["content"]
+        if mem.is_ignored(content):
+            return {"status": "ignored", "atom_id": ""}
         valence = args.get("valence")
         if valence is None or valence == 0.0:
-            valence = estimate_valence(args["content"], mem.embed)
+            valence = estimate_valence(content, mem.embed)
         atom_id = mem.remember(
-            content=args["content"],
+            content=content,
             type=args.get("type", "episode"),
             probability=args.get("probability", 0.8),
             valence=valence,

@@ -66,6 +66,7 @@ def get_mem(tenant_id: str, write_space: str) -> Smrti:
             personality=cfg.PERSONALITY,
             tenant_id=tenant_id,
             write_space=write_space,
+            ignore_patterns=cfg.IGNORE_PATTERNS or None,
         )
     return _instances[key]
 
@@ -103,6 +104,8 @@ async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: lis
 
 async def _remember(content: str, tenant_id: str, write_space: str) -> str:
     mem = get_mem(tenant_id, write_space)
+    if mem.is_ignored(content):
+        return ""
     valence = estimate_valence(content, mem.embed)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -286,6 +289,7 @@ async def _store_exchange(
             *[
                 _extract_and_link(eid, content, tenant_id, write_space, auth, model)
                 for eid, content in zip(episode_ids, to_store)
+                if eid
             ],
             return_exceptions=True,
         )

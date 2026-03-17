@@ -20,6 +20,8 @@ Consolidation happens automatically in all server modes (MCP, REST, proxy) on a 
 - **Automatic entity extraction** — all server modes build concept nodes and relation edges from stored episodes automatically (on by default; set `SMRTI_EXTRACT_MODEL` and optionally `SMRTI_EXTRACT_URL` to configure)
 - **Entity resolution** — 4-tier cascade: exact match, alias lookup, fuzzy (RapidFuzz), embedding similarity
 - **Memory visualizer** — Built-in graph explorer (`smrti serve viz`) to inspect atoms, relations, and attention weights in the browser
+
+[![Smrti Visualizer](docs/visualizer.png)](docs/visualizer.png)
 - **Zero external services** — Single SQLite file with sqlite-vec for KNN search, ONNX embeddings on CPU
 
 ## Install
@@ -68,7 +70,7 @@ smrti status
 # Start servers
 smrti serve mcp           # MCP stdio server (for Claude, etc.)
 smrti serve rest           # FastAPI on :8420
-smrti serve viz            # FastAPI on :8420 + opens memory visualizer in browser
+smrti serve viz            # FastAPI on :8420 + opens memory visualizer in browser (see screenshot above)
 smrti serve proxy          # OpenAI-compatible proxy on :8421
 ```
 

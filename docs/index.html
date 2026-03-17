@@ -620,7 +620,7 @@
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
               <span class="arch-layer-name">extraction</span>
-              <span class="arch-layer-files">resolve.py (entity resolution)</span>
+              <span class="arch-layer-files">extract.py (LLM entity/claim extraction) &middot; resolve.py (4-tier entity resolution) &middot; sentiment.py &middot; aliases.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -752,7 +752,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           </div>
           <div>
             <p class="salience-card-title">Severity classification</p>
-            <p class="salience-card-text">Each recall result carries a severity tag. The proxy server injects these as XML tags into the LLM context.</p>
+            <p class="salience-card-text">Each recall result carries a severity tag. The proxy injects memories as plain imperative instructions into the system prompt: <code style="font-family:var(--font-mono);font-size:0.85em;color:var(--accent-warm)">YOU MUST NOT</code>, <code style="font-family:var(--font-mono);font-size:0.85em;color:var(--accent-warm)">AVOID</code>, or <code style="font-family:var(--font-mono);font-size:0.85em;color:var(--accent-warm)">Note:</code></p>
             <ul class="severity-list">
               <li class="sev-crit">critical_warning &mdash; valence &lt; &minus;0.5, intensity &gt; 0.5</li>
               <li class="sev-anti">known_antipattern &mdash; probability &lt; 0.3, confidence &gt; 0.3</li>
@@ -844,24 +844,39 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
     <section class="serve-section">
       <div class="wrap">
         <p class="section-label">Serve</p>
-        <h2 class="section-title">Three modes, same engine</h2>
+        <h2 class="section-title">Four modes, same engine</h2>
+        <p class="section-text">All server modes run automatic entity extraction after every <code style="font-family:var(--font-mono);font-size:0.9em;color:var(--accent-warm)">remember()</code> call — building concept nodes and relation edges from stored episodes via LLM. Disable with <code style="font-family:var(--font-mono);font-size:0.9em;color:var(--accent-warm)">SMRTI_EXTRACT=0</code>.</p>
 
-        <div class="serve-grid">
+        <div class="serve-grid" style="margin-top:2rem">
           <div class="serve-mode">
             <div class="serve-mode-name">MCP</div>
-            <div class="serve-mode-desc">Stdio server for Claude, Cursor, and any MCP-compatible client. Tool-based interface.</div>
+            <div class="serve-mode-desc">Stdio server for Claude, Cursor, and any MCP-compatible client. Tool-based interface: remember, recall, believe, reflect, forget, status.</div>
             <div class="serve-mode-cmd">smrti serve mcp</div>
           </div>
           <div class="serve-mode">
             <div class="serve-mode-name">REST</div>
-            <div class="serve-mode-desc">FastAPI on port 8420. JSON request/response. Direct HTTP integration.</div>
+            <div class="serve-mode-desc">FastAPI on port 8420. JSON request/response. Full CRUD plus graph, spaces, and personality endpoints.</div>
             <div class="serve-mode-cmd">smrti serve rest</div>
           </div>
           <div class="serve-mode">
             <div class="serve-mode-name">Proxy</div>
-            <div class="serve-mode-desc">OpenAI-compatible on port 8421. Injects severity-tagged memories as XML into the LLM context window.</div>
+            <div class="serve-mode-desc">OpenAI-compatible on port 8421. Injects relevant memories as plain imperative instructions (<code style="font-family:var(--font-mono);font-size:0.85em">YOU MUST NOT</code>, <code style="font-family:var(--font-mono);font-size:0.85em">AVOID</code>, <code style="font-family:var(--font-mono);font-size:0.85em">Note:</code>) into the system prompt.</div>
             <div class="serve-mode-cmd">smrti serve proxy</div>
           </div>
+          <div class="serve-mode">
+            <div class="serve-mode-name">Visualizer</div>
+            <div class="serve-mode-desc">Interactive graph explorer. Inspect atoms, relations, attention weights, and valence in the browser. Auto-refresh at 2 s, 5 s, 10 s, or 30 s intervals.</div>
+            <div class="serve-mode-cmd">smrti serve viz</div>
+          </div>
+        </div>
+
+        <!-- Visualizer screenshot -->
+        <div style="margin-top:3rem">
+          <p class="section-label" style="margin-bottom:1rem">Visualizer</p>
+          <a href="visualizer.png" target="_blank" rel="noopener" style="display:block;border:1px solid var(--border);border-radius:6px;overflow:hidden;transition:border-color 200ms" onmouseover="this.style.borderColor='var(--accent)'" onmouseout="this.style.borderColor='var(--border)'">
+            <img src="visualizer.png" alt="Smrti Visualizer — graph explorer showing concept nodes, episode nodes, and typed relation edges" style="width:100%;display:block">
+          </a>
+          <p style="font-size:0.8rem;color:var(--text-dim);margin-top:0.75rem">Concept nodes (blue) linked to episodes (green) via typed edges. Node size encodes LTI. Valence-tinted stroke. Inspector panel shows full atom stats on click.</p>
         </div>
       </div>
     </section>

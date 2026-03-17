@@ -4,7 +4,7 @@
 
 ## How It Works
 
-When an agent calls `remember()`, Smrti embeds the text and stores it as a typed graph node (concept, belief, episode, or goal) carrying a Bayesian truth value, an attention weight, and an emotional valence score. Every observation is appended to an immutable evidence log — truth values are never mutated directly. In all server modes, Smrti additionally calls the LLM to extract entity/claim structure from stored episodes — resolving names via a 4-tier cascade (exact → alias → fuzzy → embedding) and building concept nodes with typed relation edges automatically. This is on by default and can be disabled with `SMRTI_EXTRACT=0`.
+When an agent calls `remember()`, Smrti embeds the text and stores it as a typed graph node (concept, belief, episode, or goal) carrying a Bayesian truth value, an attention weight, and an emotional valence score. Every observation is appended to an immutable evidence log — truth values are never mutated directly. In all server modes, Smrti additionally calls the LLM to extract entity/claim structure from stored episodes — resolving names via a 4-tier cascade (exact → alias → fuzzy → embedding) and building concept nodes with typed relation edges automatically. Before each extraction call, Smrti queries the most salient named entities already in memory (persons, organizations, projects, tools, locations, events, goals) and injects them as context so the LLM can resolve pronouns and vague references ("I" → person, "we" → organization, "the project" → project name) even across sessions. This is on by default and can be disabled with `SMRTI_EXTRACT=0`.
 
 On `recall()`, the query is embedded and matched against the tenant-partitioned vector index (sqlite-vec KNN). Results are expanded one hop through the graph, then ranked by a salience formula that blends semantic similarity, short/long-term attention, confidence, and emotional intensity. When a memory has strong negative valence (e.g. a past outage), salience weights shift dynamically so critical errors outrank recent trivia. Each result is classified as `critical_warning`, `known_antipattern`, or `context`.
 
@@ -17,7 +17,7 @@ Consolidation happens automatically in all server modes (MCP, REST, proxy) on a 
 - **Personality-driven retrieval** — 6 presets with 16 tunable hyperparameters that shape what gets surfaced
 - **Multi-tenant isolation** — Tenant/space overlay model with cross-space reads and single-space writes
 - **Three server modes** — MCP (stdio), REST API, and OpenAI-compatible proxy
-- **Automatic entity extraction** — all server modes build concept nodes and relation edges from stored episodes automatically (on by default; set `SMRTI_EXTRACT_MODEL` and optionally `SMRTI_EXTRACT_URL` to configure)
+- **Automatic entity extraction** — all server modes build concept nodes and relation edges from stored episodes automatically; cross-session coreference resolution grounds pronouns against the live memory graph (on by default; set `SMRTI_EXTRACT_MODEL` and optionally `SMRTI_EXTRACT_URL` to configure)
 - **Entity resolution** — 4-tier cascade: exact match, alias lookup, fuzzy (RapidFuzz), embedding similarity
 - **Memory visualizer** — Built-in graph explorer (`smrti serve viz`) to inspect atoms, relations, and attention weights in the browser
 
@@ -161,7 +161,7 @@ response = client.chat.completions.create(
 The proxy automatically:
 
 1. Recalls relevant memories from the specified read spaces (using recent conversation context, not just the last message)
-2. Classifies each memory by severity (`critical_warning`, `known_antipattern`, `context`) and injects them as plain imperative instructions into the system prompt (`YOU MUST NOT`, `AVOID`, `Note:`)
+2. Classifies each memory by severity and injects them as two distinct sections: behavioral constraints (`YOU MUST NOT` / `AVOID`) for `critical_warning` and `known_antipattern` memories, and background context (`Note:`) for neutral memories — each with its own preamble and confidence qualifier
 3. Stores the most recent user message and the assistant response as episodes
 4. Calls the LLM to extract entities and claims, creates concept nodes, and links them to the episode with typed relation edges (on by default; disable with `SMRTI_EXTRACT=0`)
 

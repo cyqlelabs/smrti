@@ -45,6 +45,7 @@ select, input[type="text"] {
   border-radius: 6px; padding: 4px 8px; font-size: 12px; outline: none;
 }
 select:focus, input:focus { border-color: var(--accent); }
+select.on { border-color: var(--accent); color: var(--accent); }
 select { cursor: pointer; }
 #search { width: 190px; }
 #api-base { width: 200px; font-size: 11px; }
@@ -280,6 +281,17 @@ select.slim { width: 70px; }
   <button id="btn-labels" class="on">Labels</button>
   <button id="btn-pause">⏸ Pause</button>
   <button id="btn-fit">⊙ Fit</button>
+  <div class="vsep" style="height:18px;margin:0 2px"></div>
+  <div class="fgroup">
+    <span class="lbl">Auto-refresh</span>
+    <select id="s-autorefresh" class="slim" style="width:54px">
+      <option value="0">Off</option>
+      <option value="2000">2s</option>
+      <option value="5000">5s</option>
+      <option value="10000">10s</option>
+      <option value="30000">30s</option>
+    </select>
+  </div>
 </div>
 
 <!-- ── Main ─────────────────────────────────────────────────────────── -->
@@ -474,6 +486,7 @@ const S = {
   paused: false,
   sim: null,
   zoom: null,
+  autoTimer: null,
   // expand: extra node IDs to force-include
   extra: new Set(),
 };
@@ -919,6 +932,18 @@ function bindControls() {
     S.paused = !S.paused;
     if (S.paused) { S.sim.stop(); $('btn-pause').textContent='▶ Resume'; $('btn-pause').classList.add('on'); }
     else { S.sim.alpha(0.3).restart(); $('btn-pause').textContent='⏸ Pause'; $('btn-pause').classList.remove('on'); }
+  });
+
+  $('s-autorefresh').addEventListener('change', () => {
+    clearInterval(S.autoTimer);
+    S.autoTimer = null;
+    const ms = parseInt($('s-autorefresh').value);
+    if (ms > 0) {
+      S.autoTimer = setInterval(() => { loadGraph(); loadStatus(); }, ms);
+      $('s-autorefresh').classList.add('on');
+    } else {
+      $('s-autorefresh').classList.remove('on');
+    }
   });
 
   $('btn-fit').addEventListener('click', fitGraph);

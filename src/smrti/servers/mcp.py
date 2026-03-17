@@ -10,6 +10,7 @@ from mcp.server.stdio import stdio_server
 from mcp import types
 
 from smrti import Smrti
+from smrti.extraction.sentiment import estimate_valence
 from smrti.retrieval.classify import classify_memory
 from smrti.servers.tools import TOOLS
 from smrti.servers.reflect_loop import run_reflect_loop
@@ -33,11 +34,14 @@ def create_smrti() -> Smrti:
 
 def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     if name == "smrti_remember":
+        valence = args.get("valence")
+        if valence is None or valence == 0.0:
+            valence = estimate_valence(args["content"], mem.embed)
         atom_id = mem.remember(
             content=args["content"],
             type=args.get("type", "episode"),
             probability=args.get("probability", 0.8),
-            valence=args.get("valence", 0.0),
+            valence=valence,
         )
         return {"status": "ok", "atom_id": atom_id}
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
 import httpx
@@ -14,8 +15,17 @@ from smrti import Smrti
 from smrti.core.models import RecallResult
 from smrti.retrieval.classify import classify_memory
 from smrti.servers.mcp import create_smrti
+from smrti.servers.reflect_loop import run_reflect_loop
 
-app = FastAPI(title="Smrti Proxy", version="0.1.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(run_reflect_loop(lambda: list(_instances.values())))
+    yield
+    task.cancel()
+
+
+app = FastAPI(title="Smrti Proxy", version="0.1.0", lifespan=lifespan)
 
 # Per-(tenant_id, write_space) Smrti instances
 _instances: dict[tuple[str, str], Smrti] = {}

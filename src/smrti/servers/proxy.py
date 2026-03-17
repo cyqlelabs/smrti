@@ -101,14 +101,27 @@ async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: lis
     )
 
 
-async def _remember(content: str, tenant_id: str, write_space: str) -> None:
+async def _remember(content: str, tenant_id: str, write_space: str) -> str:
     mem = get_mem(tenant_id, write_space)
     valence = estimate_valence(content, mem.embed)
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(
+    return await loop.run_in_executor(
         None,
         lambda: mem.remember(content, type="episode", probability=0.75, valence=valence),
     )
+
+
+async def _extract_and_link(
+    episode_id: str,
+    content: str,
+    tenant_id: str,
+    write_space: str,
+    auth: str,
+    model: str,
+) -> None:
+    from smrti.extraction.extract import extract_and_link
+    mem = get_mem(tenant_id, write_space)
+    await extract_and_link(episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model, cfg.EXTRACT_URL)
 
 
 def _format_memory(r: RecallResult) -> tuple[str, str]:
@@ -189,19 +202,48 @@ _MEMORY_TAG_RE = re.compile(r"<(?:critical_warning|known_antipattern|context)>.*
 
 
 async def _store_exchange(
-    messages: list[dict], assistant_text: str, tenant_id: str, write_space: str
+    messages: list[dict],
+    assistant_text: str,
+    tenant_id: str,
+    write_space: str,
+    auth: str = "",
+    model: str = "",
 ) -> None:
-    """Persist user messages and the assistant reply as episodic memories in write_space."""
-    tasks = []
-    for m in messages:
-        if m.get("role") == "user" and isinstance(m.get("content"), str):
-            tasks.append(_remember(m["content"], tenant_id, write_space))
+    """Persist the most recent user message and the assistant reply as episodic memories.
+
+    Only the last user message is stored to avoid duplicating conversation history on every
+    request (the full history is passed in messages on every turn).
+    """
+    last_user = next(
+        (m["content"] for m in reversed(messages)
+         if m.get("role") == "user" and isinstance(m.get("content"), str)),
+        None,
+    )
+    clean_assistant = ""
     if assistant_text:
         clean = _MEMORY_TAG_RE.sub("", assistant_text).strip()
         if clean:
-            tasks.append(_remember(clean, tenant_id, write_space))
-    if tasks:
-        await asyncio.gather(*tasks)
+            clean_assistant = clean
+
+    to_store: list[str] = []
+    if last_user:
+        to_store.append(last_user)
+    if clean_assistant:
+        to_store.append(clean_assistant)
+
+    if not to_store:
+        return
+
+    episode_ids = await asyncio.gather(*[_remember(c, tenant_id, write_space) for c in to_store])
+
+    if cfg.EXTRACT:
+        await asyncio.gather(
+            *[
+                _extract_and_link(eid, content, tenant_id, write_space, auth, model)
+                for eid, content in zip(episode_ids, to_store)
+            ],
+            return_exceptions=True,
+        )
 
 
 def _upstream_headers(request: Request) -> dict:
@@ -250,7 +292,9 @@ async def _non_stream_proxy(
     assistant_text = (
         data.get("choices", [{}])[0].get("message", {}).get("content", "")
     )
-    asyncio.create_task(_store_exchange(original_messages, assistant_text, tenant_id, write_space))
+    auth = headers.get("Authorization", "")
+    model = body.get("model", "")
+    asyncio.create_task(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model))
 
     passthrough_headers = {
         k: v
@@ -268,6 +312,8 @@ async def _stream_proxy(
     headers: dict,
 ) -> AsyncIterator[bytes]:
     accumulated: list[str] = []
+    auth = headers.get("Authorization", "")
+    model = body.get("model", "")
     try:
         async with get_http().stream(
             "POST", f"{_UPSTREAM}/v1/chat/completions", headers=headers, json=body
@@ -289,7 +335,7 @@ async def _stream_proxy(
 
                 if payload.strip() == "[DONE]":
                     asyncio.create_task(
-                        _store_exchange(original_messages, "".join(accumulated), tenant_id, write_space)
+                        _store_exchange(original_messages, "".join(accumulated), tenant_id, write_space, auth, model)
                     )
                     yield b"data: [DONE]\n\n"
                     return

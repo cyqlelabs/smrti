@@ -22,6 +22,7 @@ smrti init --db ~/.smrti/memory.db --personality balanced --tenant-id default --
 smrti status
 smrti serve mcp        # MCP stdio server
 smrti serve rest       # FastAPI on :8420
+smrti serve viz        # FastAPI on :8420 + opens visualizer in browser
 smrti serve proxy      # OpenAI-compatible proxy on :8421
 ```
 
@@ -34,18 +35,18 @@ Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as
 **Core layers (`core/`):**
 - `models.py` — Pydantic data structures: `Atom`, `TruthValue`, `AttentionValue`, `Valence`, `Evidence`, `RecallResult`
 - `atomspace.py` — Graph operations: add/update atoms, link atoms, boost STI
-- `db.py` — SQLite schema (WAL mode). Tables: `atoms`, `vec_atoms` (virtual vec0 for KNN), `evidence` (append-only observation log), `personality`
+- `db.py` — SQLite schema (WAL mode). Tables: `atoms`, `vec_atoms` (virtual vec0 for KNN), `evidence` (append-only observation log), `personality`, `aliases`
 - `embed.py` — Thread-safe FastEmbed singleton (paraphrase-multilingual-MiniLM-L12-v2, 384 dims, ONNX CPU, 50+ languages)
 
 **Retrieval (`retrieval/`):** `fan_out.py` does KNN → 1-hop graph expansion → salience scoring. `salience.py` formula: `w_sim×sim + w_sti×sti + w_conf×conf + w_lti×lti + w_val×|valence|×intensity`. When valence < -0.5, weight dynamically shifts from `w_sti` to `w_valence` so old-but-critical errors outrank recent trivia. `classify.py` classifies recall results into severity levels (`critical_warning`, `known_antipattern`, `context`) based on valence/intensity/probability thresholds.
 
 **Evolution (`evolution/`):** `epoch.py` runs consolidation cycles: process evidence log → decay STI/LTI → promote high-LTI nodes → resolve contradictions → prune low-salience atoms. `truth.py` implements PLN (Probabilistic Logic Networks) for merging independent probability estimates.
 
-**Extraction (`extraction/`):** `resolve.py` cascades entity resolution: exact match → alias lookup → fuzzy (RapidFuzz) → embedding similarity → create new. `sentiment.py` estimates valence via cosine similarity against positive/negative anchor embeddings — language-agnostic, used by all server modes as a fallback when callers don't provide explicit valence.
+**Extraction (`extraction/`):** `resolve.py` cascades entity resolution: exact match → alias lookup → fuzzy (RapidFuzz) → embedding similarity → create new. `sentiment.py` estimates valence via cosine similarity against positive/negative anchor embeddings — language-agnostic, used by all server modes as a fallback when callers don't provide explicit valence. `extract.py` — async LLM-based entity/claim extraction from text; called by the proxy when `SMRTI_EXTRACT=1` to auto-build concept nodes and relation edges from conversations.
 
 **Personality (`personality/`):** `PersonalityProfile` dataclass with 16 hyperparameters. Six presets (`balanced`, `analytical`, `curious`, `empathetic`, `maverick`, `deterministic`) stored as JSON in `presets/` and loaded into the `personality` DB table per tenant/space pair. `deterministic` is optimized for agentic workflows: fast learning (lr=0.4) + slow decay (0.005), high LTI promotion threshold (0.85), laser-focus attention (boost=0.8, propagation=0.05), and similarity-gated confidence ranking.
 
-**Servers (`servers/`):** `config.py` centralises all shared env-var defaults (`SMRTI_DB`, `SMRTI_PERSONALITY`, `SMRTI_TENANT_ID`, `SMRTI_SPACE`, `SMRTI_READ_SPACES`) read by all server modes. `mcp.py` wraps Smrti as MCP stdio tools; `handle_tool()` recall response includes `severity` and `intensity` fields. All three modes (MCP, REST, proxy) auto-estimate valence via `extraction/sentiment.py` when callers don't supply an explicit value, activating the error-avoidance memory path for negative content. `rest.py` is a FastAPI REST server. `proxy.py` is an OpenAI-compatible proxy with severity-aware memory injection (XML tags: `<critical_warning>`, `<known_antipattern>`, `<context>`) and contextual query reformulation (configurable via `SMRTI_QUERY_MODE`, `SMRTI_QUERY_CONTEXT_MSGS`, `SMRTI_QUERY_MAX_CHARS`). `reflect_loop.py` runs periodic background consolidation across all server modes (interval controlled by `SMRTI_REFLECT_INTERVAL`, default 60s, 0 to disable). `tools.py` defines the 6 shared tool schemas (remember, recall, reflect, believe, forget, status).
+**Servers (`servers/`):** `config.py` centralises all shared env-var defaults (`SMRTI_DB`, `SMRTI_PERSONALITY`, `SMRTI_TENANT_ID`, `SMRTI_SPACE`, `SMRTI_READ_SPACES`, `SMRTI_EXTRACT`, `SMRTI_EXTRACT_URL`, `SMRTI_EXTRACT_MODEL`) read by all server modes. `mcp.py` wraps Smrti as MCP stdio tools; `handle_tool()` recall response includes `severity` and `intensity` fields. All three modes (MCP, REST, proxy) auto-estimate valence via `extraction/sentiment.py` when callers don't supply an explicit value, activating the error-avoidance memory path for negative content. All three modes call `extraction/extract.py` after every `remember` operation to extract entities/claims and build concept nodes + relation edges (enabled by default via `SMRTI_EXTRACT`; proxy uses request auth, proxy and REST forward the request `Authorization` header; MCP passes no auth — works as-is with local LLMs). `rest.py` is a FastAPI REST server. `proxy.py` is an OpenAI-compatible proxy with severity-aware memory injection (plain imperative format: `YOU MUST NOT`, `AVOID`, `Note:`) and contextual query reformulation (configurable via `SMRTI_QUERY_MODE`, `SMRTI_QUERY_CONTEXT_MSGS`, `SMRTI_QUERY_MAX_CHARS`). `reflect_loop.py` runs periodic background consolidation across all server modes (interval controlled by `SMRTI_REFLECT_INTERVAL`, default 60s, 0 to disable). `tools.py` defines the 6 shared tool schemas (remember, recall, reflect, believe, forget, status).
 
 ## Key Design Decisions
 

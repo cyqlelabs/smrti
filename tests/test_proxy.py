@@ -166,6 +166,10 @@ def test_inject_skips_multimodal_content():
 
 # ── _store_exchange ───────────────────────────────────────────────────────────
 
+async def _noop_remember(content, tenant_id, write_space):
+    return "atom-id"
+
+
 def test_store_saves_user_messages_and_assistant_reply():
     messages = [
         {"role": "system", "content": "Be helpful."},
@@ -175,6 +179,7 @@ def test_store_saves_user_messages_and_assistant_reply():
 
     async def capturing_remember(content, tenant_id, write_space):
         stored.append(content)
+        return "atom-id"
 
     with patch("smrti.servers.proxy._remember", capturing_remember):
         run(_store_exchange(messages, "Python is a language.", "t1", "s1"))
@@ -184,12 +189,34 @@ def test_store_saves_user_messages_and_assistant_reply():
     assert "Be helpful." not in stored
 
 
+def test_store_only_saves_last_user_message():
+    """Historical messages must not be re-stored on every request (O(n²) duplicate prevention)."""
+    messages = [
+        {"role": "user", "content": "First message"},
+        {"role": "assistant", "content": "First reply"},
+        {"role": "user", "content": "Second message"},
+    ]
+    stored = []
+
+    async def capturing_remember(content, tenant_id, write_space):
+        stored.append(content)
+        return "atom-id"
+
+    with patch("smrti.servers.proxy._remember", capturing_remember):
+        run(_store_exchange(messages, "Final reply", "t1", "s1"))
+
+    assert "Second message" in stored
+    assert "First message" not in stored
+    assert "Final reply" in stored
+
+
 def test_store_skips_empty_assistant_text():
     messages = [{"role": "user", "content": "Hello"}]
     stored = []
 
     async def capturing_remember(content, tenant_id, write_space):
         stored.append(content)
+        return "atom-id"
 
     with patch("smrti.servers.proxy._remember", capturing_remember):
         run(_store_exchange(messages, "", "t1", "s1"))
@@ -202,6 +229,7 @@ def test_store_nothing_when_empty():
 
     async def capturing_remember(content, tenant_id, write_space):
         stored.append(content)
+        return "atom-id"
 
     with patch("smrti.servers.proxy._remember", capturing_remember):
         run(_store_exchange([], "", "t1", "s1"))
@@ -215,11 +243,49 @@ def test_store_passes_tenant_and_space():
 
     async def capturing_remember(content, tenant_id, write_space):
         calls.append((tenant_id, write_space))
+        return "atom-id"
 
     with patch("smrti.servers.proxy._remember", capturing_remember):
         run(_store_exchange(messages, "Hello back", "usr_alice", "agent:coder"))
 
     assert all(c == ("usr_alice", "agent:coder") for c in calls)
+
+
+def test_store_extracts_entities_when_enabled():
+    """When extraction is enabled, _extract_and_link is called for stored content."""
+    messages = [{"role": "user", "content": "My name is Nico"}]
+    extract_calls = []
+
+    async def capturing_remember(content, tenant_id, write_space):
+        return "episode-abc"
+
+    async def capturing_extract(episode_id, content, tenant_id, write_space, auth, model):
+        extract_calls.append((episode_id, content, auth, model))
+
+    with patch("smrti.servers.proxy._remember", capturing_remember), \
+         patch("smrti.servers.proxy._extract_and_link", capturing_extract), \
+         patch("smrti.servers.proxy.cfg") as mock_cfg:
+        mock_cfg.EXTRACT = True
+        run(_store_exchange(messages, "", "t1", "s1", auth="Bearer sk-test", model="gpt-4o"))
+
+    assert len(extract_calls) == 1
+    assert extract_calls[0] == ("episode-abc", "My name is Nico", "Bearer sk-test", "gpt-4o")
+
+
+def test_store_skips_extraction_when_disabled():
+    messages = [{"role": "user", "content": "My name is Nico"}]
+    extract_calls = []
+
+    async def capturing_extract(episode_id, content, tenant_id, write_space, auth, model):
+        extract_calls.append(content)
+
+    with patch("smrti.servers.proxy._remember", _noop_remember), \
+         patch("smrti.servers.proxy._extract_and_link", capturing_extract), \
+         patch("smrti.servers.proxy.cfg") as mock_cfg:
+        mock_cfg.EXTRACT = False
+        run(_store_exchange(messages, "", "t1", "s1", auth="Bearer sk-test", model="gpt-4o"))
+
+    assert extract_calls == []
 
 
 # ── _parse_request_identity ───────────────────────────────────────────────────

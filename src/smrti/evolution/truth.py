@@ -1,7 +1,7 @@
 """Bayesian truth maintenance."""
 from __future__ import annotations
 
-from engram.core.models import TruthValue
+from smrti.core.models import TruthValue
 
 
 def update_truth(

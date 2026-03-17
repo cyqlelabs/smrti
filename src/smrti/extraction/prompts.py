@@ -1,4 +1,4 @@
-EXTRACTION_PROMPT = """You are Engram's extraction engine. Extract structured knowledge from the user's input.
+EXTRACTION_PROMPT = """You are Smrti's extraction engine. Extract structured knowledge from the user's input.
 
 RULES:
 1. COREFERENCE RESOLUTION IS MANDATORY: Never extract pronouns ("he", "it", "they").

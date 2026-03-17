@@ -1,9 +1,9 @@
 """Consolidation epoch: the main memory evolution loop."""
 from __future__ import annotations
 
-from engram.core.models import EpochResult, TruthValue
-from engram.evolution.connections import discover_connections
-from engram.evolution.truth import update_truth
+from smrti.core.models import EpochResult, TruthValue
+from smrti.evolution.connections import discover_connections
+from smrti.evolution.truth import update_truth
 
 
 def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:

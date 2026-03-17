@@ -4,14 +4,14 @@ import tempfile
 
 import pytest
 
-from engram import Engram
+from smrti import Smrti
 
 
 @pytest.fixture
 def mem():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
-    engine = Engram(db_path=db_path, personality="balanced", tenant_id="test", write_space="default")
+    engine = Smrti(db_path=db_path, personality="balanced", tenant_id="test", write_space="default")
     yield engine
     engine.close()
     os.unlink(db_path)

@@ -4,10 +4,10 @@ import tempfile
 
 import pytest
 
-from engram.core.atomspace import AtomSpace
-from engram.core.db import Database
-from engram.core.embed import EmbeddingProvider
-from engram.core.models import Atom, AtomType, EntityType, TruthValue
+from smrti.core.atomspace import AtomSpace
+from smrti.core.db import Database
+from smrti.core.embed import EmbeddingProvider
+from smrti.core.models import Atom, AtomType, EntityType, TruthValue
 
 
 @pytest.fixture

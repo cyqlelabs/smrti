@@ -2,7 +2,7 @@
 
 TOOLS = [
     {
-        "name": "engram_remember",
+        "name": "smrti_remember",
         "description": """Store a memory, belief, or observation.
 
 When calling this tool, you MUST:
@@ -24,7 +24,7 @@ The system extracts entities, assigns truth values, and links to existing knowle
         },
     },
     {
-        "name": "engram_recall",
+        "name": "smrti_recall",
         "description": "Retrieve relevant memories using salience-scored search. Returns memories with their truth values, confidence, and emotional context.",
         "inputSchema": {
             "type": "object",
@@ -37,12 +37,12 @@ The system extracts entities, assigns truth values, and links to existing knowle
         },
     },
     {
-        "name": "engram_reflect",
+        "name": "smrti_reflect",
         "description": "Trigger a consolidation pass. Updates beliefs based on evidence, decays attention, discovers new connections. Returns a summary of changes.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "engram_believe",
+        "name": "smrti_believe",
         "description": "Assert or update a specific belief with a truth value. If the belief contradicts existing knowledge, creates a contradiction link.",
         "inputSchema": {
             "type": "object",
@@ -55,7 +55,7 @@ The system extracts entities, assigns truth values, and links to existing knowle
         },
     },
     {
-        "name": "engram_forget",
+        "name": "smrti_forget",
         "description": "Lower confidence on a memory or belief. Does not hard-delete — the consolidation epoch handles pruning.",
         "inputSchema": {
             "type": "object",
@@ -67,7 +67,7 @@ The system extracts entities, assigns truth values, and links to existing knowle
         },
     },
     {
-        "name": "engram_personality",
+        "name": "smrti_personality",
         "description": "Get or set the agent's personality profile. Affects how memories are scored, how fast beliefs change, and emotional reactivity.",
         "inputSchema": {
             "type": "object",
@@ -80,7 +80,7 @@ The system extracts entities, assigns truth values, and links to existing knowle
         },
     },
     {
-        "name": "engram_status",
+        "name": "smrti_status",
         "description": "Get memory statistics: total atoms, active beliefs, emotional state, attention distribution.",
         "inputSchema": {"type": "object", "properties": {}},
     },

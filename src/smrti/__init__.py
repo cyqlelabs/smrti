@@ -1,13 +1,13 @@
-"""Engram: AtomSpace-inspired memory + personality engine for AI agents."""
+"""Smrti: AtomSpace-inspired memory + personality engine for AI agents."""
 
 from __future__ import annotations
 
 import os
 
-from engram.core.db import Database
-from engram.core.embed import EmbeddingProvider
-from engram.core.atomspace import AtomSpace
-from engram.core.models import (
+from smrti.core.db import Database
+from smrti.core.embed import EmbeddingProvider
+from smrti.core.atomspace import AtomSpace
+from smrti.core.models import (
     Atom,
     AtomType,
     AttentionValue,
@@ -19,16 +19,16 @@ from engram.core.models import (
     Valence,
     atom_from_row,
 )
-from engram.extraction.resolve import EntityResolver
-from engram.retrieval.fan_out import retrieve
-from engram.evolution.epoch import run_epoch
-from engram.personality.params import PersonalityProfile, load_preset
+from smrti.extraction.resolve import EntityResolver
+from smrti.retrieval.fan_out import retrieve
+from smrti.evolution.epoch import run_epoch
+from smrti.personality.params import PersonalityProfile, load_preset
 
 
-class Engram:
+class Smrti:
     def __init__(
         self,
-        db_path: str = "~/.engram/memory.db",
+        db_path: str = "~/.smrti/memory.db",
         personality: str = "balanced",
         tenant_id: str = "default",
         write_space: str = "default",

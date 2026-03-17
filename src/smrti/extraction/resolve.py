@@ -32,7 +32,7 @@ class EntityResolver:
         self.fuzzy_threshold = fuzzy_threshold
         self.cosine_threshold = cosine_threshold
 
-        from engram.extraction.aliases import AliasManager
+        from smrti.extraction.aliases import AliasManager
         self.aliases = AliasManager(db)
 
     def resolve(

@@ -1,7 +1,7 @@
 """Tests for personality presets."""
 import pytest
 
-from engram.personality.params import PRESETS, PersonalityProfile, load_preset
+from smrti.personality.params import PRESETS, PersonalityProfile, load_preset
 
 
 def test_all_presets_load():

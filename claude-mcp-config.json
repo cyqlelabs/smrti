@@ -1,12 +1,12 @@
 {
   "mcpServers": {
-    "engram": {
-      "command": "engram",
+    "smrti": {
+      "command": "smrti",
       "args": ["serve", "mcp"],
       "env": {
-        "ENGRAM_DB": "~/.engram/memory.db",
-        "ENGRAM_PERSONALITY": "balanced",
-        "ENGRAM_AGENT_ID": "default"
+        "SMRTI_DB": "~/.smrti/memory.db",
+        "SMRTI_PERSONALITY": "balanced",
+        "SMRTI_AGENT_ID": "default"
       }
     }
   }

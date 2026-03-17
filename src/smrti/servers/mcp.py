@@ -1,4 +1,4 @@
-"""MCP server for engram (stdio transport)."""
+"""MCP server for smrti (stdio transport)."""
 from __future__ import annotations
 
 import asyncio
@@ -9,18 +9,18 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 
-from engram import Engram
-from engram.servers.tools import TOOLS
+from smrti import Smrti
+from smrti.servers.tools import TOOLS
 
 
-def create_engram() -> Engram:
-    db_path = os.environ.get("ENGRAM_DB", "~/.engram/memory.db")
-    personality = os.environ.get("ENGRAM_PERSONALITY", "balanced")
-    tenant_id = os.environ.get("ENGRAM_TENANT_ID", "default")
-    write_space = os.environ.get("ENGRAM_SPACE", "default")
-    read_spaces_raw = os.environ.get("ENGRAM_READ_SPACES", "")
+def create_smrti() -> Smrti:
+    db_path = os.environ.get("SMRTI_DB", "~/.smrti/memory.db")
+    personality = os.environ.get("SMRTI_PERSONALITY", "balanced")
+    tenant_id = os.environ.get("SMRTI_TENANT_ID", "default")
+    write_space = os.environ.get("SMRTI_SPACE", "default")
+    read_spaces_raw = os.environ.get("SMRTI_READ_SPACES", "")
     read_spaces = [s.strip() for s in read_spaces_raw.split(",") if s.strip()] or None
-    return Engram(
+    return Smrti(
         db_path=db_path,
         personality=personality,
         tenant_id=tenant_id,
@@ -29,8 +29,8 @@ def create_engram() -> Engram:
     )
 
 
-def handle_tool(mem: Engram, name: str, args: dict) -> dict:
-    if name == "engram_remember":
+def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
+    if name == "smrti_remember":
         atom_id = mem.remember(
             content=args["content"],
             type=args.get("type", "episode"),
@@ -39,7 +39,7 @@ def handle_tool(mem: Engram, name: str, args: dict) -> dict:
         )
         return {"status": "ok", "atom_id": atom_id}
 
-    elif name == "engram_recall":
+    elif name == "smrti_recall":
         results = mem.recall(
             query=args["query"],
             top_k=args.get("top_k", 10),
@@ -65,11 +65,11 @@ def handle_tool(mem: Engram, name: str, args: dict) -> dict:
             ]
         }
 
-    elif name == "engram_reflect":
+    elif name == "smrti_reflect":
         result = mem.reflect()
         return result.model_dump()
 
-    elif name == "engram_believe":
+    elif name == "smrti_believe":
         atom_id = mem.believe(
             statement=args["statement"],
             probability=args["probability"],
@@ -77,7 +77,7 @@ def handle_tool(mem: Engram, name: str, args: dict) -> dict:
         )
         return {"status": "ok", "atom_id": atom_id}
 
-    elif name == "engram_forget":
+    elif name == "smrti_forget":
         results = mem.recall(query=args["query"], top_k=5)
         forgotten = []
         for r in results:
@@ -88,7 +88,7 @@ def handle_tool(mem: Engram, name: str, args: dict) -> dict:
             forgotten.append(r.atom.label)
         return {"status": "ok", "softened": forgotten}
 
-    elif name == "engram_personality":
+    elif name == "smrti_personality":
         action = args["action"]
         if action == "get":
             row = mem.db.fetchone(
@@ -101,7 +101,7 @@ def handle_tool(mem: Engram, name: str, args: dict) -> dict:
             mem.set_personality(preset)
             return {"status": "ok", "preset": preset}
 
-    elif name == "engram_status":
+    elif name == "smrti_status":
         return mem.status()
 
     return {"error": f"Unknown tool: {name}"}
@@ -109,8 +109,8 @@ def handle_tool(mem: Engram, name: str, args: dict) -> dict:
 
 def run_mcp_server() -> None:
     """Run the MCP server over stdio."""
-    server = Server("engram")
-    mem = create_engram()
+    server = Server("smrti")
+    mem = create_smrti()
 
     @server.list_tools()
     async def list_tools() -> list[types.Tool]:

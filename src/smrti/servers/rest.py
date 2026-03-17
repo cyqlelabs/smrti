@@ -1,4 +1,4 @@
-"""FastAPI REST server for engram."""
+"""FastAPI REST server for smrti."""
 from __future__ import annotations
 
 from typing import Optional
@@ -6,22 +6,22 @@ from typing import Optional
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from engram import Engram
-from engram.servers.mcp import create_engram, handle_tool
+from smrti import Smrti
+from smrti.servers.mcp import create_smrti, handle_tool
 
 app = FastAPI(
-    title="Engram Memory API",
+    title="Smrti Memory API",
     description="AtomSpace-inspired memory engine for AI agents",
     version="0.1.0",
 )
 
-_mem: Optional[Engram] = None
+_mem: Optional[Smrti] = None
 
 
-def get_mem() -> Engram:
+def get_mem() -> Smrti:
     global _mem
     if _mem is None:
-        _mem = create_engram()
+        _mem = create_smrti()
     return _mem
 
 
@@ -57,42 +57,42 @@ class PersonalityRequest(BaseModel):
 
 @app.post("/remember")
 async def remember(req: RememberRequest):
-    return handle_tool(get_mem(), "engram_remember", req.model_dump())
+    return handle_tool(get_mem(), "smrti_remember", req.model_dump())
 
 
 @app.post("/recall")
 async def recall(req: RecallRequest):
-    return handle_tool(get_mem(), "engram_recall", req.model_dump())
+    return handle_tool(get_mem(), "smrti_recall", req.model_dump())
 
 
 @app.post("/reflect")
 async def reflect():
-    return handle_tool(get_mem(), "engram_reflect", {})
+    return handle_tool(get_mem(), "smrti_reflect", {})
 
 
 @app.post("/believe")
 async def believe(req: BelieveRequest):
-    return handle_tool(get_mem(), "engram_believe", req.model_dump())
+    return handle_tool(get_mem(), "smrti_believe", req.model_dump())
 
 
 @app.post("/forget")
 async def forget(req: ForgetRequest):
-    return handle_tool(get_mem(), "engram_forget", req.model_dump())
+    return handle_tool(get_mem(), "smrti_forget", req.model_dump())
 
 
 @app.get("/personality")
 async def get_personality():
-    return handle_tool(get_mem(), "engram_personality", {"action": "get"})
+    return handle_tool(get_mem(), "smrti_personality", {"action": "get"})
 
 
 @app.put("/personality")
 async def set_personality(req: PersonalityRequest):
-    return handle_tool(get_mem(), "engram_personality", req.model_dump())
+    return handle_tool(get_mem(), "smrti_personality", req.model_dump())
 
 
 @app.get("/status")
 async def status():
-    return handle_tool(get_mem(), "engram_status", {})
+    return handle_tool(get_mem(), "smrti_status", {})
 
 
 @app.get("/atoms/{atom_id}")

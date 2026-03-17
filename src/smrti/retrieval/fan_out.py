@@ -3,8 +3,8 @@ from __future__ import annotations
 
 import struct
 
-from engram.core.models import RecallResult, atom_from_row
-from engram.retrieval.salience import compute_salience
+from smrti.core.models import RecallResult, atom_from_row
+from smrti.retrieval.salience import compute_salience
 
 
 def retrieve(

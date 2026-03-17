@@ -7,7 +7,7 @@ import httpx
 import pytest
 from starlette.requests import Request as StarletteRequest
 
-from engram.servers.proxy import _inject_context, _store_exchange, _parse_request_identity, app
+from smrti.servers.proxy import _inject_context, _store_exchange, _parse_request_identity, app
 
 
 def run(coro):
@@ -47,26 +47,26 @@ def _starlette_request(headers: dict = None):
 
 def test_inject_no_messages_returns_body_unchanged():
     body = {"model": "gpt-4o", "messages": []}
-    with patch("engram.servers.proxy._recall", AsyncMock(return_value=[])):
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=[])):
         assert run(_inject_context(body, "t1", "s1", ["s1"])) == body
 
 
 def test_inject_no_user_message_returns_body_unchanged():
     body = {"messages": [{"role": "system", "content": "Be helpful."}]}
-    with patch("engram.servers.proxy._recall", AsyncMock(return_value=[])):
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=[])):
         assert run(_inject_context(body, "t1", "s1", ["s1"])) == body
 
 
 def test_inject_no_memories_returns_body_unchanged():
     body = {"messages": [{"role": "user", "content": "Hello"}]}
-    with patch("engram.servers.proxy._recall", AsyncMock(return_value=[])):
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=[])):
         assert run(_inject_context(body, "t1", "s1", ["s1"])) == body
 
 
 def test_inject_creates_system_message_when_none_exists():
     body = {"messages": [{"role": "user", "content": "Tell me about Python"}]}
     memories = [_mem_recall_result("User prefers Python", 0.9)]
-    with patch("engram.servers.proxy._recall", AsyncMock(return_value=memories)):
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
         result = run(_inject_context(body, "t1", "s1", ["s1"]))
 
     msgs = result["messages"]
@@ -85,7 +85,7 @@ def test_inject_appends_to_existing_system_message():
         ]
     }
     memories = [_mem_recall_result("User works on ML", 0.85)]
-    with patch("engram.servers.proxy._recall", AsyncMock(return_value=memories)):
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
         result = run(_inject_context(body, "t1", "s1", ["s1"]))
 
     content = result["messages"][0]["content"]
@@ -99,7 +99,7 @@ def test_inject_all_memories_appear_in_block():
         _mem_recall_result("User likes Python", 0.9),
         _mem_recall_result("User dislikes Java", 0.7),
     ]
-    with patch("engram.servers.proxy._recall", AsyncMock(return_value=memories)):
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
         result = run(_inject_context(body, "t1", "s1", ["s1", "global"]))
 
     content = result["messages"][0]["content"]
@@ -121,7 +121,7 @@ def test_inject_uses_last_user_message_as_recall_query():
         queries.append(query)
         return []
 
-    with patch("engram.servers.proxy._recall", capturing_recall):
+    with patch("smrti.servers.proxy._recall", capturing_recall):
         run(_inject_context(body, "t1", "s1", ["s1"]))
 
     assert queries == ["Second question"]
@@ -137,7 +137,7 @@ def test_inject_skips_multimodal_content():
     async def should_not_be_called(query, tenant_id, write_space, read_spaces):
         pytest.fail("_recall must not be called for non-string content")
 
-    with patch("engram.servers.proxy._recall", should_not_be_called):
+    with patch("smrti.servers.proxy._recall", should_not_be_called):
         result = run(_inject_context(body, "t1", "s1", ["s1"]))
 
     assert result == body
@@ -155,7 +155,7 @@ def test_store_saves_user_messages_and_assistant_reply():
     async def capturing_remember(content, tenant_id, write_space):
         stored.append(content)
 
-    with patch("engram.servers.proxy._remember", capturing_remember):
+    with patch("smrti.servers.proxy._remember", capturing_remember):
         run(_store_exchange(messages, "Python is a language.", "t1", "s1"))
 
     assert "What is Python?" in stored
@@ -170,7 +170,7 @@ def test_store_skips_empty_assistant_text():
     async def capturing_remember(content, tenant_id, write_space):
         stored.append(content)
 
-    with patch("engram.servers.proxy._remember", capturing_remember):
+    with patch("smrti.servers.proxy._remember", capturing_remember):
         run(_store_exchange(messages, "", "t1", "s1"))
 
     assert stored == ["Hello"]
@@ -182,7 +182,7 @@ def test_store_nothing_when_empty():
     async def capturing_remember(content, tenant_id, write_space):
         stored.append(content)
 
-    with patch("engram.servers.proxy._remember", capturing_remember):
+    with patch("smrti.servers.proxy._remember", capturing_remember):
         run(_store_exchange([], "", "t1", "s1"))
 
     assert stored == []
@@ -195,7 +195,7 @@ def test_store_passes_tenant_and_space():
     async def capturing_remember(content, tenant_id, write_space):
         calls.append((tenant_id, write_space))
 
-    with patch("engram.servers.proxy._remember", capturing_remember):
+    with patch("smrti.servers.proxy._remember", capturing_remember):
         run(_store_exchange(messages, "Hello back", "usr_alice", "agent:coder"))
 
     assert all(c == ("usr_alice", "agent:coder") for c in calls)
@@ -205,11 +205,11 @@ def test_store_passes_tenant_and_space():
 
 def test_identity_reads_all_three_headers():
     request = _starlette_request({
-        "x-engram-tenant-id": "usr_alice",
-        "x-engram-write-space": "agent:coder",
-        "x-engram-read-spaces": "agent:coder, project:alpha, global",
+        "x-smrti-tenant-id": "usr_alice",
+        "x-smrti-write-space": "agent:coder",
+        "x-smrti-read-spaces": "agent:coder, project:alpha, global",
     })
-    with patch("engram.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
+    with patch("smrti.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
         tenant, write, read = _parse_request_identity(request)
 
     assert tenant == "usr_alice"
@@ -219,7 +219,7 @@ def test_identity_reads_all_three_headers():
 
 def test_identity_defaults_to_bootstrap_values():
     request = _starlette_request({})
-    with patch("engram.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
+    with patch("smrti.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
         tenant, write, read = _parse_request_identity(request)
 
     assert tenant == "default"
@@ -229,10 +229,10 @@ def test_identity_defaults_to_bootstrap_values():
 
 def test_identity_read_spaces_defaults_to_write_space():
     request = _starlette_request({
-        "x-engram-tenant-id": "usr_bob",
-        "x-engram-write-space": "agent:journal",
+        "x-smrti-tenant-id": "usr_bob",
+        "x-smrti-write-space": "agent:journal",
     })
-    with patch("engram.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
+    with patch("smrti.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
         _, write, read = _parse_request_identity(request)
 
     assert write == "agent:journal"
@@ -262,10 +262,10 @@ def test_non_stream_returns_upstream_response():
 
     async def run_test():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            with patch("engram.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
-                with patch("engram.servers.proxy.get_mem", return_value=_mock_mem()):
-                    with patch("engram.servers.proxy.get_http", return_value=mock_client):
-                        with patch("engram.servers.proxy._store_exchange", new_callable=AsyncMock):
+            with patch("smrti.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
+                with patch("smrti.servers.proxy.get_mem", return_value=_mock_mem()):
+                    with patch("smrti.servers.proxy.get_http", return_value=mock_client):
+                        with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
                             return await client.post(
                                 "/v1/chat/completions",
                                 json={"model": "gpt-4o", "messages": [{"role": "user", "content": "Hi"}]},
@@ -282,10 +282,10 @@ def test_non_stream_forwards_auth_header():
 
     async def run_test():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            with patch("engram.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
-                with patch("engram.servers.proxy.get_mem", return_value=_mock_mem()):
-                    with patch("engram.servers.proxy.get_http", return_value=mock_client):
-                        with patch("engram.servers.proxy._store_exchange", new_callable=AsyncMock):
+            with patch("smrti.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
+                with patch("smrti.servers.proxy.get_mem", return_value=_mock_mem()):
+                    with patch("smrti.servers.proxy.get_http", return_value=mock_client):
+                        with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
                             await client.post(
                                 "/v1/chat/completions",
                                 json={"model": "gpt-4o", "messages": [{"role": "user", "content": "Hi"}]},
@@ -307,10 +307,10 @@ def test_non_stream_injects_memories_into_upstream_request():
 
     async def run_test():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            with patch("engram.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
-                with patch("engram.servers.proxy.get_mem", return_value=mock_mem):
-                    with patch("engram.servers.proxy.get_http", return_value=mock_client):
-                        with patch("engram.servers.proxy._store_exchange", new_callable=AsyncMock):
+            with patch("smrti.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
+                with patch("smrti.servers.proxy.get_mem", return_value=mock_mem):
+                    with patch("smrti.servers.proxy.get_http", return_value=mock_client):
+                        with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
                             await client.post(
                                 "/v1/chat/completions",
                                 json={"model": "gpt-4o", "messages": [{"role": "user", "content": "Hello"}]},
@@ -354,10 +354,10 @@ def test_stream_passes_through_sse_chunks():
 
     async def run_test():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            with patch("engram.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
-                with patch("engram.servers.proxy.get_mem", return_value=_mock_mem()):
-                    with patch("engram.servers.proxy.get_http", return_value=_mock_stream_client(sse)):
-                        with patch("engram.servers.proxy._store_exchange", new_callable=AsyncMock):
+            with patch("smrti.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
+                with patch("smrti.servers.proxy.get_mem", return_value=_mock_mem()):
+                    with patch("smrti.servers.proxy.get_http", return_value=_mock_stream_client(sse)):
+                        with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
                             return await client.post(
                                 "/v1/chat/completions",
                                 json={
@@ -393,10 +393,10 @@ def test_stream_upstream_error_yields_sse_error_frame():
 
     async def run_test():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://test") as client:
-            with patch("engram.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
-                with patch("engram.servers.proxy.get_mem", return_value=_mock_mem()):
-                    with patch("engram.servers.proxy.get_http", return_value=mock_client):
-                        with patch("engram.servers.proxy._store_exchange", new_callable=AsyncMock):
+            with patch("smrti.servers.proxy._bootstrap", return_value=("default", "default", "/tmp/t.db")):
+                with patch("smrti.servers.proxy.get_mem", return_value=_mock_mem()):
+                    with patch("smrti.servers.proxy.get_http", return_value=mock_client):
+                        with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
                             return await client.post(
                                 "/v1/chat/completions",
                                 json={

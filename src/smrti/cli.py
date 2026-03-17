@@ -1,26 +1,26 @@
-"""CLI for engram: engram serve mcp|rest|proxy, engram init, engram status."""
+"""CLI for smrti: smrti serve mcp|rest|proxy, smrti init, smrti status."""
 from __future__ import annotations
 
 import os
 
 import typer
 
-app = typer.Typer(help="Engram memory engine CLI")
+app = typer.Typer(help="Smrti memory engine CLI")
 
 
 @app.command()
 def init(
-    db: str = typer.Option("~/.engram/memory.db", help="Path to SQLite database"),
+    db: str = typer.Option("~/.smrti/memory.db", help="Path to SQLite database"),
     personality: str = typer.Option("balanced", help="Personality preset"),
     tenant_id: str = typer.Option("default", help="Tenant ID"),
     space: str = typer.Option("default", help="Memory space"),
 ) -> None:
-    """Initialize a new Engram memory store."""
-    from engram import Engram
+    """Initialize a new Smrti memory store."""
+    from smrti import Smrti
 
-    mem = Engram(db_path=db, personality=personality, tenant_id=tenant_id, write_space=space)
+    mem = Smrti(db_path=db, personality=personality, tenant_id=tenant_id, write_space=space)
     s = mem.status()
-    typer.echo(f"Initialized Engram at {os.path.expanduser(db)}")
+    typer.echo(f"Initialized Smrti at {os.path.expanduser(db)}")
     typer.echo(f"Tenant: {tenant_id} | Space: {space} | Personality: {personality}")
     typer.echo(f"Total atoms: {s['total_atoms']}")
     mem.close()
@@ -28,14 +28,14 @@ def init(
 
 @app.command()
 def status(
-    db: str = typer.Option("~/.engram/memory.db", help="Path to SQLite database"),
+    db: str = typer.Option("~/.smrti/memory.db", help="Path to SQLite database"),
     tenant_id: str = typer.Option("default", help="Tenant ID"),
     space: str = typer.Option("default", help="Memory space"),
 ) -> None:
     """Show memory statistics."""
-    from engram import Engram
+    from smrti import Smrti
 
-    mem = Engram(db_path=db, tenant_id=tenant_id, write_space=space)
+    mem = Smrti(db_path=db, tenant_id=tenant_id, write_space=space)
     s = mem.status()
     typer.echo(f"Total atoms: {s['total_atoms']}")
     typer.echo(f"By type: {s['by_type']}")
@@ -52,7 +52,7 @@ app.add_typer(serve_app, name="serve")
 @serve_app.command("mcp")
 def serve_mcp() -> None:
     """Start MCP stdio server."""
-    from engram.servers.mcp import run_mcp_server
+    from smrti.servers.mcp import run_mcp_server
 
     run_mcp_server()
 
@@ -63,9 +63,9 @@ def serve_rest(
     port: int = typer.Option(8420, help="Port"),
 ) -> None:
     """Start REST API server."""
-    from engram.servers.rest import run_rest_server
+    from smrti.servers.rest import run_rest_server
 
-    typer.echo(f"Starting Engram REST API on http://{host}:{port}")
+    typer.echo(f"Starting Smrti REST API on http://{host}:{port}")
     run_rest_server(host=host, port=port)
 
 
@@ -73,22 +73,22 @@ def serve_rest(
 def serve_proxy(
     host: str = typer.Option("0.0.0.0", help="Host"),
     port: int = typer.Option(8421, help="Port"),
-    upstream: str = typer.Option("", help="Upstream LLM base URL (overrides ENGRAM_UPSTREAM_URL)"),
+    upstream: str = typer.Option("", help="Upstream LLM base URL (overrides SMRTI_UPSTREAM_URL)"),
 ) -> None:
     """Start OpenAI-compatible proxy with transparent memory injection.
 
     Per-request headers:
-      X-Engram-Tenant-Id    Hard isolation boundary (the human user).
-      X-Engram-Read-Spaces  Comma-separated ordered list of spaces to read from.
-      X-Engram-Write-Space  Space where new memories are stored.
+      X-Smrti-Tenant-Id    Hard isolation boundary (the human user).
+      X-Smrti-Read-Spaces  Comma-separated ordered list of spaces to read from.
+      X-Smrti-Write-Space  Space where new memories are stored.
     """
     if upstream:
-        os.environ["ENGRAM_UPSTREAM_URL"] = upstream.rstrip("/")
+        os.environ["SMRTI_UPSTREAM_URL"] = upstream.rstrip("/")
 
-    from engram.servers.proxy import run_proxy_server
+    from smrti.servers.proxy import run_proxy_server
 
-    effective_upstream = os.environ.get("ENGRAM_UPSTREAM_URL", "https://api.openai.com")
-    typer.echo(f"Starting Engram proxy on http://{host}:{port}/v1")
+    effective_upstream = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
+    typer.echo(f"Starting Smrti proxy on http://{host}:{port}/v1")
     typer.echo(f"Upstream: {effective_upstream}")
     run_proxy_server(host=host, port=port)
 

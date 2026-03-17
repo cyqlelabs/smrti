@@ -34,7 +34,7 @@ def test_pln_merge():
 def mem():
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = f.name
-    engine = Engram(db_path=db_path, agent_id="test")
+    engine = Engram(db_path=db_path, tenant_id="test", write_space="default")
     yield engine
     engine.close()
     os.unlink(db_path)

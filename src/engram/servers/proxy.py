@@ -15,9 +15,10 @@ from engram.servers.mcp import create_engram
 
 app = FastAPI(title="Engram Proxy", version="0.1.0")
 
-# Per-agent Engram instances — avoids agent_id mutation races on a shared singleton
-_agents: dict[str, Engram] = {}
-_default_agent_id: Optional[str] = None
+# Per-(tenant_id, write_space) Engram instances
+_instances: dict[tuple[str, str], Engram] = {}
+_default_tenant_id: Optional[str] = None
+_default_write_space: Optional[str] = None
 _default_db_path: Optional[str] = None
 _http: Optional[httpx.AsyncClient] = None
 
@@ -26,27 +27,29 @@ _RECALL_TOP_K = int(os.environ.get("ENGRAM_RECALL_TOP_K", "5"))
 _RECALL_MIN_CONF = float(os.environ.get("ENGRAM_RECALL_MIN_CONFIDENCE", "0.3"))
 
 
-def _bootstrap() -> tuple[str, str]:
-    """Return (default_agent_id, db_path), bootstrapping from env vars once."""
-    global _default_agent_id, _default_db_path
-    if _default_agent_id is None:
+def _bootstrap() -> tuple[str, str, str]:
+    """Return (tenant_id, write_space, db_path), initialising from env vars once."""
+    global _default_tenant_id, _default_write_space, _default_db_path
+    if _default_tenant_id is None:
         default = create_engram()
-        _default_agent_id = default.agent_id
+        _default_tenant_id = default.tenant_id
+        _default_write_space = default.write_space
         _default_db_path = os.environ.get("ENGRAM_DB", "~/.engram/memory.db")
-        _agents[_default_agent_id] = default
-    return _default_agent_id, _default_db_path  # type: ignore[return-value]
+        _instances[(_default_tenant_id, _default_write_space)] = default
+    return _default_tenant_id, _default_write_space, _default_db_path  # type: ignore[return-value]
 
 
-def get_mem(agent_id: Optional[str] = None) -> Engram:
-    default_id, db_path = _bootstrap()
-    key = agent_id or default_id
-    if key not in _agents:
-        _agents[key] = Engram(
+def get_mem(tenant_id: str, write_space: str) -> Engram:
+    key = (tenant_id, write_space)
+    if key not in _instances:
+        _, _, db_path = _bootstrap()
+        _instances[key] = Engram(
             db_path=db_path,
             personality=os.environ.get("ENGRAM_PERSONALITY", "balanced"),
-            agent_id=key,
+            tenant_id=tenant_id,
+            write_space=write_space,
         )
-    return _agents[key]
+    return _instances[key]
 
 
 def get_http() -> httpx.AsyncClient:
@@ -56,29 +59,40 @@ def get_http() -> httpx.AsyncClient:
     return _http
 
 
-def _agent_id_for(request: Request) -> str:
-    default_id, _ = _bootstrap()
-    return request.headers.get("x-engram-agent-id") or default_id
+def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
+    """Extract (tenant_id, write_space, read_spaces) from request headers."""
+    default_tenant, default_space, _ = _bootstrap()
+
+    tenant_id = request.headers.get("x-engram-tenant-id") or default_tenant
+    write_space = request.headers.get("x-engram-write-space") or default_space
+
+    raw_read = request.headers.get("x-engram-read-spaces", "")
+    read_spaces = [s.strip() for s in raw_read.split(",") if s.strip()]
+    if not read_spaces:
+        read_spaces = [write_space]
+
+    return tenant_id, write_space, read_spaces
 
 
-async def _recall(query: str, agent_id: str) -> list:
-    mem = get_mem(agent_id)
+async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: list[str]) -> list:
+    mem = get_mem(tenant_id, write_space)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
-        None, lambda: mem.recall(query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF)
+        None,
+        lambda: mem.recall(query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces),
     )
 
 
-async def _remember(content: str, agent_id: str) -> None:
-    mem = get_mem(agent_id)
+async def _remember(content: str, tenant_id: str, write_space: str) -> None:
+    mem = get_mem(tenant_id, write_space)
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(
         None, lambda: mem.remember(content, type="episode", probability=0.75)
     )
 
 
-async def _inject_context(body: dict, agent_id: str) -> dict:
-    """Recall memories relevant to the last user message and inject them into the system prompt."""
+async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spaces: list[str]) -> dict:
+    """Recall memories relevant to the last user message and inject into the system prompt."""
     messages: list[dict] = body.get("messages", [])
     if not messages:
         return body
@@ -90,7 +104,7 @@ async def _inject_context(body: dict, agent_id: str) -> dict:
     if not last_user or not isinstance(last_user, str):
         return body
 
-    memories = await _recall(last_user, agent_id)
+    memories = await _recall(last_user, tenant_id, write_space, read_spaces)
     if not memories:
         return body
 
@@ -112,14 +126,16 @@ async def _inject_context(body: dict, agent_id: str) -> dict:
     return {**body, "messages": messages}
 
 
-async def _store_exchange(messages: list[dict], assistant_text: str, agent_id: str) -> None:
-    """Persist user messages and the assistant reply as episodic memories."""
+async def _store_exchange(
+    messages: list[dict], assistant_text: str, tenant_id: str, write_space: str
+) -> None:
+    """Persist user messages and the assistant reply as episodic memories in write_space."""
     tasks = []
     for m in messages:
         if m.get("role") == "user" and isinstance(m.get("content"), str):
-            tasks.append(_remember(m["content"], agent_id))
+            tasks.append(_remember(m["content"], tenant_id, write_space))
     if assistant_text:
-        tasks.append(_remember(assistant_text, agent_id))
+        tasks.append(_remember(assistant_text, tenant_id, write_space))
     if tasks:
         await asyncio.gather(*tasks)
 
@@ -138,23 +154,27 @@ _DROP_RESPONSE_HEADERS = {"content-encoding", "transfer-encoding", "content-leng
 @app.post("/v1/chat/completions", response_model=None)
 async def chat_completions(request: Request) -> StreamingResponse | JSONResponse:
     body: dict = await request.json()
-    agent_id = _agent_id_for(request)
+    tenant_id, write_space, read_spaces = _parse_request_identity(request)
 
-    body = await _inject_context(body, agent_id)
+    body = await _inject_context(body, tenant_id, write_space, read_spaces)
     original_messages: list[dict] = body.get("messages", [])
 
     if body.get("stream", False):
         return StreamingResponse(
-            _stream_proxy(body, original_messages, agent_id, _upstream_headers(request)),
+            _stream_proxy(body, original_messages, tenant_id, write_space, _upstream_headers(request)),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
 
-    return await _non_stream_proxy(body, original_messages, agent_id, _upstream_headers(request))
+    return await _non_stream_proxy(body, original_messages, tenant_id, write_space, _upstream_headers(request))
 
 
 async def _non_stream_proxy(
-    body: dict, original_messages: list[dict], agent_id: str, headers: dict
+    body: dict,
+    original_messages: list[dict],
+    tenant_id: str,
+    write_space: str,
+    headers: dict,
 ) -> JSONResponse:
     response = await get_http().post(
         f"{_UPSTREAM}/v1/chat/completions",
@@ -166,7 +186,7 @@ async def _non_stream_proxy(
     assistant_text = (
         data.get("choices", [{}])[0].get("message", {}).get("content", "")
     )
-    asyncio.create_task(_store_exchange(original_messages, assistant_text, agent_id))
+    asyncio.create_task(_store_exchange(original_messages, assistant_text, tenant_id, write_space))
 
     passthrough_headers = {
         k: v
@@ -177,7 +197,11 @@ async def _non_stream_proxy(
 
 
 async def _stream_proxy(
-    body: dict, original_messages: list[dict], agent_id: str, headers: dict
+    body: dict,
+    original_messages: list[dict],
+    tenant_id: str,
+    write_space: str,
+    headers: dict,
 ) -> AsyncIterator[bytes]:
     accumulated: list[str] = []
     try:
@@ -201,7 +225,7 @@ async def _stream_proxy(
 
                 if payload.strip() == "[DONE]":
                     asyncio.create_task(
-                        _store_exchange(original_messages, "".join(accumulated), agent_id)
+                        _store_exchange(original_messages, "".join(accumulated), tenant_id, write_space)
                     )
                     yield b"data: [DONE]\n\n"
                     return

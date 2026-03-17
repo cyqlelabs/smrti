@@ -1,4 +1,4 @@
-"""CLI for engram: engram serve mcp|rest, engram init, engram status."""
+"""CLI for engram: engram serve mcp|rest|proxy, engram init, engram status."""
 from __future__ import annotations
 
 import os
@@ -12,15 +12,16 @@ app = typer.Typer(help="Engram memory engine CLI")
 def init(
     db: str = typer.Option("~/.engram/memory.db", help="Path to SQLite database"),
     personality: str = typer.Option("balanced", help="Personality preset"),
-    agent_id: str = typer.Option("default", help="Agent ID"),
+    tenant_id: str = typer.Option("default", help="Tenant ID"),
+    space: str = typer.Option("default", help="Memory space"),
 ) -> None:
     """Initialize a new Engram memory store."""
     from engram import Engram
 
-    mem = Engram(db_path=db, personality=personality, agent_id=agent_id)
+    mem = Engram(db_path=db, personality=personality, tenant_id=tenant_id, write_space=space)
     s = mem.status()
     typer.echo(f"Initialized Engram at {os.path.expanduser(db)}")
-    typer.echo(f"Agent: {agent_id} | Personality: {personality}")
+    typer.echo(f"Tenant: {tenant_id} | Space: {space} | Personality: {personality}")
     typer.echo(f"Total atoms: {s['total_atoms']}")
     mem.close()
 
@@ -28,12 +29,13 @@ def init(
 @app.command()
 def status(
     db: str = typer.Option("~/.engram/memory.db", help="Path to SQLite database"),
-    agent_id: str = typer.Option("default", help="Agent ID"),
+    tenant_id: str = typer.Option("default", help="Tenant ID"),
+    space: str = typer.Option("default", help="Memory space"),
 ) -> None:
     """Show memory statistics."""
     from engram import Engram
 
-    mem = Engram(db_path=db, agent_id=agent_id)
+    mem = Engram(db_path=db, tenant_id=tenant_id, write_space=space)
     s = mem.status()
     typer.echo(f"Total atoms: {s['total_atoms']}")
     typer.echo(f"By type: {s['by_type']}")
@@ -73,7 +75,13 @@ def serve_proxy(
     port: int = typer.Option(8421, help="Port"),
     upstream: str = typer.Option("", help="Upstream LLM base URL (overrides ENGRAM_UPSTREAM_URL)"),
 ) -> None:
-    """Start OpenAI-compatible proxy server with transparent memory injection."""
+    """Start OpenAI-compatible proxy with transparent memory injection.
+
+    Per-request headers:
+      X-Engram-Tenant-Id    Hard isolation boundary (the human user).
+      X-Engram-Read-Spaces  Comma-separated ordered list of spaces to read from.
+      X-Engram-Write-Space  Space where new memories are stored.
+    """
     if upstream:
         os.environ["ENGRAM_UPSTREAM_URL"] = upstream.rstrip("/")
 

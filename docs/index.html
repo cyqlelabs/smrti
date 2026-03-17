@@ -334,7 +334,11 @@
       gap: 0;
       border-bottom: 1px solid var(--border);
       margin-top: 2.5rem;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
     }
+    .code-tabs::-webkit-scrollbar { display: none; }
     .code-tab {
       font-family: var(--font-mono);
       font-size: 0.75rem;
@@ -346,6 +350,8 @@
       background: none;
       border-bottom: 2px solid transparent;
       transition: color 200ms, border-color 200ms;
+      white-space: nowrap;
+      flex-shrink: 0;
     }
     .code-tab:hover { color: var(--text); }
     .code-tab.active {

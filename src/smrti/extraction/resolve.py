@@ -104,8 +104,8 @@ class EntityResolver:
     def _create_atom(self, name: str, entity_type: str, tenant_id: str, space: str) -> str:
         atom_id = str(uuid.uuid4())
         self.db.execute(
-            """INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence)
-               VALUES (?, 'concept', ?, ?, ?, ?, 0.5, 0.2)""",
+            """INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti)
+               VALUES (?, 'concept', ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)""",
             (atom_id, name, entity_type, tenant_id, space),
         )
 

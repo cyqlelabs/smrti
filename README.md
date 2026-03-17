@@ -281,7 +281,7 @@ graph TD
     end
 
     subgraph Storage
-        SQL["SQLite + sqlite-vec<br/><small>BAAI/bge-small-en-v1.5 · 384d · ONNX CPU</small>"]
+        SQL["SQLite + sqlite-vec<br/><small>multilingual-MiniLM-L12-v2 · 384d · ONNX CPU</small>"]
     end
 
     MCP & REST & PROXY --> S

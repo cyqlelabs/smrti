@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
@@ -12,23 +11,18 @@ from mcp import types
 from smrti import Smrti
 from smrti.extraction.sentiment import estimate_valence
 from smrti.retrieval.classify import classify_memory
+from smrti.servers import config as cfg
 from smrti.servers.tools import TOOLS
 from smrti.servers.reflect_loop import run_reflect_loop
 
 
 def create_smrti() -> Smrti:
-    db_path = os.environ.get("SMRTI_DB", "~/.smrti/memory.db")
-    personality = os.environ.get("SMRTI_PERSONALITY", "balanced")
-    tenant_id = os.environ.get("SMRTI_TENANT_ID", "default")
-    write_space = os.environ.get("SMRTI_SPACE", "default")
-    read_spaces_raw = os.environ.get("SMRTI_READ_SPACES", "")
-    read_spaces = [s.strip() for s in read_spaces_raw.split(",") if s.strip()] or None
     return Smrti(
-        db_path=db_path,
-        personality=personality,
-        tenant_id=tenant_id,
-        write_space=write_space,
-        read_spaces=read_spaces,
+        db_path=cfg.DB,
+        personality=cfg.PERSONALITY,
+        tenant_id=cfg.TENANT_ID,
+        write_space=cfg.SPACE,
+        read_spaces=cfg.READ_SPACES,
     )
 
 

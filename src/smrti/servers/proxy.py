@@ -15,6 +15,7 @@ from smrti import Smrti
 from smrti.core.models import RecallResult
 from smrti.extraction.sentiment import estimate_valence
 from smrti.retrieval.classify import classify_memory
+from smrti.servers import config as cfg
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
 
@@ -50,7 +51,7 @@ def _bootstrap() -> tuple[str, str, str]:
         default = create_smrti()
         _default_tenant_id = default.tenant_id
         _default_write_space = default.write_space
-        _default_db_path = os.environ.get("SMRTI_DB", "~/.smrti/memory.db")
+        _default_db_path = cfg.DB
         _instances[(_default_tenant_id, _default_write_space)] = default
     return _default_tenant_id, _default_write_space, _default_db_path  # type: ignore[return-value]
 
@@ -61,7 +62,7 @@ def get_mem(tenant_id: str, write_space: str) -> Smrti:
         _, _, db_path = _bootstrap()
         _instances[key] = Smrti(
             db_path=db_path,
-            personality=os.environ.get("SMRTI_PERSONALITY", "balanced"),
+            personality=cfg.PERSONALITY,
             tenant_id=tenant_id,
             write_space=write_space,
         )

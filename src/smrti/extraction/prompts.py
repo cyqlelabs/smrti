@@ -103,6 +103,42 @@ EXAMPLE OUTPUT:
     {"subject": "Nico", "predicate": "is", "object": "senior programmer"},
     {"subject": "Nico", "predicate": "uses", "object": "AI coding assistance"}
   ]
+}
+
+EXAMPLE INPUT:
+"Our goal for Q3 is to ship the mobile app. I also really prefer dark mode and hate modal dialogs — they always interrupt my flow."
+
+EXAMPLE OUTPUT:
+{
+  "entities": [
+    {"name": "ship the mobile app by Q3", "type": "goal", "aliases": ["our goal for Q3"]},
+    {"name": "mobile app", "type": "project", "aliases": []},
+    {"name": "dark mode", "type": "preference", "aliases": []},
+    {"name": "modal dialogs", "type": "constraint", "aliases": []}
+  ],
+  "claims": [
+    {"subject": "ship the mobile app by Q3", "predicate": "targets", "object": "mobile app", "valence": 0.8},
+    {"subject": "dark mode", "predicate": "is_preferred", "object": "dark mode", "valence": 0.7},
+    {"subject": "modal dialogs", "predicate": "must_avoid", "object": "modal dialogs", "valence": -0.6}
+  ]
+}
+
+EXAMPLE INPUT:
+"The team offsite in Berlin last Tuesday was great — we aligned on the roadmap and decided to deprecate the v1 API."
+
+EXAMPLE OUTPUT:
+{
+  "entities": [
+    {"name": "team offsite in Berlin", "type": "event", "aliases": ["the team offsite", "last Tuesday"]},
+    {"name": "Berlin", "type": "location", "aliases": []},
+    {"name": "roadmap alignment", "type": "concept", "aliases": ["aligned on the roadmap"]},
+    {"name": "v1 API", "type": "tool", "aliases": []}
+  ],
+  "claims": [
+    {"subject": "team offsite in Berlin", "predicate": "took_place_in", "object": "Berlin"},
+    {"subject": "team offsite in Berlin", "predicate": "produced", "object": "roadmap alignment", "valence": 0.7},
+    {"subject": "team offsite in Berlin", "predicate": "decided_to_deprecate", "object": "v1 API"}
+  ]
 }"""
 
 ENTITY_TYPES = [

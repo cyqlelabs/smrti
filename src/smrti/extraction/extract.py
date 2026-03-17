@@ -81,7 +81,7 @@ def _build_entity_context(mem: "Smrti") -> str:
     rows = mem.db.fetchall(
         """SELECT label, entity_type
            FROM atoms
-           WHERE tenant_id = ? AND space = ? AND type = 'concept'
+           WHERE tenant_id = ? AND space = ? AND type IN ('concept', 'belief', 'goal')
              AND source_id IS NULL AND entity_type IS NOT NULL
            ORDER BY (sti + lti) DESC
            LIMIT 30""",

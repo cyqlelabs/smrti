@@ -75,7 +75,7 @@ class Smrti:
             profile = load_preset(preset_name)
             self.db.execute(
                 """
-                INSERT INTO personality (
+                INSERT OR IGNORE INTO personality (
                     tenant_id, space, confidence_decay_rate, confidence_update_lr,
                     min_confidence_to_surface, sti_decay_rate, sti_boost_on_access,
                     sti_propagation_factor, lti_promotion_threshold, valence_weight,
@@ -104,6 +104,9 @@ class Smrti:
                     preset_name,
                 ),
             )
+            # If explicitly configured, win the race: force-update even if INSERT was ignored
+            if os.environ.get("SMRTI_PERSONALITY"):
+                self.set_personality(preset_name)
 
     def is_ignored(self, content: str) -> bool:
         return bool(self._ignore_re) and any(rx.search(content) for rx in self._ignore_re)

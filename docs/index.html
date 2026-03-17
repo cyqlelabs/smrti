@@ -644,6 +644,8 @@
           <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-recall" data-panel="tab-recall">recall</button>
           <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-believe" data-panel="tab-believe">believe</button>
           <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-reflect" data-panel="tab-reflect">reflect</button>
+          <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-forget" data-panel="tab-forget">forget</button>
+          <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-personality" data-panel="tab-personality">personality</button>
         </div>
 
         <div class="code-panel active" role="tabpanel" id="tab-remember"><pre><span class="kw">from</span> smrti <span class="kw">import</span> Smrti
@@ -702,6 +704,26 @@ epoch = engine.<span class="fn">reflect</span>()
 
 <span class="cm"># Process evidence &rarr; decay STI/LTI &rarr; promote high-LTI</span>
 <span class="cm"># &rarr; resolve contradictions &rarr; prune low-salience atoms</span></pre></div>
+
+        <div class="code-panel" role="tabpanel" id="tab-forget"><pre><span class="cm"># Soft-forget: recall matching atoms, decay confidence</span>
+targets = engine.<span class="fn">recall</span>(<span class="st">"Friday deployment outage"</span>, <span class="fn">top_k</span>=<span class="nb">5</span>)
+
+<span class="kw">for</span> r <span class="kw">in</span> targets:
+    engine.db.<span class="fn">execute</span>(
+        <span class="st">"UPDATE atoms SET confidence = confidence * 0.3 WHERE id = ?"</span>,
+        (r.atom.id,)
+    )
+
+<span class="cm"># No hard delete — the consolidation epoch</span>
+<span class="cm"># prunes when salience drops low enough</span></pre></div>
+
+        <div class="code-panel" role="tabpanel" id="tab-personality"><pre><span class="cm"># Switch preset at runtime</span>
+engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</span>)
+
+<span class="cm"># 6 presets: balanced, analytical, curious,</span>
+<span class="cm"># empathetic, maverick, deterministic</span>
+<span class="cm"># Each tunes 16 hyperparameters that control</span>
+<span class="cm"># learning rate, decay, promotion, and salience weights</span></pre></div>
       </div>
     </section>
 

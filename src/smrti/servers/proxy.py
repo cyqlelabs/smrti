@@ -11,6 +11,8 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from smrti import Smrti
+from smrti.core.models import RecallResult
+from smrti.retrieval.classify import classify_memory
 from smrti.servers.mcp import create_smrti
 
 app = FastAPI(title="Smrti Proxy", version="0.1.0")
@@ -25,6 +27,9 @@ _http: Optional[httpx.AsyncClient] = None
 _UPSTREAM = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
 _RECALL_TOP_K = int(os.environ.get("SMRTI_RECALL_TOP_K", "5"))
 _RECALL_MIN_CONF = float(os.environ.get("SMRTI_RECALL_MIN_CONFIDENCE", "0.3"))
+_QUERY_MODE = os.environ.get("SMRTI_QUERY_MODE", "concat")
+_QUERY_CONTEXT_MSGS = int(os.environ.get("SMRTI_QUERY_CONTEXT_MSGS", "5"))
+_QUERY_MAX_CHARS = int(os.environ.get("SMRTI_QUERY_MAX_CHARS", "500"))
 
 
 def _bootstrap() -> tuple[str, str, str]:
@@ -91,28 +96,59 @@ async def _remember(content: str, tenant_id: str, write_space: str) -> None:
     )
 
 
-async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spaces: list[str]) -> dict:
-    """Recall memories relevant to the last user message and inject into the system prompt."""
-    messages: list[dict] = body.get("messages", [])
-    if not messages:
-        return body
+def _format_memory(r: RecallResult) -> str:
+    """Format a single recall result with severity-aware XML tags."""
+    severity = classify_memory(r)
+    content = r.atom.content or r.atom.label
+    conf = r.atom.truth.confidence
+    prob = r.atom.truth.probability
+    if severity == "critical_warning":
+        return f"<critical_warning>PAST MISTAKE: {content}. Confidence: {conf:.2f}. DO NOT repeat.</critical_warning>"
+    if severity == "known_antipattern":
+        return f"<known_antipattern>DISPROVEN: {content}. Probability: {prob:.2f}. Avoid this approach.</known_antipattern>"
+    return f"<context>{content} (confidence={conf:.2f})</context>"
 
+
+def _build_query(messages: list[dict]) -> str | None:
+    """Build a recall query from conversation messages based on configured mode."""
+    if _QUERY_MODE == "concat":
+        recent = [
+            m["content"]
+            for m in messages[-_QUERY_CONTEXT_MSGS:]
+            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+        ]
+        if not recent:
+            return None
+        joined = " ".join(recent)
+        return joined[:_QUERY_MAX_CHARS]
+    # "last" mode: original behavior
     last_user = next(
         (m["content"] for m in reversed(messages) if m.get("role") == "user"),
         None,
     )
     if not last_user or not isinstance(last_user, str):
+        return None
+    return last_user
+
+
+async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spaces: list[str]) -> dict:
+    """Recall memories relevant to the conversation and inject into the system prompt."""
+    messages: list[dict] = body.get("messages", [])
+    if not messages:
         return body
 
-    memories = await _recall(last_user, tenant_id, write_space, read_spaces)
+    query = _build_query(messages)
+    if not query:
+        return body
+
+    memories = await _recall(query, tenant_id, write_space, read_spaces)
     if not memories:
         return body
 
-    memory_block = "\n".join(
-        f"- {r.atom.content} (confidence={r.atom.truth.confidence:.2f})"
-        for r in memories
-    )
-    injection = f"Relevant context from memory:\n{memory_block}"
+    memory_lines = [_format_memory(r) for r in memories]
+    has_warnings = any("<critical_warning>" in l or "<known_antipattern>" in l for l in memory_lines)
+    preamble = "You MUST pay attention to any <critical_warning> or <known_antipattern> items below.\n" if has_warnings else ""
+    injection = f"{preamble}Relevant context from memory:\n" + "\n".join(memory_lines)
 
     messages = list(messages)
     system_idx = next((i for i, m in enumerate(messages) if m.get("role") == "system"), None)

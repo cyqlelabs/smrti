@@ -62,6 +62,13 @@ class AtomSpace:
             ),
         )
 
+        # Protect severe negative-valence atoms from epoch pruning
+        if atom.valence.valence < -0.7 and atom.valence.intensity > 0.7:
+            self._db.execute(
+                "UPDATE atoms SET lti = MAX(lti, 0.5) WHERE id = ?",
+                (atom.id,),
+            )
+
         existing_vec = self._db.fetchone(
             "SELECT atom_id FROM vec_atoms WHERE atom_id = ?",
             (atom.id,),

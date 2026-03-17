@@ -34,8 +34,9 @@ def status(
 ) -> None:
     """Show memory statistics."""
     from smrti import Smrti
+    from smrti.servers import config as cfg
 
-    mem = Smrti(db_path=db, tenant_id=tenant_id, write_space=space)
+    mem = Smrti(db_path=db, personality=cfg.PERSONALITY, tenant_id=tenant_id, write_space=space)
     s = mem.status()
     typer.echo(f"Total atoms: {s['total_atoms']}")
     typer.echo(f"By type: {s['by_type']}")

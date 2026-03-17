@@ -14,7 +14,10 @@ RULES:
 1. COREFERENCE RESOLUTION: Never extract pronouns ("he", "it", "they"). Resolve them to
    explicit entity names. When a [Known entities] block is provided, use it to resolve
    pronouns and vague references (e.g. "I" → the person entity, "we" → the organization).
-   Only extract entities and claims from the [Text to extract] section.
+   Only extract entities and claims from the [Text to extract] section. Known entities may
+   only appear in your output if the current text contains a direct or implicit reference
+   (pronoun, demonstrative, or short noun phrase) that resolves to them. Never surface a
+   known entity solely because it is related to another entity that is referenced.
 2. FIXED TYPES ONLY: Classify entities into exactly these 10 types:
    person, organization, project, tool, preference, constraint, location, event, concept, goal
 3. ATOMIC CLAIMS: Break complex sentences into simple (subject, predicate, object) triplets.
@@ -77,6 +80,28 @@ EXAMPLE OUTPUT:
   "claims": [
     {"subject": "deploying without tests", "predicate": "caused", "object": "production", "valence": -0.9},
     {"subject": "deploying without tests", "predicate": "must_avoid", "object": "production", "valence": -0.9}
+  ]
+}
+
+EXAMPLE INPUT (with known entities — some not referenced in the text):
+[Known entities]
+- Nico (person)
+- GetProductized (organization)
+- the Netherlands (location)
+
+[Text to extract]
+I'm a senior programmer, I've been working for around 20 years and I really enjoy building new projects with the help of AI coding assistance.
+
+EXAMPLE OUTPUT:
+{
+  "entities": [
+    {"name": "Nico", "type": "person", "aliases": ["I", "me"]},
+    {"name": "senior programmer", "type": "concept", "aliases": []},
+    {"name": "AI coding assistance", "type": "tool", "aliases": []}
+  ],
+  "claims": [
+    {"subject": "Nico", "predicate": "is", "object": "senior programmer"},
+    {"subject": "Nico", "predicate": "uses", "object": "AI coding assistance"}
   ]
 }"""
 

@@ -4,7 +4,7 @@
 
 ## How It Works
 
-When an agent calls `remember()`, Smrti embeds the text, resolves any entities it mentions (via a 4-tier cascade: exact → alias → fuzzy → embedding), and stores the result as a typed graph node (concept, belief, episode, or goal) carrying a Bayesian truth value, an attention weight, and an emotional valence score. Every observation is appended to an immutable evidence log — truth values are never mutated directly.
+When an agent calls `remember()`, Smrti embeds the text and stores it as a typed graph node (concept, belief, episode, or goal) carrying a Bayesian truth value, an attention weight, and an emotional valence score. Every observation is appended to an immutable evidence log — truth values are never mutated directly. In all server modes, Smrti additionally calls the LLM to extract entity/claim structure from stored episodes — resolving names via a 4-tier cascade (exact → alias → fuzzy → embedding) and building concept nodes with typed relation edges automatically. This is on by default and can be disabled with `SMRTI_EXTRACT=0`.
 
 On `recall()`, the query is embedded and matched against the tenant-partitioned vector index (sqlite-vec KNN). Results are expanded one hop through the graph, then ranked by a salience formula that blends semantic similarity, short/long-term attention, confidence, and emotional intensity. When a memory has strong negative valence (e.g. a past outage), salience weights shift dynamically so critical errors outrank recent trivia. Each result is classified as `critical_warning`, `known_antipattern`, or `context`.
 
@@ -17,6 +17,7 @@ Consolidation happens automatically in all server modes (MCP, REST, proxy) on a 
 - **Personality-driven retrieval** — 6 presets with 16 tunable hyperparameters that shape what gets surfaced
 - **Multi-tenant isolation** — Tenant/space overlay model with cross-space reads and single-space writes
 - **Three server modes** — MCP (stdio), REST API, and OpenAI-compatible proxy
+- **Automatic entity extraction** — all server modes build concept nodes and relation edges from stored episodes automatically (on by default; set `SMRTI_EXTRACT_MODEL` and optionally `SMRTI_EXTRACT_URL` to configure)
 - **Entity resolution** — 4-tier cascade: exact match, alias lookup, fuzzy (RapidFuzz), embedding similarity
 - **Zero external services** — Single SQLite file with sqlite-vec for KNN search, ONNX embeddings on CPU
 
@@ -66,6 +67,7 @@ smrti status
 # Start servers
 smrti serve mcp           # MCP stdio server (for Claude, etc.)
 smrti serve rest           # FastAPI on :8420
+smrti serve viz            # FastAPI on :8420 + opens memory visualizer in browser
 smrti serve proxy          # OpenAI-compatible proxy on :8421
 ```
 
@@ -156,8 +158,9 @@ response = client.chat.completions.create(
 The proxy automatically:
 
 1. Recalls relevant memories from the specified read spaces (using recent conversation context, not just the last message)
-2. Classifies each memory by severity (`critical_warning`, `known_antipattern`, `context`) and injects them as structured XML tags into the system prompt
-3. Stores user messages and the assistant response as episodes
+2. Classifies each memory by severity (`critical_warning`, `known_antipattern`, `context`) and injects them as plain imperative instructions into the system prompt (`YOU MUST NOT`, `AVOID`, `Note:`)
+3. Stores the most recent user message and the assistant response as episodes
+4. Calls the LLM to extract entities and claims, creates concept nodes, and links them to the episode with typed relation edges (on by default; disable with `SMRTI_EXTRACT=0`)
 
 Configure with:
 
@@ -169,6 +172,9 @@ export SMRTI_QUERY_MODE=concat        # "concat" (default) or "last" for last-me
 export SMRTI_QUERY_CONTEXT_MSGS=5     # number of recent messages to include in query
 export SMRTI_QUERY_MAX_CHARS=500      # max characters for the recall query
 export SMRTI_REFLECT_INTERVAL=60      # auto-consolidation interval in seconds (0 to disable)
+export SMRTI_EXTRACT=1                # enable LLM-based entity/claim extraction (default: on)
+export SMRTI_EXTRACT_URL=             # LLM endpoint for extraction (defaults to SMRTI_UPSTREAM_URL)
+export SMRTI_EXTRACT_MODEL=           # model for extraction calls (proxy defaults to request model)
 ```
 
 ## Multi-Tenant / Space Model
@@ -276,6 +282,7 @@ graph TD
     end
 
     subgraph Extraction
+        EXT["extract"]
         RES["resolve"]
         ALI["aliases"]
     end

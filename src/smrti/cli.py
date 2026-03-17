@@ -70,6 +70,32 @@ def serve_rest(
     run_rest_server(host=host, port=port)
 
 
+@serve_app.command("viz")
+def serve_viz(
+    host: str = typer.Option("127.0.0.1", help="Host"),
+    port: int = typer.Option(8420, help="Port"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't open browser automatically"),
+) -> None:
+    """Start the REST API and open the memory visualizer in a browser."""
+    import threading
+    import time
+    import webbrowser
+
+    from smrti.servers.rest import run_rest_server
+
+    url = f"http://{host}:{port}/viz"
+    typer.echo(f"Starting Smrti visualizer on {url}")
+
+    if not no_browser:
+        def _open():
+            time.sleep(1.2)
+            webbrowser.open(url)
+
+        threading.Thread(target=_open, daemon=True).start()
+
+    run_rest_server(host=host, port=port)
+
+
 @serve_app.command("proxy")
 def serve_proxy(
     host: str = typer.Option("0.0.0.0", help="Host"),

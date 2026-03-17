@@ -154,6 +154,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         )
         db.execute("DELETE FROM vec_atoms WHERE atom_id = ?", (atom_id,))
         db.execute("DELETE FROM evidence WHERE atom_id = ?", (atom_id,))
+        db.execute("DELETE FROM aliases WHERE atom_id = ?", (atom_id,))
         db.execute("DELETE FROM atoms WHERE id = ?", (atom_id,))
 
     total = db.fetchone(

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import struct
 from typing import Optional
 
 from smrti.core.db import Database
@@ -78,9 +79,10 @@ class AtomSpace:
             if atom.content:
                 text_to_embed = f"{atom.label} {atom.content}"
             embedding = self._embed.embed(text_to_embed)
+            vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
             self._db.execute(
                 "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, label) VALUES (?, ?, ?, ?)",
-                (atom.id, json.dumps(embedding), atom.tenant_id, atom.label),
+                (atom.id, vec_bytes, atom.tenant_id, atom.label),
             )
 
         return atom.id
@@ -137,6 +139,19 @@ class AtomSpace:
         space: str,
         truth: Optional[TruthValue] = None,
     ) -> str:
+        # Idempotent: boost STI and return existing relation if already present
+        existing = self._db.fetchone(
+            """SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
+               AND relation = ? AND tenant_id = ? AND space = ?""",
+            (source_id, target_id, relation, tenant_id, space),
+        )
+        if existing:
+            self._db.execute(
+                "UPDATE atoms SET sti = MIN(sti + 0.2, 3.0), updated_at = datetime('now') WHERE id = ?",
+                (existing["id"],),
+            )
+            return existing["id"]
+
         if truth is None:
             truth = TruthValue(probability=0.8, confidence=0.5)
         label = f"{relation}({source_id[:8]}, {target_id[:8]})"

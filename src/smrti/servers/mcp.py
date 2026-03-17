@@ -83,9 +83,11 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         results = mem.recall(query=args["query"], top_k=5)
         forgotten = []
         for r in results:
+            if r.atom.space != mem.write_space:
+                continue
             mem.db.execute(
-                "UPDATE atoms SET confidence = confidence * 0.3 WHERE id = ?",
-                (r.atom.id,),
+                "UPDATE atoms SET confidence = confidence * 0.3 WHERE id = ? AND tenant_id = ? AND space = ?",
+                (r.atom.id, mem.tenant_id, mem.write_space),
             )
             forgotten.append(r.atom.label)
         return {"status": "ok", "softened": forgotten}
@@ -128,6 +130,14 @@ def run_mcp_server() -> None:
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         result = handle_tool(mem, name, arguments)
+        if name == "smrti_remember" and cfg.EXTRACT:
+            episode_id = result.get("atom_id", "")
+            content = arguments.get("content", "")
+            if episode_id and content:
+                from smrti.extraction.extract import extract_and_link
+                asyncio.create_task(
+                    extract_and_link(episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL)
+                )
         return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 
     async def _main() -> None:

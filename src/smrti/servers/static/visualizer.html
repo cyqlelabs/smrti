@@ -1,0 +1,956 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smrti Visualizer</title>
+<style>
+/* ── Reset ──────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg:      #0d1117;
+  --surface: #161b22;
+  --surface2:#1c2128;
+  --border:  #30363d;
+  --text:    #e6edf3;
+  --muted:   #8b949e;
+  --dim:     #484f58;
+  --accent:  #58a6ff;
+  --concept: #3b82f6;
+  --belief:  #a855f7;
+  --episode: #22c55e;
+  --goal:    #f97316;
+  --rel:     #6b7280;
+  --neg:     #ef4444;
+  --pos:     #22c55e;
+  --warn:    #f59e0b;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+}
+html, body { height: 100%; background: var(--bg); color: var(--text); overflow: hidden; font-size: 13px; }
+
+/* ── Layout ─────────────────────────────────────────────────────── */
+#app { display: flex; flex-direction: column; height: 100vh; }
+
+/* ── Header ─────────────────────────────────────────────────────── */
+#header {
+  height: 50px; background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 14px; gap: 10px; flex-shrink: 0;
+}
+#logo { display: flex; align-items: center; gap: 7px; font-weight: 600; font-size: 14px; white-space: nowrap; }
+.vsep { width: 1px; height: 22px; background: var(--border); flex-shrink: 0; }
+.hfill { flex: 1; }
+.lbl { font-size: 11px; color: var(--muted); white-space: nowrap; flex-shrink: 0; }
+select, input[type="text"] {
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 4px 8px; font-size: 12px; outline: none;
+}
+select:focus, input:focus { border-color: var(--accent); }
+select { cursor: pointer; }
+#search { width: 190px; }
+#api-base { width: 200px; font-size: 11px; }
+button {
+  background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+  border-radius: 6px; padding: 4px 10px; font-size: 12px; cursor: pointer;
+  display: flex; align-items: center; gap: 5px; white-space: nowrap; flex-shrink: 0;
+  transition: border-color 0.12s, color 0.12s;
+}
+button:hover { border-color: var(--accent); color: var(--accent); }
+button.on { background: rgba(88,166,255,0.12); border-color: var(--accent); color: var(--accent); }
+button.icon { padding: 4px 8px; font-size: 15px; }
+
+/* ── Filter Bar ──────────────────────────────────────────────────── */
+#filters {
+  height: 40px; background: var(--bg); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 14px; gap: 10px; flex-shrink: 0;
+}
+.ttoggle {
+  display: flex; align-items: center; gap: 4px; cursor: pointer; user-select: none;
+  padding: 3px 9px; border-radius: 12px; border: 1px solid transparent;
+  font-size: 11px; font-weight: 500; transition: opacity 0.15s, border-color 0.15s;
+}
+.ttoggle .dot { width: 7px; height: 7px; border-radius: 50%; }
+.ttoggle.off { opacity: 0.3; }
+.ttoggle.on  { border-color: currentColor; }
+.ttoggle[data-t="concept"] { color: var(--concept); }
+.ttoggle[data-t="belief"]  { color: var(--belief); }
+.ttoggle[data-t="episode"] { color: var(--episode); }
+.ttoggle[data-t="goal"]    { color: var(--goal); }
+.fgroup { display: flex; align-items: center; gap: 6px; }
+input[type="range"] { width: 70px; accent-color: var(--accent); }
+.rval { font-size: 11px; font-family: monospace; color: var(--text); min-width: 28px; }
+select.slim { width: 70px; }
+
+/* ── Main ────────────────────────────────────────────────────────── */
+#main { flex: 1; display: flex; overflow: hidden; }
+
+/* ── Graph Area ───────────────────────────────────────────────────── */
+#garea { flex: 1; position: relative; overflow: hidden; background: var(--bg); }
+#gsvg { width: 100%; height: 100%; cursor: grab; }
+#gsvg:active { cursor: grabbing; }
+
+/* ── Graph overlays ──────────────────────────────────────────────── */
+#gctrls { position: absolute; top: 10px; right: 10px; display: flex; flex-direction: column; gap: 4px; }
+#legend {
+  position: absolute; bottom: 10px; left: 10px;
+  background: rgba(22,27,34,0.9); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px 13px; backdrop-filter: blur(4px);
+}
+#legend h5 { font-size: 10px; text-transform: uppercase; letter-spacing: .07em; color: var(--muted); margin-bottom: 7px; margin-top: 8px; }
+#legend h5:first-child { margin-top: 0; }
+.li { display: flex; align-items: center; gap: 7px; font-size: 11px; color: var(--muted); margin-bottom: 4px; }
+.ldot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+.lline { width: 20px; height: 2px; border-radius: 1px; flex-shrink: 0; }
+#loading {
+  position: absolute; inset: 0; background: rgba(13,17,23,.85);
+  display: flex; align-items: center; justify-content: center; flex-direction: column;
+  gap: 12px; z-index: 50; transition: opacity .3s;
+}
+#loading.gone { opacity: 0; pointer-events: none; }
+.spin { width: 30px; height: 30px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: rot .7s linear infinite; }
+@keyframes rot { to { transform: rotate(360deg); } }
+#errbanner {
+  position: absolute; top: 8px; left: 50%; transform: translateX(-50%);
+  background: #2d1212; border: 1px solid var(--neg); color: #fca5a5;
+  border-radius: 8px; padding: 7px 14px; font-size: 12px; z-index: 60; display: none;
+}
+
+/* ── Tooltip ──────────────────────────────────────────────────────── */
+#tip {
+  position: fixed; background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 12px; font-size: 11px; pointer-events: none;
+  z-index: 100; max-width: 240px; line-height: 1.7; display: none;
+  box-shadow: 0 4px 20px rgba(0,0,0,.5);
+}
+#tip .tt { color: var(--muted); }
+#tip .tt b { color: var(--text); font-weight: normal; }
+#tip .tlbl { font-weight: 600; font-size: 12px; }
+#tip .ttype { font-size: 10px; color: var(--muted); margin-bottom: 3px; }
+
+/* ── Inspector ────────────────────────────────────────────────────── */
+#insp {
+  width: 298px; background: var(--surface); border-left: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow-y: auto; flex-shrink: 0;
+}
+#insp-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; color: var(--dim); gap: 9px; padding: 24px; text-align: center;
+}
+#insp-empty svg { opacity: .25; }
+#insp-body { display: none; flex-direction: column; gap: 13px; padding: 14px; }
+
+/* badges */
+.badges { display: flex; gap: 6px; flex-wrap: wrap; }
+.badge {
+  font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: .05em;
+  padding: 2px 7px; border-radius: 10px; white-space: nowrap;
+}
+.badge.concept  { background: rgba(59,130,246,.15); color: var(--concept); }
+.badge.belief   { background: rgba(168,85,247,.15);  color: var(--belief); }
+.badge.episode  { background: rgba(34,197,94,.15);   color: var(--episode); }
+.badge.goal     { background: rgba(249,115,22,.15);  color: var(--goal); }
+.badge.relation { background: rgba(107,114,128,.15); color: var(--rel); }
+.badge.critical_warning  { background: rgba(239,68,68,.15);  color: var(--neg); }
+.badge.known_antipattern { background: rgba(245,158,11,.15); color: var(--warn); }
+.badge.context           { background: rgba(88,166,255,.15); color: var(--accent); }
+
+.insp-lbl { font-size: 14px; font-weight: 600; line-height: 1.4; word-break: break-word; }
+.insp-cnt { font-size: 12px; color: var(--muted); line-height: 1.5; word-break: break-word; display: none; }
+.hdiv { height: 1px; background: var(--border); }
+
+/* stat bars */
+.statrow { display: flex; flex-direction: column; gap: 5px; }
+.stat { display: flex; align-items: center; gap: 8px; }
+.sname { font-size: 11px; color: var(--muted); width: 76px; flex-shrink: 0; }
+.strack { flex: 1; height: 4px; background: var(--surface2); border-radius: 2px; overflow: hidden; }
+.sfill { height: 100%; border-radius: 2px; transition: width .3s; }
+.sval { font-size: 11px; font-family: 'SF Mono', 'Fira Code', monospace; color: var(--text); width: 34px; text-align: right; flex-shrink: 0; }
+
+/* valence track */
+.vtrack { position: relative; height: 7px; border-radius: 4px; background: linear-gradient(to right, var(--neg), #4b5563, var(--pos)); }
+.vthumb { position: absolute; width: 10px; height: 10px; background: #fff; border-radius: 50%; top: -1.5px; transform: translateX(-50%); box-shadow: 0 1px 4px rgba(0,0,0,.5); transition: left .3s; }
+.vlbls { display: flex; justify-content: space-between; font-size: 10px; color: var(--dim); margin-top: 3px; }
+
+/* meta */
+.meta { display: flex; flex-direction: column; gap: 5px; }
+.mr { display: flex; gap: 6px; font-size: 11px; }
+.mk { color: var(--muted); width: 76px; flex-shrink: 0; }
+.mv { color: var(--text); word-break: break-all; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 10px; }
+.jsonbox {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 8px 10px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 10px;
+  color: var(--muted); white-space: pre-wrap; word-break: break-all; max-height: 130px; overflow-y: auto;
+}
+.idrow {
+  display: flex; align-items: center; gap: 6px; background: var(--surface2);
+  border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px;
+  font-family: 'SF Mono', 'Fira Code', monospace; font-size: 10px; color: var(--muted);
+}
+.idrow span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.copybtn { cursor: pointer; padding: 1px 4px; border-radius: 3px; }
+.copybtn:hover { color: var(--accent); }
+.iactions { display: flex; flex-direction: column; gap: 6px; }
+.iactions button { width: 100%; justify-content: center; font-size: 11px; }
+
+/* ── Status Bar ───────────────────────────────────────────────────── */
+#statusbar {
+  height: 27px; background: var(--surface); border-top: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 12px; gap: 14px; flex-shrink: 0;
+  font-size: 11px; color: var(--muted);
+}
+.sdot { width: 6px; height: 6px; border-radius: 50%; background: var(--pos); flex-shrink: 0; }
+.sdot.off { background: var(--neg); }
+.si { display: flex; align-items: center; gap: 5px; }
+.si b { color: var(--text); font-weight: normal; }
+#tdist { display: flex; align-items: center; gap: 2px; }
+.dbar { height: 7px; border-radius: 2px; min-width: 3px; }
+
+/* ── SVG graph styles ─────────────────────────────────────────────── */
+.egroup .eline {
+  stroke: #2a3038; stroke-width: 1.5; fill: none;
+  transition: stroke-opacity .2s, stroke .2s;
+}
+.egroup .eline.hi { stroke: var(--accent) !important; stroke-opacity: 1 !important; }
+.egroup .eline.dim { stroke-opacity: .08 !important; }
+.egroup .elbl {
+  font-size: 8px; fill: var(--dim); text-anchor: middle; pointer-events: none;
+  opacity: 0; transition: opacity .2s;
+}
+.egroup .elbl.show { opacity: 1; }
+.ngroup .ncircle { cursor: pointer; transition: filter .15s; }
+.ngroup.sel .ncircle { filter: drop-shadow(0 0 5px currentColor); }
+.ngroup.dim { opacity: .15; }
+.ngroup .nlbl {
+  font-size: 9px; fill: var(--muted); text-anchor: middle; pointer-events: none;
+  transition: opacity .2s;
+}
+.lbls-off .nlbl { opacity: 0 !important; }
+</style>
+</head>
+<body>
+<div id="app">
+
+<!-- ── Header ──────────────────────────────────────────────────────── -->
+<div id="header">
+  <div id="logo">
+    <svg width="19" height="19" viewBox="0 0 19 19" fill="none">
+      <circle cx="9.5" cy="9.5" r="8.5" stroke="#58a6ff" stroke-width="1.4"/>
+      <circle cx="9.5" cy="9.5" r="3" fill="#58a6ff" opacity=".75"/>
+      <line x1="9.5" y1="1" x2="9.5" y2="5.5" stroke="#58a6ff" stroke-width="1.4"/>
+      <line x1="9.5" y1="13.5" x2="9.5" y2="18" stroke="#58a6ff" stroke-width="1.4"/>
+      <line x1="1" y1="9.5" x2="5.5" y2="9.5" stroke="#58a6ff" stroke-width="1.4"/>
+      <line x1="13.5" y1="9.5" x2="18" y2="9.5" stroke="#58a6ff" stroke-width="1.4"/>
+    </svg>
+    Smrti Visualizer
+  </div>
+  <div class="vsep"></div>
+  <span class="lbl">Tenant</span>
+  <select id="s-tenant" style="width:120px"><option>default</option></select>
+  <span class="lbl">Space</span>
+  <select id="s-space" style="width:120px"><option>default</option></select>
+  <button id="btn-refresh" class="icon" title="Refresh (R)">↻</button>
+  <div class="vsep"></div>
+  <input id="search" type="text" placeholder="Search atoms…" autocomplete="off">
+  <div class="hfill"></div>
+  <span class="lbl">API</span>
+  <input id="api-base" type="text" placeholder="http://localhost:8420" title="API base URL">
+</div>
+
+<!-- ── Filters ─────────────────────────────────────────────────────── -->
+<div id="filters">
+  <span class="lbl" style="flex-shrink:0">Types:</span>
+  <div class="ttoggle on" data-t="concept"><div class="dot" style="background:var(--concept)"></div>Concept</div>
+  <div class="ttoggle on" data-t="belief"><div class="dot" style="background:var(--belief)"></div>Belief</div>
+  <div class="ttoggle on" data-t="episode"><div class="dot" style="background:var(--episode)"></div>Episode</div>
+  <div class="ttoggle on" data-t="goal"><div class="dot" style="background:var(--goal)"></div>Goal</div>
+  <div class="vsep" style="height:18px;margin:0 2px"></div>
+  <div class="fgroup">
+    <span class="lbl">Conf ≥</span>
+    <input type="range" id="sl-conf" min="0" max="1" step="0.05" value="0">
+    <span class="rval" id="rv-conf">0.00</span>
+  </div>
+  <div class="vsep" style="height:18px;margin:0 2px"></div>
+  <div class="fgroup">
+    <span class="lbl">Limit</span>
+    <select id="s-limit" class="slim">
+      <option>50</option><option>100</option><option value="200" selected>200</option>
+      <option>500</option><option>1000</option>
+    </select>
+  </div>
+  <div class="vsep" style="height:18px;margin:0 2px"></div>
+  <button id="btn-labels" class="on">Labels</button>
+  <button id="btn-pause">⏸ Pause</button>
+  <button id="btn-fit">⊙ Fit</button>
+</div>
+
+<!-- ── Main ─────────────────────────────────────────────────────────── -->
+<div id="main">
+
+  <!-- Graph -->
+  <div id="garea">
+    <svg id="gsvg">
+      <defs>
+        <marker id="arr"  markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto" markerUnits="userSpaceOnUse">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#3a4250"/>
+        </marker>
+        <marker id="arh"  markerWidth="7" markerHeight="5" refX="7" refY="2.5" orient="auto" markerUnits="userSpaceOnUse">
+          <polygon points="0 0, 7 2.5, 0 5" fill="#58a6ff"/>
+        </marker>
+        <filter id="glow">
+          <feGaussianBlur stdDeviation="3" result="blur"/>
+          <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+        </filter>
+      </defs>
+      <g id="groot">
+        <g id="elayer"></g>
+        <g id="nlayer"></g>
+      </g>
+    </svg>
+
+    <!-- loading -->
+    <div id="loading"><div class="spin"></div><span style="color:var(--muted);font-size:12px">Loading graph…</span></div>
+    <!-- error -->
+    <div id="errbanner"></div>
+
+    <!-- graph controls -->
+    <div id="gctrls">
+      <button class="icon" id="btn-zi" title="Zoom in">+</button>
+      <button class="icon" id="btn-zo" title="Zoom out">−</button>
+    </div>
+
+    <!-- legend -->
+    <div id="legend">
+      <h5>Nodes</h5>
+      <div class="li"><div class="ldot" style="background:var(--concept)"></div>Concept</div>
+      <div class="li"><div class="ldot" style="background:var(--belief)"></div>Belief</div>
+      <div class="li"><div class="ldot" style="background:var(--episode)"></div>Episode</div>
+      <div class="li"><div class="ldot" style="background:var(--goal)"></div>Goal</div>
+      <h5>Size = LTI</h5>
+      <div class="li"><div class="ldot" style="background:var(--neg);width:7px;height:7px"></div>Neg valence</div>
+      <div class="li"><div class="ldot" style="background:var(--pos);width:11px;height:11px"></div>Pos valence</div>
+      <h5>Edges</h5>
+      <div class="li"><div class="lline" style="background:#3a4250"></div>Relation →</div>
+    </div>
+  </div>
+
+  <!-- Inspector -->
+  <aside id="insp">
+    <div id="insp-empty">
+      <svg width="44" height="44" viewBox="0 0 44 44" fill="none">
+        <circle cx="22" cy="22" r="20" stroke="currentColor" stroke-width="1.5" stroke-dasharray="4 3"/>
+        <circle cx="22" cy="22" r="7" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="22" y1="2" x2="22" y2="10" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="22" y1="34" x2="22" y2="42" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="2" y1="22" x2="10" y2="22" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="34" y1="22" x2="42" y2="22" stroke="currentColor" stroke-width="1.5"/>
+      </svg>
+      <span style="font-size:12px">Click a node to inspect</span>
+      <span style="font-size:11px">Drag to move · Shift+drag to pin</span>
+    </div>
+    <div id="insp-body">
+      <div class="badges">
+        <span id="b-type" class="badge concept">concept</span>
+        <span id="b-sev"  class="badge context">context</span>
+      </div>
+      <div id="i-lbl" class="insp-lbl"></div>
+      <div id="i-cnt" class="insp-cnt"></div>
+      <div class="hdiv"></div>
+
+      <div class="statrow">
+        <div class="stat">
+          <span class="sname">Probability</span>
+          <div class="strack"><div class="sfill" id="f-prob" style="background:var(--concept)"></div></div>
+          <span class="sval" id="v-prob">—</span>
+        </div>
+        <div class="stat">
+          <span class="sname">Confidence</span>
+          <div class="strack"><div class="sfill" id="f-conf" style="background:var(--accent)"></div></div>
+          <span class="sval" id="v-conf">—</span>
+        </div>
+        <div class="stat">
+          <span class="sname">STI</span>
+          <div class="strack"><div class="sfill" id="f-sti" style="background:var(--warn)"></div></div>
+          <span class="sval" id="v-sti">—</span>
+        </div>
+        <div class="stat">
+          <span class="sname">LTI</span>
+          <div class="strack"><div class="sfill" id="f-lti" style="background:var(--episode)"></div></div>
+          <span class="sval" id="v-lti">—</span>
+        </div>
+        <div class="stat">
+          <span class="sname">Intensity</span>
+          <div class="strack"><div class="sfill" id="f-int" style="background:var(--belief)"></div></div>
+          <span class="sval" id="v-int">—</span>
+        </div>
+      </div>
+
+      <div>
+        <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--muted);margin-bottom:5px">
+          <span>Valence</span>
+          <span id="v-val" style="font-family:monospace;color:var(--text)">0.00</span>
+        </div>
+        <div class="vtrack"><div class="vthumb" id="vthumb"></div></div>
+        <div class="vlbls"><span>−1</span><span>0</span><span>+1</span></div>
+      </div>
+
+      <div class="hdiv"></div>
+
+      <div class="meta" id="i-meta">
+        <div class="mr" id="r-entity" style="display:none">
+          <span class="mk">Entity type</span><span class="mv" id="v-entity"></span>
+        </div>
+        <div class="mr" id="r-rel" style="display:none">
+          <span class="mk">Relation</span><span class="mv" id="v-rel"></span>
+        </div>
+        <div class="mr" id="r-src" style="display:none">
+          <span class="mk">Source →</span><span class="mv" id="v-src" style="cursor:pointer;color:var(--accent)" onclick="jumpToId('src')"></span>
+        </div>
+        <div class="mr" id="r-tgt" style="display:none">
+          <span class="mk">→ Target</span><span class="mv" id="v-tgt" style="cursor:pointer;color:var(--accent)" onclick="jumpToId('tgt')"></span>
+        </div>
+        <div class="mr"><span class="mk">Space</span><span class="mv" id="v-space"></span></div>
+        <div class="mr"><span class="mk">Created</span><span class="mv" id="v-created"></span></div>
+        <div class="mr"><span class="mk">Updated</span><span class="mv" id="v-updated"></span></div>
+      </div>
+
+      <div id="sec-meta" style="display:none">
+        <div style="font-size:11px;color:var(--muted);margin-bottom:5px">Metadata</div>
+        <pre class="jsonbox" id="i-json"></pre>
+      </div>
+
+      <div class="hdiv"></div>
+
+      <div class="idrow">
+        <span id="i-id"></span>
+        <span class="copybtn" id="copybtn" title="Copy ID">⧉</span>
+      </div>
+
+      <div class="iactions">
+        <button onclick="focusNode()">⊙ Center in graph</button>
+        <button onclick="expandNeighbors()" id="btn-expand">⊛ Expand neighbors</button>
+      </div>
+    </div>
+  </aside>
+
+</div>
+
+<!-- ── Status Bar ────────────────────────────────────────────────────── -->
+<div id="statusbar">
+  <div class="si"><div class="sdot" id="sdot"></div><span id="s-conn">connecting…</span></div>
+  <div class="vsep" style="height:14px"></div>
+  <div class="si">⬡ <b id="s-nodes">0</b> nodes</div>
+  <div class="si">↗ <b id="s-edges">0</b> edges</div>
+  <div class="vsep" style="height:14px"></div>
+  <div class="si">personality: <b id="s-pers">—</b></div>
+  <div class="si">epochs: <b id="s-epoch">—</b></div>
+  <div class="hfill"></div>
+  <div id="tdist"></div>
+  <div style="margin-left:8px" class="si">refreshed: <b id="s-ts">—</b></div>
+</div>
+
+</div><!-- #app -->
+
+<div id="tip">
+  <div id="tt-type" class="ttype"></div>
+  <div id="tt-lbl" class="tlbl"></div>
+  <div class="tt">prob: <b id="tt-p"></b> · conf: <b id="tt-c"></b></div>
+  <div class="tt">STI: <b id="tt-s"></b> · LTI: <b id="tt-l"></b></div>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/d3@7/dist/d3.min.js"></script>
+<script>
+'use strict';
+// ─── Constants ────────────────────────────────────────────────────────
+const TC = { concept:'#3b82f6', belief:'#a855f7', episode:'#22c55e', goal:'#f97316', relation:'#6b7280' };
+
+// ─── State ────────────────────────────────────────────────────────────
+const S = {
+  data: { nodes: [], edges: [] },
+  sel: null,
+  types: new Set(['concept','belief','episode','goal']),
+  minConf: 0,
+  limit: 200,
+  search: '',
+  labels: true,
+  paused: false,
+  sim: null,
+  zoom: null,
+  // expand: extra node IDs to force-include
+  extra: new Set(),
+};
+let svg, g, el, nl, linkSel, nodeSel;
+
+// ─── DOM helpers ──────────────────────────────────────────────────────
+const $  = id => document.getElementById(id);
+const apiBase = () => { const v = $('api-base').value.trim(); return v || window.location.origin; };
+
+// ─── API ──────────────────────────────────────────────────────────────
+async function api(path) {
+  const r = await fetch(apiBase() + path);
+  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  return r.json();
+}
+
+// ─── Data loading ─────────────────────────────────────────────────────
+async function loadTenants() {
+  try {
+    const ts = await api('/tenants');
+    const sel = $('s-tenant'), cur = sel.value;
+    sel.innerHTML = ts.map(t => `<option${t===cur?' selected':''}>${t}</option>`).join('');
+  } catch { /* default */ }
+}
+
+async function loadSpaces() {
+  try {
+    const t = $('s-tenant').value;
+    const ss = await api('/spaces?tenant_id=' + encodeURIComponent(t));
+    const sel = $('s-space'), cur = sel.value;
+    sel.innerHTML = ss.map(s => `<option${s===cur?' selected':''}>${s}</option>`).join('');
+  } catch { /* default */ }
+}
+
+async function loadGraph() {
+  showLoad(true); hideErr();
+  try {
+    const t  = $('s-tenant').value || 'default';
+    const sp = $('s-space').value  || 'default';
+    const p  = new URLSearchParams({
+      tenant_id: t, space: sp, limit: S.limit,
+      min_confidence: S.minConf,
+      types: [...S.types].join(','),
+    });
+    const data = await api('/graph?' + p);
+    S.data = data;
+    S.extra.clear();
+    renderGraph();
+    updateStatusBar();
+    setOnline(true);
+    $('s-ts').textContent = new Date().toLocaleTimeString();
+  } catch(e) {
+    setOnline(false);
+    showErr('Failed: ' + e.message);
+  } finally { showLoad(false); }
+}
+
+async function loadStatus() {
+  try {
+    const s = await api('/status');
+    const p = s.personality || {};
+    $('s-pers').textContent  = p.preset_name || '—';
+    $('s-epoch').textContent = p.epoch_count ?? '—';
+  } catch { /* ignore */ }
+}
+
+// ─── Graph init (once) ────────────────────────────────────────────────
+function initGraph() {
+  svg = d3.select('#gsvg');
+  g   = d3.select('#groot');
+  el  = d3.select('#elayer');
+  nl  = d3.select('#nlayer');
+
+  const w = $('gsvg').clientWidth || 1200;
+  const h = $('gsvg').clientHeight || 700;
+
+  S.zoom = d3.zoom().scaleExtent([0.02, 14]).on('zoom', ev => g.attr('transform', ev.transform));
+  svg.call(S.zoom);
+  svg.on('click', ev => { if (ev.target.tagName === 'svg') selectNode(null); });
+
+  S.sim = d3.forceSimulation()
+    .force('link',  d3.forceLink().id(d => d.id).distance(d => 80 + nR(d.source) + nR(d.target)).strength(0.7))
+    .force('charge', d3.forceManyBody().strength(-220).distanceMax(380))
+    .force('center', d3.forceCenter(w/2, h/2))
+    .force('coll',   d3.forceCollide().radius(d => nR(d) + 16))
+    .alphaDecay(0.025)
+    .velocityDecay(0.38)
+    .on('tick', tick);
+}
+
+// ─── Render graph ─────────────────────────────────────────────────────
+function renderGraph() {
+  let { nodes, edges } = S.data;
+
+  // search filter
+  if (S.search) {
+    const q = S.search.toLowerCase();
+    const ids = new Set(nodes.filter(n => (n.label||'').toLowerCase().includes(q) || (n.content||'').toLowerCase().includes(q)).map(n => n.id));
+    nodes = nodes.filter(n => ids.has(n.id));
+    edges = edges.filter(e => ids.has(e.source_id) && ids.has(e.target_id));
+  }
+
+  const nodeIds = new Set(nodes.map(n => n.id));
+
+  const d3e = edges
+    .filter(e => nodeIds.has(e.source_id) && nodeIds.has(e.target_id))
+    .map(e => ({ ...e, source: e.source_id, target: e.target_id }));
+
+  // preserve positions
+  const pos = new Map();
+  if (S.sim.nodes) S.sim.nodes().forEach(n => pos.set(n.id, { x: n.x, y: n.y, fx: n.fx, fy: n.fy }));
+  nodes.forEach(n => { const p = pos.get(n.id); if (p) Object.assign(n, p); });
+
+  $('s-nodes').textContent = nodes.length;
+  $('s-edges').textContent = d3e.length;
+  updateTypeDist(nodes);
+
+  // ── edges
+  linkSel = el.selectAll('.egroup').data(d3e, d => d.id)
+    .join(
+      en => {
+        const eg = en.append('g').attr('class', 'egroup');
+        eg.append('line').attr('class', 'eline').attr('marker-end', 'url(#arr)');
+        eg.append('text').attr('class', 'elbl');
+        return eg;
+      },
+      up => up,
+      ex => ex.remove()
+    );
+  linkSel.select('.eline')
+    .attr('stroke-width', d => Math.max(1, (d.probability||0.5)*2.5))
+    .attr('stroke-opacity', 0.65);
+  linkSel.select('.elbl').text(d => d.relation || '');
+
+  // ── nodes
+  nodeSel = nl.selectAll('.ngroup').data(nodes, d => d.id)
+    .join(
+      en => {
+        const ng = en.append('g').attr('class', 'ngroup')
+          .call(d3.drag().on('start', dStart).on('drag', dDrag).on('end', dEnd))
+          .on('click',     (ev, d) => { ev.stopPropagation(); selectNode(d); })
+          .on('mouseover', showTip)
+          .on('mousemove', moveTip)
+          .on('mouseout',  hideTip);
+        ng.append('circle').attr('class', 'ncircle');
+        ng.append('text').attr('class', 'nlbl');
+        return ng;
+      },
+      up => up,
+      ex => ex.remove()
+    );
+
+  nodeSel.select('.ncircle')
+    .attr('r', nR)
+    .attr('fill', d => TC[d.type] || '#6b7280')
+    .attr('stroke', d => {
+      const v = d.valence || 0;
+      if (v < -0.3) return '#ef4444';
+      if (v > 0.3)  return '#22c55e';
+      return '#2a3038';
+    })
+    .attr('stroke-width', d => Math.abs(d.valence||0) > 0.3 ? 2.5 : 1.5);
+
+  nodeSel.select('.nlbl')
+    .text(d => trunc(d.label, 24))
+    .attr('y', d => nR(d) + 11);
+
+  applyLabelToggle();
+
+  S.sim.nodes(nodes);
+  S.sim.force('link').links(d3e);
+  if (!S.paused) S.sim.alpha(0.5).restart();
+
+  if (S.sel) {
+    const still = nodes.find(n => n.id === S.sel.id);
+    still ? (S.sel = still, applyHighlight()) : selectNode(null);
+  }
+}
+
+// ─── Tick ─────────────────────────────────────────────────────────────
+function tick() {
+  if (linkSel) linkSel.each(function(d) {
+    const sx=d.source.x, sy=d.source.y, tx=d.target.x, ty=d.target.y;
+    const dx=tx-sx, dy=ty-sy, dist=Math.sqrt(dx*dx+dy*dy)||1;
+    const rs=nR(d.source), rt=nR(d.target), al=11;
+    const x1=sx+dx*rs/dist, y1=sy+dy*rs/dist;
+    const x2=tx-dx*(rt+al)/dist, y2=ty-dy*(rt+al)/dist;
+    const d3g = d3.select(this);
+    d3g.select('.eline').attr('x1',x1).attr('y1',y1).attr('x2',x2).attr('y2',y2);
+    d3g.select('.elbl').attr('x',(x1+x2)/2).attr('y',(y1+y2)/2-4);
+  });
+  if (nodeSel) nodeSel.attr('transform', d => `translate(${d.x??0},${d.y??0})`);
+}
+
+// ─── Drag ─────────────────────────────────────────────────────────────
+function dStart(ev, d) { if (!ev.active) S.sim.alphaTarget(0.3).restart(); d.fx=d.x; d.fy=d.y; }
+function dDrag(ev, d)  { d.fx=ev.x; d.fy=ev.y; }
+function dEnd(ev, d)   {
+  if (!ev.active) S.sim.alphaTarget(0);
+  if (!ev.sourceEvent.shiftKey) { d.fx=null; d.fy=null; }
+}
+
+// ─── Selection + highlight ────────────────────────────────────────────
+function selectNode(d) {
+  S.sel = d;
+  applyHighlight();
+  updateInspector(d);
+}
+
+function applyHighlight() {
+  if (!S.sel) {
+    nodeSel && nodeSel.classed('sel',false).classed('dim',false);
+    linkSel && linkSel.select('.eline').classed('hi',false).classed('dim',false).attr('marker-end','url(#arr)');
+    linkSel && linkSel.select('.elbl').classed('show',false);
+    return;
+  }
+  const sid = S.sel.id;
+  const connN = new Set([sid]);
+  const connE = new Set();
+  linkSel && linkSel.each(d => {
+    const s = typeof d.source==='object' ? d.source.id : d.source;
+    const t = typeof d.target==='object' ? d.target.id : d.target;
+    if (s===sid||t===sid) { connN.add(s); connN.add(t); connE.add(d.id); }
+  });
+  nodeSel && nodeSel.classed('sel', d=>d.id===sid).classed('dim', d=>!connN.has(d.id));
+  linkSel && linkSel.each(function(d) {
+    const hi = connE.has(d.id);
+    d3.select(this).select('.eline').classed('hi',hi).classed('dim',!hi).attr('marker-end', hi?'url(#arh)':'url(#arr)');
+    d3.select(this).select('.elbl').classed('show', hi);
+  });
+}
+
+// ─── Inspector ────────────────────────────────────────────────────────
+function updateInspector(d) {
+  $('insp-empty').style.display = d ? 'none' : 'flex';
+  $('insp-body').style.display  = d ? 'flex' : 'none';
+  if (!d) return;
+
+  const sev = classify(d);
+  const bt = $('b-type'); bt.textContent = d.type; bt.className = 'badge ' + d.type;
+  const bs = $('b-sev');  bs.textContent = sev.replace(/_/g,' '); bs.className = 'badge ' + sev;
+
+  $('i-lbl').textContent = d.label;
+  const ic = $('i-cnt');
+  if (d.content && d.content !== d.label) { ic.textContent = d.content; ic.style.display = 'block'; }
+  else ic.style.display = 'none';
+
+  setBar('prob', d.probability, 1,   TC[d.type]||'#58a6ff');
+  setBar('conf', d.confidence,  1,   '#58a6ff');
+  setBar('sti',  d.sti,         2,   '#f59e0b');
+  setBar('lti',  d.lti,         1,   '#22c55e');
+  setBar('int',  d.intensity,   1,   '#a855f7');
+
+  const v = d.valence || 0;
+  $('v-val').textContent = v.toFixed(3);
+  $('vthumb').style.left = (((v + 1) / 2) * 100).toFixed(1) + '%';
+
+  showMR('r-entity', 'v-entity', d.entity_type);
+  showMR('r-rel',    'v-rel',    d.relation);
+  showMR('r-src',    'v-src',    d.source_id ? d.source_id.slice(0,12)+'…' : null, d.source_id);
+  showMR('r-tgt',    'v-tgt',    d.target_id ? d.target_id.slice(0,12)+'…' : null, d.target_id);
+  $('v-space').textContent   = d.space || '—';
+  $('v-created').textContent = (d.created_at||'—').split('.')[0];
+  $('v-updated').textContent = (d.updated_at||'—').split('.')[0];
+
+  let m = {};
+  try { m = typeof d.metadata==='string' ? JSON.parse(d.metadata) : (d.metadata||{}); } catch {}
+  if (Object.keys(m).length) {
+    $('sec-meta').style.display = 'block';
+    $('i-json').textContent = JSON.stringify(m, null, 2);
+  } else { $('sec-meta').style.display = 'none'; }
+
+  $('i-id').textContent = d.id;
+  $('i-id').title = d.id;
+
+  // store full IDs for jump
+  if (d.source_id) $('v-src').dataset.fullid = d.source_id;
+  if (d.target_id) $('v-tgt').dataset.fullid = d.target_id;
+}
+
+function setBar(k, v, max, col) {
+  const pct = Math.min(100, Math.max(0, ((v||0)/max)*100));
+  $('f-'+k).style.width = pct+'%';
+  $('f-'+k).style.background = col;
+  $('v-'+k).textContent = v != null ? (v).toFixed(3) : '—';
+}
+function showMR(rid, vid, txt, fullid) {
+  if (txt) { $(rid).style.display='flex'; $(vid).textContent=txt; if (fullid) $(vid).dataset.fullid=fullid; }
+  else $(rid).style.display='none';
+}
+
+// ─── Tooltip ──────────────────────────────────────────────────────────
+function showTip(ev, d) {
+  $('tt-type').textContent = d.type + (d.entity_type ? ' · '+d.entity_type : '');
+  $('tt-lbl').textContent  = d.label;
+  $('tt-p').textContent    = (d.probability||0).toFixed(2);
+  $('tt-c').textContent    = (d.confidence||0).toFixed(2);
+  $('tt-s').textContent    = (d.sti||0).toFixed(2);
+  $('tt-l').textContent    = (d.lti||0).toFixed(2);
+  $('tip').style.display = 'block';
+  moveTip(ev);
+}
+function moveTip(ev) {
+  $('tip').style.left = (ev.clientX+14)+'px';
+  $('tip').style.top  = (ev.clientY-14)+'px';
+}
+function hideTip() { $('tip').style.display='none'; }
+
+// ─── Actions ──────────────────────────────────────────────────────────
+function focusNode() {
+  if (!S.sel) return;
+  const d = S.sel, w = $('gsvg').clientWidth, h = $('gsvg').clientHeight, sc = 1.8;
+  if (!d.x) return;
+  svg.transition().duration(500).call(
+    S.zoom.transform,
+    d3.zoomIdentity.translate(w/2 - d.x*sc, h/2 - d.y*sc).scale(sc)
+  );
+}
+
+function fitGraph() {
+  const nodes = S.sim?.nodes() || [];
+  if (!nodes.length) return;
+  let x0=Infinity, x1=-Infinity, y0=Infinity, y1=-Infinity;
+  nodes.forEach(n => { if(n.x){x0=Math.min(x0,n.x);x1=Math.max(x1,n.x);} if(n.y){y0=Math.min(y0,n.y);y1=Math.max(y1,n.y);} });
+  if (!isFinite(x0)) return;
+  const pad=60, w=$('gsvg').clientWidth, h=$('gsvg').clientHeight;
+  const sc = Math.min(w/(x1-x0+pad*2), h/(y1-y0+pad*2), 3) * 0.9;
+  svg.transition().duration(500).call(
+    S.zoom.transform,
+    d3.zoomIdentity.translate((w-sc*(x0+x1))/2, (h-sc*(y0+y1))/2).scale(sc)
+  );
+}
+
+async function expandNeighbors() {
+  if (!S.sel) return;
+  const d = S.sel;
+  // Reload graph filtering to include all neighbors of selected node
+  const t  = $('s-tenant').value || 'default';
+  const sp = $('s-space').value  || 'default';
+  try {
+    // Fetch the full atom to get neighbor IDs via a broader graph call
+    const p = new URLSearchParams({
+      tenant_id: t, space: sp, limit: S.limit * 2,
+      min_confidence: 0, types: 'concept,belief,episode,goal',
+    });
+    const data = await api('/graph?' + p);
+    S.data = data;
+    renderGraph();
+    // Re-select the same node
+    const node = S.sim.nodes().find(n => n.id === d.id);
+    if (node) selectNode(node);
+  } catch(e) { showErr('Expand failed: '+e.message); }
+}
+
+function jumpToId(which) {
+  const fullid = (which==='src' ? $('v-src') : $('v-tgt')).dataset.fullid;
+  if (!fullid) return;
+  const node = S.sim?.nodes()?.find(n => n.id === fullid);
+  if (node) { selectNode(node); focusNode(); }
+}
+
+function copyAtomId() {
+  if (!S.sel) return;
+  navigator.clipboard.writeText(S.sel.id).catch(()=>{});
+  const b = $('copybtn'); b.textContent='✓';
+  setTimeout(() => b.textContent='⧉', 1200);
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────
+function nR(d) {
+  if (!d || typeof d !== 'object') return 7;
+  return Math.max(5, Math.min(22, 7 + (d.lti||0)*14));
+}
+function classify(d) {
+  if ((d.valence||0)<-0.5 && (d.intensity||0)>0.5) return 'critical_warning';
+  if ((d.probability||0)<0.3 && (d.confidence||0)>0.3) return 'known_antipattern';
+  return 'context';
+}
+function trunc(s, n) { return (s||'').length > n ? s.slice(0,n)+'…' : (s||''); }
+
+// ─── UI helpers ───────────────────────────────────────────────────────
+function showLoad(v) { $('loading').classList.toggle('gone', !v); }
+function showErr(m)  { const b=$('errbanner'); b.textContent=m; b.style.display='block'; setTimeout(()=>b.style.display='none',5000); }
+function hideErr()   { $('errbanner').style.display='none'; }
+function setOnline(v){ $('sdot').className='sdot'+(v?'':' off'); $('s-conn').textContent=v?'connected':'disconnected'; }
+
+function applyLabelToggle() {
+  if (!g) return;
+  g.node().classList.toggle('lbls-off', !S.labels);
+}
+
+function updateStatusBar() {/* type dist handled in renderGraph */}
+
+function updateTypeDist(nodes) {
+  const c = {};
+  nodes.forEach(n => { c[n.type]=(c[n.type]||0)+1; });
+  const tot = nodes.length || 1;
+  $('tdist').innerHTML = Object.entries(c).map(([t,n])=>{
+    const w = Math.max(3, Math.round(n/tot*64));
+    return `<div class="dbar" style="width:${w}px;background:${TC[t]||'#6b7280'}" title="${t}: ${n}"></div>`;
+  }).join('');
+}
+
+// ─── Bind controls ────────────────────────────────────────────────────
+function bindControls() {
+  $('s-tenant').addEventListener('change', async () => { await loadSpaces(); loadGraph(); });
+  $('s-space').addEventListener('change', () => loadGraph());
+  $('api-base').addEventListener('change', async () => { await loadTenants(); await loadSpaces(); loadGraph(); loadStatus(); });
+  $('btn-refresh').addEventListener('click', async () => { await loadTenants(); await loadSpaces(); loadGraph(); loadStatus(); });
+
+  let st;
+  $('search').addEventListener('input', () => {
+    clearTimeout(st);
+    st = setTimeout(() => { S.search = $('search').value.trim(); renderGraph(); }, 280);
+  });
+
+  document.querySelectorAll('.ttoggle').forEach(el => {
+    el.addEventListener('click', () => {
+      const t = el.dataset.t;
+      if (S.types.has(t)) { if (S.types.size > 1) S.types.delete(t); else return; }
+      else S.types.add(t);
+      el.classList.toggle('on',  S.types.has(t));
+      el.classList.toggle('off', !S.types.has(t));
+      loadGraph();
+    });
+  });
+
+  $('sl-conf').addEventListener('input', () => {
+    S.minConf = parseFloat($('sl-conf').value);
+    $('rv-conf').textContent = S.minConf.toFixed(2);
+  });
+  $('sl-conf').addEventListener('change', () => loadGraph());
+
+  $('s-limit').addEventListener('change', () => { S.limit = parseInt($('s-limit').value); loadGraph(); });
+
+  $('btn-labels').addEventListener('click', () => {
+    S.labels = !S.labels;
+    $('btn-labels').classList.toggle('on', S.labels);
+    applyLabelToggle();
+  });
+
+  $('btn-pause').addEventListener('click', () => {
+    S.paused = !S.paused;
+    if (S.paused) { S.sim.stop(); $('btn-pause').textContent='▶ Resume'; $('btn-pause').classList.add('on'); }
+    else { S.sim.alpha(0.3).restart(); $('btn-pause').textContent='⏸ Pause'; $('btn-pause').classList.remove('on'); }
+  });
+
+  $('btn-fit').addEventListener('click', fitGraph);
+  $('btn-zi').addEventListener('click', () => svg.transition().duration(220).call(S.zoom.scaleBy, 1.5));
+  $('btn-zo').addEventListener('click', () => svg.transition().duration(220).call(S.zoom.scaleBy, 0.67));
+  $('copybtn').addEventListener('click', copyAtomId);
+
+  document.addEventListener('keydown', ev => {
+    if (ev.target.tagName === 'INPUT') return;
+    if (ev.key === 'Escape') selectNode(null);
+    if (ev.key === 'f') fitGraph();
+    if (ev.key === 'r') { loadTenants(); loadSpaces(); loadGraph(); }
+    if (ev.key === ' ') { ev.preventDefault(); $('btn-pause').click(); }
+    if (ev.key === 'l') $('btn-labels').click();
+  });
+}
+
+// ─── Init ─────────────────────────────────────────────────────────────
+async function init() {
+  if (window.location.protocol !== 'file:') {
+    $('api-base').value = window.location.origin;
+    $('api-base').placeholder = window.location.origin;
+  }
+  bindControls();
+  initGraph();
+  await loadTenants();
+  await loadSpaces();
+  await Promise.all([loadGraph(), loadStatus()]);
+  setTimeout(fitGraph, 2800);
+}
+
+document.addEventListener('DOMContentLoaded', init);
+</script>
+</body>
+</html>

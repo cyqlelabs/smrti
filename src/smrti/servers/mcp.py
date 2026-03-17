@@ -12,6 +12,7 @@ from mcp import types
 from smrti import Smrti
 from smrti.retrieval.classify import classify_memory
 from smrti.servers.tools import TOOLS
+from smrti.servers.reflect_loop import run_reflect_loop
 
 
 def create_smrti() -> Smrti:
@@ -132,11 +133,15 @@ def run_mcp_server() -> None:
         return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 
     async def _main() -> None:
-        async with stdio_server() as (read_stream, write_stream):
-            await server.run(
-                read_stream,
-                write_stream,
-                server.create_initialization_options(),
-            )
+        task = asyncio.create_task(run_reflect_loop(lambda: [mem]))
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await server.run(
+                    read_stream,
+                    write_stream,
+                    server.create_initialization_options(),
+                )
+        finally:
+            task.cancel()
 
     asyncio.run(_main())

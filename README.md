@@ -8,13 +8,13 @@ When an agent calls `remember()`, Smrti embeds the text, resolves any entities i
 
 On `recall()`, the query is embedded and matched against the tenant-partitioned vector index (sqlite-vec KNN). Results are expanded one hop through the graph, then ranked by a salience formula that blends semantic similarity, short/long-term attention, confidence, and emotional intensity. When a memory has strong negative valence (e.g. a past outage), salience weights shift dynamically so critical errors outrank recent trivia. Each result is classified as `critical_warning`, `known_antipattern`, or `context`.
 
-Periodically calling `reflect()` runs a consolidation epoch: pending evidence is merged via PLN Bayesian revision, attention decays, high-importance nodes get promoted to long-term memory, contradictions are resolved by weakening the less confident belief, and low-salience atoms are pruned. A personality profile (16 tunable hyperparameters) governs every weight and threshold in this pipeline.
+Consolidation happens automatically in all server modes (MCP, REST, proxy) on a configurable timer (default 60s, set `SMRTI_REFLECT_INTERVAL`). Each cycle merges pending evidence via PLN Bayesian revision, decays attention, promotes high-importance nodes to long-term memory, resolves contradictions by weakening the less confident belief, and prunes low-salience atoms. You can also trigger it manually via `reflect()`. A personality profile (16 tunable hyperparameters) governs every weight and threshold in this pipeline.
 
 ## Features
 
 - **Graph-structured memory** — Concepts, beliefs, episodes, and goals as typed atoms with relation edges
 - **Bayesian truth maintenance** — Probabilistic Logic Networks (PLN) for merging independent observations
-- **Personality-driven retrieval** — 5 presets with 16 tunable hyperparameters that shape what gets surfaced
+- **Personality-driven retrieval** — 6 presets with 16 tunable hyperparameters that shape what gets surfaced
 - **Multi-tenant isolation** — Tenant/space overlay model with cross-space reads and single-space writes
 - **Three server modes** — MCP (stdio), REST API, and OpenAI-compatible proxy
 - **Entity resolution** — 4-tier cascade: exact match, alias lookup, fuzzy (RapidFuzz), embedding similarity
@@ -96,6 +96,7 @@ export SMRTI_PERSONALITY=balanced
 export SMRTI_TENANT_ID=default
 export SMRTI_SPACE=default
 export SMRTI_READ_SPACES=default,shared   # comma-separated
+export SMRTI_REFLECT_INTERVAL=60          # auto-consolidation interval in seconds (0 to disable)
 ```
 
 ### REST API
@@ -167,6 +168,7 @@ export SMRTI_RECALL_MIN_CONFIDENCE=0.3
 export SMRTI_QUERY_MODE=concat        # "concat" (default) or "last" for last-message-only
 export SMRTI_QUERY_CONTEXT_MSGS=5     # number of recent messages to include in query
 export SMRTI_QUERY_MAX_CHARS=500      # max characters for the recall query
+export SMRTI_REFLECT_INTERVAL=60      # auto-consolidation interval in seconds (0 to disable)
 ```
 
 ## Multi-Tenant / Space Model
@@ -265,7 +267,7 @@ S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w
 When valence < -0.5, weight shifts dynamically from w_sti to w_val so critical errors outrank recent trivia.
 ```
 
-**Consolidation epoch** (triggered by `reflect()`):
+**Consolidation epoch** (runs automatically every `SMRTI_REFLECT_INTERVAL` seconds, or manually via `reflect()`):
 
 1. Process pending evidence via Bayesian update
 2. Decay STI and confidence

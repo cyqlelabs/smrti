@@ -1,6 +1,8 @@
 """FastAPI REST server for smrti."""
 from __future__ import annotations
 
+import asyncio
+from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, HTTPException
@@ -8,11 +10,21 @@ from pydantic import BaseModel
 
 from smrti import Smrti
 from smrti.servers.mcp import create_smrti, handle_tool
+from smrti.servers.reflect_loop import run_reflect_loop
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    task = asyncio.create_task(run_reflect_loop(lambda: [get_mem()]))
+    yield
+    task.cancel()
+
 
 app = FastAPI(
     title="Smrti Memory API",
     description="AtomSpace-inspired memory engine for AI agents",
     version="0.1.0",
+    lifespan=lifespan,
 )
 
 _mem: Optional[Smrti] = None

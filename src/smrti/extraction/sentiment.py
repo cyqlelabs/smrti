@@ -9,12 +9,12 @@ if TYPE_CHECKING:
     from smrti.core.embed import EmbeddingProvider
 
 _NEGATIVE_ANCHORS = [
-    "error failure crash bug vulnerability exploit dangerous",
-    "mistake wrong broken never avoid warning incident",
+    "This is a terrible, awful, and completely negative experience.",
+    "I hate this, it is horrible, bad, and very frustrating.",
 ]
 _POSITIVE_ANCHORS = [
-    "success correct reliable stable proven works great",
-    "prefer recommend good safe secure love best",
+    "This is an excellent, wonderful, and completely positive experience.",
+    "I love this, it is great, fantastic, and very enjoyable.",
 ]
 
 _lock = threading.Lock()
@@ -51,11 +51,11 @@ def estimate_valence(text: str, embed: EmbeddingProvider) -> float:
     """
     neg_vecs, pos_vecs = _ensure_anchors(embed)
     vec = embed.embed(text)
-    neg_sim = max(_cosine(vec, nv) for nv in neg_vecs)
-    pos_sim = max(_cosine(vec, pv) for pv in pos_vecs)
+    neg_sim = sum(_cosine(vec, nv) for nv in neg_vecs) / len(neg_vecs)
+    pos_sim = sum(_cosine(vec, pv) for pv in pos_vecs) / len(pos_vecs)
     diff = pos_sim - neg_sim
-    # Scale so a clear signal (e.g. 0.15 diff) maps to ~±0.7
-    scaled = max(-1.0, min(1.0, diff * 5.0))
+    # Scale so a clear signal (e.g. 0.15 diff) maps to ~±0.45
+    scaled = max(-1.0, min(1.0, diff * 3.0))
     # Dead-zone: if both similarities are low or very close, return 0
     if abs(diff) < 0.03:
         return 0.0

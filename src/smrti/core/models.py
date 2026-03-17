@@ -102,6 +102,15 @@ class EpochResult(BaseModel):
     contradictions_resolved: int
 
 
+def _safe_entity_type(value: str | None) -> EntityType | None:
+    if not value:
+        return None
+    try:
+        return EntityType(value)
+    except ValueError:
+        return EntityType.CONCEPT
+
+
 def atom_from_row(row) -> Atom:
     d = dict(row)
     return Atom(
@@ -121,7 +130,7 @@ def atom_from_row(row) -> Atom:
             valence=d.get("valence", 0.0),
             intensity=d.get("intensity", 0.0),
         ),
-        entity_type=EntityType(d["entity_type"]) if d.get("entity_type") else None,
+        entity_type=_safe_entity_type(d.get("entity_type")),
         source_id=d.get("source_id"),
         target_id=d.get("target_id"),
         relation=d.get("relation"),

@@ -92,7 +92,6 @@ def test_inject_creates_system_message_when_none_exists():
     msgs = result["messages"]
     assert msgs[0]["role"] == "system"
     assert "User prefers Python" in msgs[0]["content"]
-    assert "confidence=0.90" in msgs[0]["content"]
     assert msgs[1]["role"] == "user"
 
 
@@ -441,27 +440,26 @@ def test_stream_upstream_error_yields_sse_error_frame():
 
 def test_format_critical_warning():
     r = _mem_recall_result("Never use eval()", valence=-0.9, intensity=0.9, confidence=0.85)
-    formatted = _format_memory(r)
-    assert "<critical_warning>" in formatted
-    assert "PAST MISTAKE" in formatted
-    assert "Never use eval()" in formatted
-    assert "DO NOT repeat" in formatted
+    line, severity = _format_memory(r)
+    assert severity == "critical_warning"
+    assert "YOU MUST NOT" in line
+    assert "Never use eval()" in line
+    assert "confirmed mistake" in line
 
 
 def test_format_known_antipattern():
     r = _mem_recall_result("This API is reliable", valence=0.0, intensity=0.0, probability=0.1, confidence=0.6)
-    formatted = _format_memory(r)
-    assert "<known_antipattern>" in formatted
-    assert "DISPROVEN" in formatted
-    assert "Avoid this approach" in formatted
+    line, severity = _format_memory(r)
+    assert severity == "known_antipattern"
+    assert "AVOID" in line
+    assert "This API is reliable" in line
 
 
 def test_format_context():
     r = _mem_recall_result("User prefers dark mode", confidence=0.9)
-    formatted = _format_memory(r)
-    assert "<context>" in formatted
-    assert "User prefers dark mode" in formatted
-    assert "confidence=0.90" in formatted
+    line, severity = _format_memory(r)
+    assert severity == "context"
+    assert "User prefers dark mode" in line
 
 
 def test_inject_adds_warning_preamble_for_critical():
@@ -470,8 +468,8 @@ def test_inject_adds_warning_preamble_for_critical():
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
         result = run(_inject_context(body, "t1", "s1", ["s1"]))
     content = result["messages"][0]["content"]
-    assert "MUST pay attention" in content
-    assert "<critical_warning>" in content
+    assert "behavioral constraints" in content
+    assert "YOU MUST NOT" in content
 
 
 def test_inject_no_preamble_for_context_only():
@@ -480,8 +478,8 @@ def test_inject_no_preamble_for_context_only():
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
         result = run(_inject_context(body, "t1", "s1", ["s1"]))
     content = result["messages"][0]["content"]
-    assert "MUST pay attention" not in content
-    assert "<context>" in content
+    assert "behavioral constraints" not in content
+    assert "Note:" in content
 
 
 # ── _build_query contextual reformulation ─────────────────────────────────────

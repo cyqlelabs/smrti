@@ -1,6 +1,6 @@
 # smrti
 
-[AtomSpace](https://wiki.opencog.org/w/AtomSpace)-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing. No extra infra to maintain. Just Plug & Play.
+<a href="https://wiki.opencog.org/w/AtomSpace" target="_blank">AtomSpace</a>-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing. No extra infra to maintain. Just Plug & Play.
 
 ## How It Works
 

@@ -44,7 +44,7 @@ async def extract_knowledge(
                     {"role": "user", "content": text},
                 ],
                 "temperature": 0.0,
-                "max_tokens": 512,
+                "max_tokens": 1024,
             },
             timeout=30.0,
         )
@@ -88,14 +88,19 @@ async def extract_and_link(
                 continue
             atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
             entity_ids[name] = atom_id
+            entity_ids.setdefault(name.lower(), atom_id)
             for alias in ent.get("aliases", []):
-                if alias and alias != name:
+                if alias and alias.lower() != name.lower():
                     resolver.aliases.add(atom_id, alias, mem.tenant_id, mem.write_space)
+                    entity_ids.setdefault(alias, atom_id)
+                    entity_ids.setdefault(alias.lower(), atom_id)
             mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
 
         for claim in extracted.get("claims", []):
-            subj_id = entity_ids.get(claim.get("subject", ""))
-            obj_id = entity_ids.get(claim.get("object", ""))
+            subj_raw = claim.get("subject", "")
+            obj_raw = claim.get("object", "")
+            subj_id = entity_ids.get(subj_raw) or entity_ids.get(subj_raw.lower())
+            obj_id = entity_ids.get(obj_raw) or entity_ids.get(obj_raw.lower())
             if subj_id and obj_id:
                 mem.atomspace.link_atoms(
                     subj_id, obj_id, claim.get("predicate", "related_to"),

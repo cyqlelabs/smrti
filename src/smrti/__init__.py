@@ -60,7 +60,7 @@ class Smrti:
             (self.tenant_id, self.write_space),
         )
         if existing:
-            if existing["preset_name"] != preset_name:
+            if existing["preset_name"] != preset_name and os.environ.get("SMRTI_PERSONALITY"):
                 self.set_personality(preset_name)
             return
         if not existing:

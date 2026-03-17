@@ -259,8 +259,8 @@ def test_store_extracts_entities_when_enabled():
     async def capturing_remember(content, tenant_id, write_space):
         return "episode-abc"
 
-    async def capturing_extract(episode_id, content, tenant_id, write_space, auth, model):
-        extract_calls.append((episode_id, content, auth, model))
+    async def capturing_extract(episode_id, content, tenant_id, write_space, auth, model, source="user"):
+        extract_calls.append((episode_id, content, auth, model, source))
 
     with patch("smrti.servers.proxy._remember", capturing_remember), \
          patch("smrti.servers.proxy._extract_and_link", capturing_extract), \
@@ -269,14 +269,14 @@ def test_store_extracts_entities_when_enabled():
         run(_store_exchange(messages, "", "t1", "s1", auth="Bearer sk-test", model="gpt-4o"))
 
     assert len(extract_calls) == 1
-    assert extract_calls[0] == ("episode-abc", "My name is Nico", "Bearer sk-test", "gpt-4o")
+    assert extract_calls[0] == ("episode-abc", "My name is Nico", "Bearer sk-test", "gpt-4o", "user")
 
 
 def test_store_skips_extraction_when_disabled():
     messages = [{"role": "user", "content": "My name is Nico"}]
     extract_calls = []
 
-    async def capturing_extract(episode_id, content, tenant_id, write_space, auth, model):
+    async def capturing_extract(episode_id, content, tenant_id, write_space, auth, model, source="user"):
         extract_calls.append(content)
 
     with patch("smrti.servers.proxy._remember", _noop_remember), \

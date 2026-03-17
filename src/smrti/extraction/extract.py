@@ -67,7 +67,7 @@ async def extract_knowledge(
         return None
 
 
-_COREF_TYPES = {"person", "organization", "project", "tool", "location", "event", "goal"}
+_COREF_TYPES = {"person", "organization", "project", "tool", "location", "event", "goal", "preference", "constraint"}
 
 
 def _build_entity_context(mem: "Smrti") -> str:

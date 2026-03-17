@@ -85,7 +85,7 @@ def retrieve(
             WHERE id IN ({exp_ph})
               AND tenant_id = ?
               AND space IN ({spaces_ph})
-              AND type != 'relation'
+              AND type IN ('concept', 'belief', 'episode', 'goal')
               AND confidence >= ?""",
         (*exp_list, tenant_id, *read_spaces, min_confidence),
     )

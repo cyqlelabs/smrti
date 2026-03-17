@@ -133,7 +133,7 @@ def _enrich_content(r: RecallResult, mem) -> str:
     atom = r.atom
     if atom.content:
         return atom.content
-    if atom.type.value != "concept":
+    if atom.type.value not in ("concept", "belief", "goal"):
         return atom.label
 
     rows = mem.db.fetchall(

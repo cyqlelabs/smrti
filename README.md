@@ -297,6 +297,7 @@ graph TD
         EPO["epoch"]
         TRU["truth"]
         CON["connections"]
+        HEA["healing"]
     end
 
     subgraph Extraction
@@ -329,10 +330,11 @@ When valence < -0.5, weight shifts dynamically from w_sti to w_val so critical e
 1. Process pending evidence via Bayesian update
 2. Decay STI and confidence
 3. Propagate STI and valence to 1-hop neighbors
-4. Promote high-STI atoms to LTI
-5. Resolve contradictions (weaken less confident belief)
-6. Discover cross-domain connections (every 10th epoch)
-7. Prune atoms below confidence/LTI floors
+4. Heal orphaned episodes (link to most salient person)
+5. Promote high-STI atoms to LTI
+6. Resolve contradictions (weaken less confident belief)
+7. Discover cross-domain connections (every 10th epoch)
+8. Prune atoms below confidence/LTI floors
 
 ## Data Model
 

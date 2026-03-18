@@ -56,9 +56,13 @@ class Smrti:
 
     def _ensure_personality(self, preset_name: str) -> None:
         existing = self.db.fetchone(
-            "SELECT tenant_id FROM personality WHERE tenant_id = ? AND space = ?",
+            "SELECT preset_name FROM personality WHERE tenant_id = ? AND space = ?",
             (self.tenant_id, self.write_space),
         )
+        if existing:
+            if existing["preset_name"] != preset_name:
+                self.set_personality(preset_name)
+            return
         if not existing:
             profile = load_preset(preset_name)
             self.db.execute(

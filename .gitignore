@@ -9,3 +9,4 @@ venv/
 *.db-wal
 *.db-shm
 .env
+src/smrti/_version.py

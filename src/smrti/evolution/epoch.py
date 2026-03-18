@@ -4,6 +4,7 @@ from __future__ import annotations
 from smrti.core.models import EpochResult, TruthValue
 from smrti.evolution.attention import propagate_sti
 from smrti.evolution.connections import discover_connections
+from smrti.evolution.healing import heal_orphaned_episodes
 from smrti.evolution.truth import update_truth
 from smrti.evolution.valence import propagate_valence
 
@@ -107,6 +108,9 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             if valence_prop_factor > 0 and abs(row["valence"]) > 0.3 and row["intensity"] > 0.3:
                 propagate_valence(row["id"], row["valence"], row["intensity"], valence_prop_factor, db, tenant_id)
 
+    # 2c. Heal orphaned episodes (link to most salient person)
+    orphans_healed = heal_orphaned_episodes(tenant_id, space, db)
+
     # 3. Promote high-STI atoms to LTI
     before_lti = db.fetchone(
         "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ? AND lti > 0",
@@ -185,4 +189,5 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         lti_promoted=lti_promoted,
         new_connections=new_connections,
         contradictions_resolved=contradictions_resolved,
+        orphans_healed=orphans_healed,
     )

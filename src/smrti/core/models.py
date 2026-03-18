@@ -100,6 +100,7 @@ class EpochResult(BaseModel):
     lti_promoted: int
     new_connections: int
     contradictions_resolved: int
+    orphans_healed: int = 0
 
 
 def _safe_entity_type(value: str | None) -> EntityType | None:

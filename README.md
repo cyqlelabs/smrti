@@ -23,7 +23,7 @@ Consolidation happens automatically in all server modes (MCP, REST, proxy) on a 
 ## Install
 
 ```bash
-pip install -e .
+pip install smrti
 ```
 
 ## Quick Start

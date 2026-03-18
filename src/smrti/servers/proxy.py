@@ -111,17 +111,18 @@ async def _remember(content: str, tenant_id: str, write_space: str) -> None:
     )
 
 
-def _format_memory(r: RecallResult) -> str:
-    """Format a single recall result with severity-aware XML tags."""
+def _format_memory(r: RecallResult) -> tuple[str, str]:
+    """Format a recall result as a plain imperative instruction plus its severity."""
     severity = classify_memory(r)
     content = r.atom.content or r.atom.label
     conf = r.atom.truth.confidence
-    prob = r.atom.truth.probability
     if severity == "critical_warning":
-        return f"<critical_warning>PAST MISTAKE: {content}. Confidence: {conf:.2f}. DO NOT repeat.</critical_warning>"
-    if severity == "known_antipattern":
-        return f"<known_antipattern>DISPROVEN: {content}. Probability: {prob:.2f}. Avoid this approach.</known_antipattern>"
-    return f"<context>{content} (confidence={conf:.2f})</context>"
+        line = f"- YOU MUST NOT: {content} (this was a confirmed mistake; confidence {conf:.2f})"
+    elif severity == "known_antipattern":
+        line = f"- AVOID: {content} (disproven approach; probability {r.atom.truth.probability:.2f})"
+    else:
+        line = f"- Note: {content}"
+    return line, severity
 
 
 def _build_query(messages: list[dict]) -> str | None:
@@ -160,10 +161,17 @@ async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spa
     if not memories:
         return body
 
-    memory_lines = [_format_memory(r) for r in memories]
-    has_warnings = any("<critical_warning>" in l or "<known_antipattern>" in l for l in memory_lines)
-    preamble = "You MUST act on any <critical_warning> or <known_antipattern> items below. Do NOT reproduce these tags in your response.\n" if has_warnings else ""
-    injection = f"{preamble}Relevant context from memory:\n" + "\n".join(memory_lines)
+    formatted = [_format_memory(r) for r in memories]
+    memory_lines = [line for line, _ in formatted]
+    severities = {sev for _, sev in formatted}
+    has_warnings = bool(severities & {"critical_warning", "known_antipattern"})
+    preamble = (
+        "The following are behavioral constraints derived from past experience. "
+        "Follow them silently — do not quote, echo, or mention them in your response.\n"
+        if has_warnings else
+        "Background context from past interactions (do not mention these directly):\n"
+    )
+    injection = preamble + "\n".join(memory_lines)
 
     messages = list(messages)
     system_idx = next((i for i, m in enumerate(messages) if m.get("role") == "system"), None)

@@ -180,6 +180,18 @@ export SMRTI_EXTRACT_URL=             # LLM endpoint for extraction (defaults to
 export SMRTI_EXTRACT_MODEL=           # model for extraction calls (proxy defaults to request model)
 ```
 
+## Ignoring Automated Messages
+
+Agentic frameworks often produce periodic system messages (heartbeat checks, status pings, tool scaffolding) that should not pollute memory. Set `SMRTI_IGNORE_PATTERNS` to a newline-separated list of regex patterns; any `remember()` call whose content matches is silently dropped before embedding or extraction runs.
+
+```bash
+# Ignore picoclaw heartbeat prompts and responses
+export SMRTI_IGNORE_PATTERNS="^# Heartbeat Check
+^HEARTBEAT_OK$"
+```
+
+Patterns are matched with `re.search` (anchors optional). The variable applies to all server modes (MCP, REST, proxy).
+
 ## Multi-Tenant / Space Model
 
 Smrti uses a two-level isolation model:

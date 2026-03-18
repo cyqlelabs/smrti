@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 try:
     from smrti._version import __version__
@@ -39,6 +40,7 @@ class Smrti:
         write_space: str = "default",
         read_spaces: list[str] | None = None,
         extractor=None,
+        ignore_patterns: list[str] | None = None,
     ) -> None:
         db_path = os.path.expanduser(db_path)
         parent = os.path.dirname(db_path)
@@ -52,6 +54,12 @@ class Smrti:
         self.write_space = write_space
         self.read_spaces = read_spaces if read_spaces is not None else [write_space]
         self.extractor = extractor
+        try:
+            self._ignore_re: list[re.Pattern] = [
+                re.compile(p) for p in (ignore_patterns or [])
+            ]
+        except re.error as exc:
+            raise ValueError(f"SMRTI_IGNORE_PATTERNS contains an invalid regex: {exc}") from exc
         self._ensure_personality(personality)
 
     def _ensure_personality(self, preset_name: str) -> None:
@@ -97,6 +105,9 @@ class Smrti:
                 ),
             )
 
+    def is_ignored(self, content: str) -> bool:
+        return bool(self._ignore_re) and any(rx.search(content) for rx in self._ignore_re)
+
     def remember(
         self,
         content: str,
@@ -104,6 +115,8 @@ class Smrti:
         probability: float = 0.8,
         valence: float = 0.0,
     ) -> str:
+        if self.is_ignored(content):
+            return ""
         atom = Atom(
             type=AtomType(type),
             label=content[:100],

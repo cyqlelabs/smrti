@@ -120,6 +120,24 @@ async def extract_and_link(
     if not extracted:
         return
 
+    from .prompts import ENTITY_TYPES
+    _VALID_TYPES = set(ENTITY_TYPES)
+
+    def _resolve_label(label: str) -> str | None:
+        """Resolve a claim subject/object to an atom_id, falling back to DB lookup."""
+        atom_id = entity_ids.get(label) or entity_ids.get(label.lower())
+        if atom_id:
+            return atom_id
+        row = mem.db.fetchone(
+            "SELECT id FROM atoms WHERE LOWER(label) = LOWER(?) AND tenant_id = ? AND space = ?",
+            (label, mem.tenant_id, mem.write_space),
+        )
+        if row:
+            entity_ids[label] = row["id"]
+            entity_ids[label.lower()] = row["id"]
+            return row["id"]
+        return None
+
     def _sync_work() -> None:
         resolver = EntityResolver(mem.db, mem.embed)
         entity_ids: dict[str, str] = {}
@@ -129,6 +147,8 @@ async def extract_and_link(
             etype = ent.get("type", "concept")
             if not name:
                 continue
+            if etype not in _VALID_TYPES:
+                etype = "concept"
             atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
             entity_ids[name] = atom_id
             entity_ids.setdefault(name.lower(), atom_id)
@@ -142,8 +162,8 @@ async def extract_and_link(
         for claim in extracted.get("claims", []):
             subj_raw = claim.get("subject", "")
             obj_raw = claim.get("object", "")
-            subj_id = entity_ids.get(subj_raw) or entity_ids.get(subj_raw.lower())
-            obj_id = entity_ids.get(obj_raw) or entity_ids.get(obj_raw.lower())
+            subj_id = _resolve_label(subj_raw)
+            obj_id = _resolve_label(obj_raw)
             if subj_id and obj_id and subj_id != obj_id:
                 claim_valence = float(claim.get("valence") or 0.0)
                 mem.atomspace.link_atoms(

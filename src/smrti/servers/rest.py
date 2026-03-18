@@ -183,6 +183,7 @@ async def get_graph(
     )
     nodes = [dict(r) for r in rows]
     node_ids = {n["id"] for n in nodes}
+    node_labels = {n["id"]: n["label"] for n in nodes}
 
     if node_ids:
         edge_rows = mem.db.fetchall(
@@ -192,10 +193,13 @@ async def get_graph(
                LIMIT 5000""",
             (tenant_id, space),
         )
-        edges = [
-            dict(r) for r in edge_rows
-            if r["source_id"] in node_ids and r["target_id"] in node_ids
-        ]
+        edges = []
+        for r in edge_rows:
+            if r["source_id"] in node_ids and r["target_id"] in node_ids:
+                e = dict(r)
+                e["source_label"] = node_labels.get(r["source_id"])
+                e["target_label"] = node_labels.get(r["target_id"])
+                edges.append(e)
     else:
         edges = []
 

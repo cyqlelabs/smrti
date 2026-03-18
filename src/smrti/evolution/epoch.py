@@ -2,8 +2,10 @@
 from __future__ import annotations
 
 from smrti.core.models import EpochResult, TruthValue
+from smrti.evolution.attention import propagate_sti
 from smrti.evolution.connections import discover_connections
 from smrti.evolution.truth import update_truth
+from smrti.evolution.valence import propagate_valence
 
 
 def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
@@ -77,6 +79,11 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             beliefs_updated += 1
 
     # 2. Decay STI and confidence for all atoms in this space
+    decay_count_row = db.fetchone(
+        "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ?",
+        (tenant_id, space),
+    )
+    atoms_decayed = decay_count_row["n"] if decay_count_row else 0
     db.execute(
         """UPDATE atoms SET
                sti        = sti        * (1.0 - ?),
@@ -85,6 +92,20 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
            WHERE tenant_id = ? AND space = ?""",
         (p["sti_decay_rate"], p["confidence_decay_rate"], tenant_id, space),
     )
+
+    # 2b. Propagate STI and valence to 1-hop neighbors
+    propagation_factor = p.get("sti_propagation_factor", 0.15)
+    valence_prop_factor = p.get("valence_propagation", 0.1)
+    if propagation_factor > 0 or valence_prop_factor > 0:
+        active = db.fetchall(
+            "SELECT id, sti, valence, intensity FROM atoms WHERE tenant_id = ? AND space = ? AND (sti > 0.3 OR (valence < -0.3 AND intensity > 0.3))",
+            (tenant_id, space),
+        )
+        for row in active:
+            if propagation_factor > 0 and row["sti"] > 0.3:
+                propagate_sti(row["id"], row["sti"], propagation_factor, db, tenant_id)
+            if valence_prop_factor > 0 and abs(row["valence"]) > 0.3 and row["intensity"] > 0.3:
+                propagate_valence(row["id"], row["valence"], row["intensity"], valence_prop_factor, db, tenant_id)
 
     # 3. Promote high-STI atoms to LTI
     before_lti = db.fetchone(
@@ -156,12 +177,6 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         db.execute("DELETE FROM evidence WHERE atom_id = ?", (atom_id,))
         db.execute("DELETE FROM aliases WHERE atom_id = ?", (atom_id,))
         db.execute("DELETE FROM atoms WHERE id = ?", (atom_id,))
-
-    total = db.fetchone(
-        "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ?",
-        (tenant_id, space),
-    )
-    atoms_decayed = total["n"] if total else 0
 
     return EpochResult(
         beliefs_updated=beliefs_updated,

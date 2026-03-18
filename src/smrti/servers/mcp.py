@@ -84,16 +84,7 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         return {"status": "ok", "atom_id": atom_id}
 
     elif name == "smrti_forget":
-        results = mem.recall(query=args["query"], top_k=5)
-        forgotten = []
-        for r in results:
-            if r.atom.space != mem.write_space:
-                continue
-            mem.db.execute(
-                "UPDATE atoms SET confidence = confidence * 0.3 WHERE id = ? AND tenant_id = ? AND space = ?",
-                (r.atom.id, mem.tenant_id, mem.write_space),
-            )
-            forgotten.append(r.atom.label)
+        forgotten = mem.forget(query=args["query"], top_k=5)
         return {"status": "ok", "softened": forgotten}
 
     elif name == "smrti_personality":

@@ -39,6 +39,7 @@ def retrieve(
     w_confidence = p.get("w_confidence", 0.20)
     w_lti = p.get("w_lti", 0.10)
     w_valence = p.get("w_valence", 0.10)
+    sti_boost = p.get("sti_boost_on_access", 0.5)
 
     # Step 1: KNN entry points — search across the full tenant partition
     knn_rows = db.fetchall(
@@ -111,4 +112,14 @@ def retrieve(
         results.append(RecallResult(atom=atom, salience=salience, similarity=similarity))
 
     results.sort(key=lambda r: r.salience, reverse=True)
-    return results[:top_k]
+    top_results = results[:top_k]
+
+    # Boost STI on accessed atoms so recalled memories gain short-term importance
+    if sti_boost > 0 and top_results:
+        for r in top_results:
+            db.execute(
+                "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ?",
+                (sti_boost, r.atom.id),
+            )
+
+    return top_results

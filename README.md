@@ -4,11 +4,11 @@
 
 ## How It Works
 
-When an agent calls `remember()`, Smrti embeds the text and stores it as a typed graph node (concept, belief, episode, or goal) carrying a Bayesian truth value, an attention weight, and an emotional valence score. Every observation is appended to an immutable evidence log — truth values are never mutated directly. In all server modes, Smrti additionally calls the LLM to extract entity/claim structure from stored episodes — resolving names via a 4-tier cascade (exact → alias → fuzzy → embedding) and building concept nodes with typed relation edges automatically. Before each extraction call, Smrti queries the most salient named entities already in memory (persons, organizations, projects, tools, locations, events, goals) and injects them as context so the LLM can resolve pronouns and vague references ("I" → person, "we" → organization, "the project" → project name) even across sessions. This is on by default and can be disabled with `SMRTI_EXTRACT=0`.
+When an agent calls `remember()`, Smrti embeds the text and stores it as a typed graph node (concept, belief, episode, or goal) carrying a Bayesian truth value, an attention weight, and an emotional valence score. Every observation is appended to an immutable evidence log — truth values are primarily updated through evidence merges, with direct confidence mutations reserved for policy operations (contradiction resolution and forget). In all server modes, Smrti additionally calls the LLM to extract entity/claim structure from stored episodes — resolving names via a 4-tier cascade (exact → alias → fuzzy → embedding) and building concept nodes with typed relation edges automatically. Before each extraction call, Smrti queries the most salient named entities already in memory (persons, organizations, projects, tools, locations, events, goals) and injects them as context so the LLM can resolve pronouns and vague references ("I" → person, "we" → organization, "the project" → project name) even across sessions. This is on by default and can be disabled with `SMRTI_EXTRACT=0`.
 
 On `recall()`, the query is embedded and matched against the tenant-partitioned vector index (sqlite-vec KNN). Results are expanded one hop through the graph, then ranked by a salience formula that blends semantic similarity, short/long-term attention, confidence, and emotional intensity. When a memory has strong negative valence (e.g. a past outage), salience weights shift dynamically so critical errors outrank recent trivia. Each result is classified as `critical_warning`, `known_antipattern`, or `context`.
 
-Consolidation happens automatically in all server modes (MCP, REST, proxy) on a configurable timer (default 60s, set `SMRTI_REFLECT_INTERVAL`). Each cycle merges pending evidence via PLN Bayesian revision, decays attention, promotes high-importance nodes to long-term memory, resolves contradictions by weakening the less confident belief, and prunes low-salience atoms. You can also trigger it manually via `reflect()`. A personality profile (16 tunable hyperparameters) governs every weight and threshold in this pipeline.
+Consolidation happens automatically in all server modes (MCP, REST, proxy) on a configurable timer (default 60s, set `SMRTI_REFLECT_INTERVAL`). Each cycle merges pending evidence via PLN Bayesian revision, decays STI and confidence, propagates STI and valence to connected neighbors, promotes high-importance nodes to long-term memory, resolves contradictions by weakening the less confident belief, and prunes low-salience atoms. You can also trigger it manually via `reflect()`. A personality profile (16 tunable hyperparameters) governs every weight and threshold in this pipeline.
 
 ## Features
 
@@ -78,16 +78,17 @@ smrti serve proxy          # OpenAI-compatible proxy on :8421
 
 ### MCP Server
 
-Exposes 6 tools over stdio for direct LLM integration (Claude, etc.):
+Exposes 7 tools over stdio for direct LLM integration (Claude, etc.):
 
-| Tool       | Description                           |
-| ---------- | ------------------------------------- |
-| `remember` | Store an observation or episode       |
-| `recall`   | Semantic search with salience scoring |
-| `believe`  | Assert a belief with truth value      |
-| `reflect`  | Run a consolidation epoch             |
-| `forget`   | Lower confidence on a memory          |
-| `status`   | Get memory statistics                 |
+| Tool          | Description                           |
+| ------------- | ------------------------------------- |
+| `remember`    | Store an observation or episode       |
+| `recall`      | Semantic search with salience scoring |
+| `believe`     | Assert a belief with truth value      |
+| `reflect`     | Run a consolidation epoch             |
+| `forget`      | Lower confidence on a memory          |
+| `status`      | Get memory statistics                 |
+| `personality` | Get or set personality preset         |
 
 ```bash
 smrti serve mcp
@@ -325,10 +326,11 @@ When valence < -0.5, weight shifts dynamically from w_sti to w_val so critical e
 
 1. Process pending evidence via Bayesian update
 2. Decay STI and confidence
-3. Promote high-STI atoms to LTI
-4. Resolve contradictions (weaken less confident belief)
-5. Discover cross-domain connections (every 10th epoch)
-6. Prune atoms below confidence/LTI floors
+3. Propagate STI and valence to 1-hop neighbors
+4. Promote high-STI atoms to LTI
+5. Resolve contradictions (weaken less confident belief)
+6. Discover cross-domain connections (every 10th epoch)
+7. Prune atoms below confidence/LTI floors
 
 ## Data Model
 

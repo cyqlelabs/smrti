@@ -178,6 +178,20 @@ class Smrti:
     def reflect(self) -> EpochResult:
         return run_epoch(self.tenant_id, self.write_space, self.db, self.embed)
 
+    def forget(self, query: str, top_k: int = 5) -> list[str]:
+        """Soften memories matching query by reducing their confidence."""
+        results = self.recall(query=query, top_k=top_k)
+        forgotten = []
+        for r in results:
+            if r.atom.space != self.write_space:
+                continue
+            self.db.execute(
+                "UPDATE atoms SET confidence = confidence * 0.3 WHERE id = ? AND tenant_id = ? AND space = ?",
+                (r.atom.id, self.tenant_id, self.write_space),
+            )
+            forgotten.append(r.atom.label)
+        return forgotten
+
     def set_personality(self, preset_name: str) -> None:
         profile = load_preset(preset_name)
         self.db.execute(

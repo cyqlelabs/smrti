@@ -126,16 +126,30 @@ def _resolve_ner_entities(
     """Resolve a list of {"name", "type"} dicts via the entity cascade.
 
     Returns a mapping of name → atom_id. Also creates mentions edges.
+    Handles pronoun entities: batch-merges where unambiguous, skips type="pronoun",
+    and retroactively merges existing pronoun atoms for resolved named persons.
     """
     from .resolve import EntityResolver
 
     resolver = EntityResolver(mem.db, mem.embed)
     entity_ids: dict[str, str] = {}
 
+    # Batch-merge pronoun entities before resolution
+    try:
+        from .ner import get_ner
+        ner = get_ner()
+        from .pronouns import merge_pronoun_entities_in_batch
+        entities = merge_pronoun_entities_in_batch(entities, ner)
+    except Exception:
+        ner = None
+
     for ent in entities:
         name = (ent.get("name") or "").strip()
         etype = ent.get("type", "concept")
         if not name:
+            continue
+        # Skip pronoun-typed entities that survived batch merge (ambiguous case)
+        if etype == "pronoun":
             continue
         if etype not in _VALID_TYPES:
             etype = "concept"
@@ -148,6 +162,20 @@ def _resolve_ner_entities(
                 entity_ids.setdefault(alias, atom_id)
                 entity_ids.setdefault(alias.lower(), atom_id)
         mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
+
+    # Retroactive merge: for each resolved named person, merge co-mentioned pronoun atoms
+    if ner is not None:
+        from .pronouns import find_and_merge_pronoun_atoms
+        for ent in entities:
+            etype = ent.get("type", "concept")
+            name = (ent.get("name") or "").strip()
+            if etype != "person" or not name:
+                continue
+            atom_id = entity_ids.get(name)
+            if atom_id and not ner.classify_pronoun(name):
+                find_and_merge_pronoun_atoms(
+                    atom_id, episode_id, mem.db, ner, mem.tenant_id, mem.write_space,
+                )
 
     return entity_ids
 

@@ -24,6 +24,10 @@ Not for transient desires: "I want a coffee", "I'd like to understand X".
 
 PERSON ANCHORING — "I/my/me" resolves to the known person entity. Every trait, belief,
 opinion, value, hobby, fear, or biographical fact MUST become a claim with the person as subject.
+
+FIRST MESSAGE — When NO [Known entities] block is present and the text
+introduces a name ("I am X", "my name is X"), the entity name MUST be
+the actual name (X), not pronouns. Put pronouns in "aliases".
   ✓ Marco→has_hobby→cycling     ✗ cycling→is_hobby→cycling
   ✓ Sam→believes→simplicity     ✗ simplicity→is_believed→simplicity
 
@@ -152,6 +156,17 @@ OUT:
   {"subject":"Marco","predicate":"has_hobby","object":"photography","valence":0.5},
   {"subject":"Marco","predicate":"owns_pet","object":"Luna"},
   {"subject":"Marco","predicate":"has_fear_of","object":"escalators","valence":-0.7}
+]}
+
+IN: "Hi! I'm Elara, a systems strategist focused on organizational design."
+OUT:
+{"entities":[
+  {"name":"Elara","type":"person","aliases":["I","I'm"]},
+  {"name":"systems strategist","type":"concept","aliases":[]},
+  {"name":"organizational design","type":"concept","aliases":[]}
+],"claims":[
+  {"subject":"Elara","predicate":"is","object":"systems strategist"},
+  {"subject":"Elara","predicate":"focuses_on","object":"organizational design"}
 ]}"""
 
 ENTITY_TYPES = [

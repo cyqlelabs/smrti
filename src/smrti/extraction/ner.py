@@ -1,4 +1,4 @@
-"""Zero-shot NER via GLiNER — lazy-loaded, thread-safe singleton."""
+"""Zero-shot NER via GLiNER2 — lazy-loaded, thread-safe singleton."""
 from __future__ import annotations
 
 import os
@@ -7,22 +7,24 @@ from typing import Optional
 
 
 class NERProvider:
-    """Wraps GLiNER with lazy initialization. Thread-safe singleton."""
+    """Wraps GLiNER2 with lazy initialization. Thread-safe singleton."""
 
     def __init__(self, model_name: str | None = None) -> None:
         self._model_name = model_name or os.environ.get(
-            "SMRTI_NER_MODEL", "urchade/gliner_multi-v2.1"
+            "SMRTI_NER_MODEL", "fastino/gliner2-multi-v1"
         )
         self._model = None
         self._lock = threading.Lock()
+        self._has_classify = False
 
     def _get_model(self):
         if self._model is None:
             with self._lock:
                 if self._model is None:
-                    from gliner import GLiNER
+                    from gliner2 import GLiNER2
 
-                    self._model = GLiNER.from_pretrained(self._model_name)
+                    self._model = GLiNER2.from_pretrained(self._model_name)
+                    self._has_classify = hasattr(self._model, "classify_text")
         return self._model
 
     def extract(
@@ -38,19 +40,42 @@ class NERProvider:
         if labels is None:
             labels = _DEFAULT_LABELS
         model = self._get_model()
-        entities = model.predict_entities(text, labels, threshold=threshold)
-        # Deduplicate: keep highest-score span per (text_lower, label)
+        raw = model.extract_entities(text, labels)
+        # GLiNER2 returns {"entities": {type: [names]}}
+        entities_dict = raw.get("entities", {}) if isinstance(raw, dict) else {}
+        # Deduplicate: keep one entry per (name_lower, type)
         best: dict[tuple[str, str], dict] = {}
-        for ent in entities:
-            key = (ent["text"].lower(), ent["label"])
-            existing = best.get(key)
-            if existing is None or ent["score"] > existing["score"]:
-                best[key] = {
-                    "name": ent["text"],
-                    "type": ent["label"],
-                    "score": ent["score"],
-                }
+        for etype, names in entities_dict.items():
+            for name in names:
+                key = (name.lower(), etype)
+                if key not in best:
+                    best[key] = {
+                        "name": name,
+                        "type": etype,
+                        "score": 1.0,
+                    }
         return list(best.values())
+
+    def classify_pronoun(self, name: str) -> bool:
+        """Return True if `name` is a pronoun rather than a proper name.
+
+        Uses GLiNER2's classify_text when available, otherwise returns False.
+        """
+        if not name or not name.strip():
+            return False
+        try:
+            model = self._get_model()
+        except Exception:
+            return False
+        if not self._has_classify:
+            return False
+        try:
+            result = model.classify_text(name.strip(), {"type": ["proper_name", "pronoun"]})
+            if isinstance(result, dict):
+                return result.get("type") == "pronoun"
+            return False
+        except Exception:
+            return False
 
 
 _DEFAULT_LABELS = [
@@ -64,6 +89,7 @@ _DEFAULT_LABELS = [
     "event",
     "concept",
     "goal",
+    "pronoun",
 ]
 
 _instance: Optional[NERProvider] = None

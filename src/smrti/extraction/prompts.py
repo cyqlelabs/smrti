@@ -24,12 +24,20 @@ Not for transient desires: "I want a coffee", "I'd like to understand X".
 
 PERSON ANCHORING — "I/my/me" resolves to the known person entity. Every trait, belief,
 opinion, value, hobby, fear, or biographical fact MUST become a claim with the person as subject.
+  ✓ Marco→has_hobby→cycling     ✗ cycling→is_hobby→cycling
+  ✓ Sam→believes→simplicity     ✗ simplicity→is_believed→simplicity
+
+BELIEF/VALUE TYPING — When the text expresses a belief, value, conviction, or personal
+principle ("I believe", "I value", "I think that", "I hold that", "X is important to me",
+"X is essential", "I'm a firm believer"), the object of that belief MUST be type "preference",
+NOT "concept". Things someone avoids or rejects ("I hate X", "never do X", "X is harmful")
+→ type "constraint". Only use "concept" for neutral, factual entities with no expressed stance.
+  ✓ {"name":"intellectual humility","type":"preference"}  ← person believes in it
+  ✗ {"name":"intellectual humility","type":"concept"}     ← WRONG, lost the belief
 
 FIRST MESSAGE — When NO [Known entities] block is present and the text
 introduces a name ("I am X", "my name is X"), the entity name MUST be
 the actual name (X), not pronouns. Put pronouns in "aliases".
-  ✓ Marco→has_hobby→cycling     ✗ cycling→is_hobby→cycling
-  ✓ Sam→believes→simplicity     ✗ simplicity→is_believed→simplicity
 
 EXACT NAMES IN CLAIMS — subject and object must be character-identical to a listed entity name.
 Never use pronouns, aliases, or paraphrases in claims.
@@ -128,10 +136,10 @@ IN:
 OUT:
 {"entities":[
   {"name":"Sam","type":"person","aliases":["I","my"]},
-  {"name":"simplicity","type":"concept","aliases":[]},
+  {"name":"simplicity","type":"preference","aliases":[]},
   {"name":"ultimate sophistication","type":"concept","aliases":[]},
   {"name":"poor communication","type":"concept","aliases":[]},
-  {"name":"people's time","type":"concept","aliases":[]}
+  {"name":"people's time","type":"preference","aliases":[]}
 ],"claims":[
   {"subject":"Sam","predicate":"believes","object":"simplicity","valence":0.6},
   {"subject":"simplicity","predicate":"is","object":"ultimate sophistication"},
@@ -150,7 +158,7 @@ OUT:
   {"name":"cycling","type":"concept","aliases":[]},
   {"name":"photography","type":"concept","aliases":[]},
   {"name":"Luna","type":"concept","aliases":["she"]},
-  {"name":"escalators","type":"concept","aliases":[]}
+  {"name":"escalators","type":"constraint","aliases":[]}
 ],"claims":[
   {"subject":"Marco","predicate":"has_hobby","object":"cycling","valence":0.5},
   {"subject":"Marco","predicate":"has_hobby","object":"photography","valence":0.5},
@@ -241,6 +249,11 @@ RULES:
 - Extract only explicitly stated facts; no inference or invention
 - No metaphor — figurative language ≠ literal fact
 - If no clear relationships exist, return {"claims":[]}
+- PERSON ANCHORING — when a person entity is listed, they must be the subject of claims
+  that describe their goals, intentions, preferences, or actions. Never leave the person
+  entity disconnected if the text describes something they intend, want, or are doing.
+- GOAL CLAIMS — when a goal or project entity is listed alongside a person, emit a
+  `has_goal` claim from person→goal and/or a `works_on` claim from person→project.
 
 EXAMPLES:
 
@@ -258,4 +271,12 @@ OUT:
 {"claims":[
   {"subject":"deploying without tests","predicate":"caused","object":"production","valence":-0.9},
   {"subject":"deploying without tests","predicate":"must_avoid","object":"production","valence":-0.9}
+]}
+
+Entities: Elias (person), open-source platform (project)
+Text: "My primary goal is to launch an open-source platform that helps independent artists."
+OUT:
+{"claims":[
+  {"subject":"Elias","predicate":"has_goal","object":"open-source platform","valence":0.8},
+  {"subject":"Elias","predicate":"works_on","object":"open-source platform","valence":0.7}
 ]}"""

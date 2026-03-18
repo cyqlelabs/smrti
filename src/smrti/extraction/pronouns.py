@@ -7,15 +7,55 @@ if TYPE_CHECKING:
     from smrti.extraction.ner import NERProvider
 
 
+def resolve_pronouns_via_aliases(
+    pronoun_persons: list[dict],
+    db,
+    tenant_id: str,
+    spaces: list[str],
+) -> list[dict]:
+    """Try to resolve pronoun entities to existing named persons via alias table.
+
+    For each pronoun person, checks if its name is a known alias pointing to
+    a person atom. If so, replaces the pronoun entity with the resolved person.
+    Returns the list of successfully resolved entities (pronouns become named).
+    """
+    from .aliases import AliasManager
+    aliases = AliasManager(db)
+    resolved = []
+    for pp in pronoun_persons:
+        pname = (pp.get("name") or "").strip()
+        if not pname:
+            continue
+        atom_id = aliases.lookup(pname, tenant_id, spaces)
+        if not atom_id:
+            continue
+        # Verify the target atom is a person
+        row = db.fetchone(
+            "SELECT label, entity_type FROM atoms WHERE id = ? AND entity_type = 'person'",
+            (atom_id,),
+        )
+        if row:
+            resolved.append({
+                "name": row["label"],
+                "type": "person",
+                "aliases": pp.get("aliases", []) + [pname] if pname.lower() != row["label"].lower() else pp.get("aliases", []),
+            })
+    return resolved
+
+
 def merge_pronoun_entities_in_batch(
     entities: list[dict],
     ner: NERProvider,
+    db=None,
+    tenant_id: str = "",
+    spaces: list[str] | None = None,
 ) -> list[dict]:
     """Merge pronoun-like person entities into named persons within a batch.
 
     Rules:
     - 1 named person + 1+ pronoun persons → merge pronouns into the named person
-    - 0 named persons → remove all pronoun persons (no orphan atoms)
+    - 0 named persons in batch → try alias table to resolve pronouns to existing persons
+    - 0 named persons after alias lookup → remove all pronoun persons (no orphan atoms)
     - 2+ named persons → leave pronoun persons as-is (ambiguous)
     - Non-person entities are never touched
     """
@@ -42,28 +82,52 @@ def merge_pronoun_entities_in_batch(
         return entities
 
     if len(named_persons) == 0:
-        # No named persons — remove all pronoun persons
-        return non_persons + named_persons
+        # No named persons in batch — check alias table for existing person atoms
+        if db is not None and tenant_id and spaces:
+            resolved = resolve_pronouns_via_aliases(pronoun_persons, db, tenant_id, spaces)
+            if resolved:
+                # Deduplicate resolved persons by name
+                seen = set()
+                for r in resolved:
+                    if r["name"].lower() not in seen:
+                        named_persons.append(r)
+                        seen.add(r["name"].lower())
+                # If we resolved to exactly 1 person, merge remaining pronouns into it
+                if len(named_persons) == 1:
+                    return _merge_pronouns_into_target(named_persons[0], pronoun_persons, non_persons, named_persons)
+                elif len(named_persons) > 1:
+                    # Multiple resolved persons — ambiguous
+                    return non_persons + named_persons + pronoun_persons
+        # Still no named persons — remove all pronoun persons
+        return non_persons
 
     if len(named_persons) == 1:
-        # Merge pronoun aliases into the single named person
-        target = named_persons[0]
-        existing_aliases = set(a.lower() for a in target.get("aliases", []))
-        merged_aliases = list(target.get("aliases", []))
-        for pp in pronoun_persons:
-            pname = pp.get("name", "")
-            if pname and pname.lower() not in existing_aliases:
-                merged_aliases.append(pname)
-                existing_aliases.add(pname.lower())
-            for alias in pp.get("aliases", []):
-                if alias and alias.lower() not in existing_aliases:
-                    merged_aliases.append(alias)
-                    existing_aliases.add(alias.lower())
-        target["aliases"] = merged_aliases
-        return non_persons + named_persons
+        return _merge_pronouns_into_target(named_persons[0], pronoun_persons, non_persons, named_persons)
 
     # 2+ named persons → ambiguous, leave pronoun persons as-is
     return non_persons + named_persons + pronoun_persons
+
+
+def _merge_pronouns_into_target(
+    target: dict,
+    pronoun_persons: list[dict],
+    non_persons: list[dict],
+    named_persons: list[dict],
+) -> list[dict]:
+    """Merge pronoun aliases into a single named person target."""
+    existing_aliases = set(a.lower() for a in target.get("aliases", []))
+    merged_aliases = list(target.get("aliases", []))
+    for pp in pronoun_persons:
+        pname = pp.get("name", "")
+        if pname and pname.lower() not in existing_aliases:
+            merged_aliases.append(pname)
+            existing_aliases.add(pname.lower())
+        for alias in pp.get("aliases", []):
+            if alias and alias.lower() not in existing_aliases:
+                merged_aliases.append(alias)
+                existing_aliases.add(alias.lower())
+    target["aliases"] = merged_aliases
+    return non_persons + named_persons
 
 
 def merge_pronoun_into_named(

@@ -74,6 +74,18 @@ async def extract_knowledge(
 _COREF_TYPES = {"person", "organization", "project", "tool", "location", "event", "goal", "preference", "constraint"}
 
 
+def _get_salient_person(mem: "Smrti") -> tuple[str, str] | None:
+    """Return (label, atom_id) of the most salient person atom in the current space, or None."""
+    row = mem.db.fetchone(
+        """SELECT id, label FROM atoms
+           WHERE tenant_id = ? AND space = ? AND entity_type = 'person'
+             AND source_id IS NULL AND type IN ('concept', 'belief', 'goal')
+           ORDER BY (sti + lti) DESC LIMIT 1""",
+        (mem.tenant_id, mem.write_space),
+    )
+    return (row["label"], row["id"]) if row else None
+
+
 def _build_entity_context(mem: "Smrti") -> str:
     """Return a compact list of salient named entities from the memory graph.
 
@@ -139,7 +151,10 @@ def _resolve_ner_entities(
         from .ner import get_ner
         ner = get_ner()
         from .pronouns import merge_pronoun_entities_in_batch
-        entities = merge_pronoun_entities_in_batch(entities, ner)
+        entities = merge_pronoun_entities_in_batch(
+            entities, ner,
+            db=mem.db, tenant_id=mem.tenant_id, spaces=[mem.write_space],
+        )
     except Exception:
         ner = None
 
@@ -244,7 +259,8 @@ async def extract_claims_only(
     Returns {"claims": [...]} or None on failure.
     """
     entities_block = "\n".join(
-        f"- {e['name']} ({e['type']})" for e in entities if e.get("name")
+        f"- {e['name']} ({e['type']})" for e in entities
+        if e.get("name") and e.get("type") != "pronoun"
     )
     system_prompt = CLAIMS_ONLY_PROMPT.replace("{entities_block}", entities_block)
 
@@ -267,7 +283,7 @@ async def extract_claims_only(
                     {"role": "user", "content": user_content},
                 ],
                 "temperature": 0.0,
-                "max_tokens": 512,
+                "max_tokens": 1024,
             },
             timeout=30.0,
         )
@@ -338,6 +354,32 @@ async def extract_and_link_hybrid(
     # In local mode, we're done — no LLM calls
     if mode == "local":
         return
+
+    # Speaker injection: for user messages, if no person atom resolved (pronoun dropped
+    # because "I" alias wasn't in the alias table), inject the most salient known person
+    # so claims — especially goals, preferences, and actions — can be attributed to them.
+    # This treats first-person pronouns as speaker metadata rather than entity aliases,
+    # preventing graph fragmentation when alias registration was missed in hybrid mode.
+    if source == "user":
+        def _inject_speaker_if_missing() -> list[dict]:
+            atom_ids = list(set(entity_ids.values()))
+            if atom_ids:
+                ph = ",".join("?" * len(atom_ids))
+                row = mem.db.fetchone(
+                    f"SELECT 1 FROM atoms WHERE id IN ({ph}) AND entity_type = 'person' AND tenant_id = ?",
+                    (*atom_ids, mem.tenant_id),
+                )
+                if row:
+                    return ner_entities  # person already in scope
+            person = _get_salient_person(mem)
+            if person:
+                label, atom_id = person
+                entity_ids[label] = atom_id
+                entity_ids.setdefault(label.lower(), atom_id)
+                return ner_entities + [{"name": label, "type": "person"}]
+            return ner_entities
+
+        ner_entities = await loop.run_in_executor(None, _inject_speaker_if_missing)
 
     # Hybrid mode: call LLM for claims only when 2+ unique entities
     unique_ids = set(entity_ids.values())

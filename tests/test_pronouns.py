@@ -118,6 +118,62 @@ def test_batch_merge_pronoun_type_from_gliner():
     assert "I" in elara["aliases"]
 
 
+# ── Alias-based pronoun resolution tests ─────────────────────────────────────
+
+
+def test_batch_merge_resolves_pronoun_via_alias(mem):
+    """When only pronouns in batch but 'I' is alias of existing person, resolve to that person."""
+    from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
+
+    # Create Elias as a person atom with "I" as alias
+    import uuid
+    elias_id = str(uuid.uuid4())
+    mem.db.execute(
+        "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
+        (elias_id, "concept", "Elias", "person", "test", "default"),
+    )
+    mem.db.execute(
+        "INSERT OR IGNORE INTO aliases (alias, atom_id, tenant_id, space) VALUES (?, ?, ?, ?)",
+        ("I", elias_id, "test", "default"),
+    )
+
+    ner = _mock_ner(["I", "my"])
+    entities = [
+        {"name": "I", "type": "person", "aliases": ["my"]},
+        {"name": "intellectual humility", "type": "preference", "aliases": []},
+    ]
+    result = merge_pronoun_entities_in_batch(
+        entities, ner, db=mem.db, tenant_id="test", spaces=["default"],
+    )
+
+    names = [e["name"] for e in result]
+    assert "Elias" in names
+    assert "I" not in names
+    assert "intellectual humility" in names
+    # "I" and "my" should be in Elias's aliases
+    elias = next(e for e in result if e["name"] == "Elias")
+    assert "I" in elias["aliases"]
+    assert "my" in elias["aliases"]
+
+
+def test_batch_merge_no_alias_removes_pronoun(mem):
+    """When only pronouns in batch and no alias exists, remove them."""
+    from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
+
+    ner = _mock_ner(["I"])
+    entities = [
+        {"name": "I", "type": "person", "aliases": []},
+        {"name": "Python", "type": "tool", "aliases": []},
+    ]
+    result = merge_pronoun_entities_in_batch(
+        entities, ner, db=mem.db, tenant_id="test", spaces=["default"],
+    )
+
+    names = [e["name"] for e in result]
+    assert "I" not in names
+    assert "Python" in names
+
+
 # ── Retroactive merge tests ──────────────────────────────────────────────────
 
 

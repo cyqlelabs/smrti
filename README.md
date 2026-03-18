@@ -2,6 +2,14 @@
 
 [AtomSpace](https://wiki.opencog.org/w/AtomSpace)-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing. No extra infra to maintain. Just Plug & Play.
 
+## How It Works
+
+When an agent calls `remember()`, Smrti embeds the text, resolves any entities it mentions (via a 4-tier cascade: exact → alias → fuzzy → embedding), and stores the result as a typed graph node (concept, belief, episode, or goal) carrying a Bayesian truth value, an attention weight, and an emotional valence score. Every observation is appended to an immutable evidence log — truth values are never mutated directly.
+
+On `recall()`, the query is embedded and matched against the tenant-partitioned vector index (sqlite-vec KNN). Results are expanded one hop through the graph, then ranked by a salience formula that blends semantic similarity, short/long-term attention, confidence, and emotional intensity. When a memory has strong negative valence (e.g. a past outage), salience weights shift dynamically so critical errors outrank recent trivia. Each result is classified as `critical_warning`, `known_antipattern`, or `context`.
+
+Periodically calling `reflect()` runs a consolidation epoch: pending evidence is merged via PLN Bayesian revision, attention decays, high-importance nodes get promoted to long-term memory, contradictions are resolved by weakening the less confident belief, and low-salience atoms are pruned. A personality profile (16 tunable hyperparameters) governs every weight and threshold in this pipeline.
+
 ## Features
 
 - **Graph-structured memory** — Concepts, beliefs, episodes, and goals as typed atoms with relation edges

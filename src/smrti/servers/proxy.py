@@ -124,9 +124,9 @@ async def _extract_and_link(
     model: str,
     source: str = "user",
 ) -> None:
-    from smrti.extraction.extract import extract_and_link
+    from smrti.extraction.extract import extract_and_link_hybrid
     mem = get_mem(tenant_id, write_space)
-    await extract_and_link(episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model, cfg.EXTRACT_URL, source)
+    await extract_and_link_hybrid(episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model, cfg.EXTRACT_URL, source, mode=cfg.EXTRACT_MODE)
 
 
 def _enrich_content(r: RecallResult, mem) -> str:

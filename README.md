@@ -202,21 +202,49 @@ Each preset tunes 16 hyperparameters affecting:
 
 ## Architecture
 
-```
-┌──────────────────────────────────────────────┐
-│                  Smrti (facade)              │
-│          remember / recall / believe /        │
-│            reflect / status / forget          │
-├──────────┬───────────┬───────────┬───────────┤
-│  core/   │retrieval/ │evolution/ │extraction/│
-│ AtomSpace│  fan_out  │   epoch   │  resolve  │
-│ Database │  salience │   truth   │  aliases  │
-│ Embedder │           │connections│           │
-│  Models  │           │           │           │
-├──────────┴───────────┴───────────┴───────────┤
-│          SQLite + sqlite-vec (single file)    │
-│     BAAI/bge-small-en-v1.5 (384d, ONNX CPU)  │
-└──────────────────────────────────────────────┘
+```mermaid
+graph TD
+    subgraph Facade
+        S["Smrti<br/><small>remember · recall · believe · reflect · forget · status</small>"]
+    end
+
+    subgraph Servers
+        MCP["mcp.py<br/><small>MCP stdio</small>"]
+        REST["rest.py<br/><small>FastAPI :8420</small>"]
+        PROXY["proxy.py<br/><small>OpenAI proxy :8421</small>"]
+    end
+
+    subgraph Core
+        AS["AtomSpace"]
+        DB["Database"]
+        EMB["Embedder"]
+        MOD["Models"]
+    end
+
+    subgraph Retrieval
+        FAN["fan_out"]
+        SAL["salience"]
+        CLS["classify"]
+    end
+
+    subgraph Evolution
+        EPO["epoch"]
+        TRU["truth"]
+        CON["connections"]
+    end
+
+    subgraph Extraction
+        RES["resolve"]
+        ALI["aliases"]
+    end
+
+    subgraph Storage
+        SQL["SQLite + sqlite-vec<br/><small>BAAI/bge-small-en-v1.5 · 384d · ONNX CPU</small>"]
+    end
+
+    MCP & REST & PROXY --> S
+    S --> Core & Retrieval & Evolution & Extraction
+    Core & Retrieval & Evolution & Extraction --> SQL
 ```
 
 **Retrieval pipeline:** Embed query → KNN over tenant partition → filter to read spaces → 1-hop graph expansion → salience scoring → top-k

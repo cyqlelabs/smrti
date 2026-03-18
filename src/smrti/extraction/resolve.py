@@ -88,9 +88,14 @@ class EntityResolver:
             (vec_bytes, tenant_id),
         )
         if vec_match and vec_match["distance"] < self.cosine_threshold:
-            self.aliases.add(vec_match["atom_id"], name, tenant_id, write_space)
-            self._boost_sti(vec_match["atom_id"])
-            return vec_match["atom_id"]
+            atom_row = self.db.fetchone(
+                "SELECT entity_type FROM atoms WHERE id = ?",
+                (vec_match["atom_id"],),
+            )
+            if atom_row and atom_row["entity_type"] == entity_type:
+                self.aliases.add(vec_match["atom_id"], name, tenant_id, write_space)
+                self._boost_sti(vec_match["atom_id"])
+                return vec_match["atom_id"]
 
         # Tier 4: create new atom in write_space
         return self._create_atom(name, entity_type, tenant_id, write_space)

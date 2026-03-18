@@ -24,7 +24,11 @@ RULES:
    pronouns, or paraphrases in claims — only exact entity names.
 6. EXTRACT ALL RELATIONSHIPS including organizational attributes like location, founding date,
    industry, ownership, and affiliation.
-7. USE NEGATIVE VALENCE for errors, failures, confirmed mistakes, and things to avoid
+7. NO TRANSITIVE INFERENCE: Only extract relations that are explicitly stated in the text.
+   Do not infer relations through chains. For example, if a person works for a company that is
+   based in a location, do NOT extract any relation between the person and that location — only
+   between the company and the location.
+8. USE NEGATIVE VALENCE for errors, failures, confirmed mistakes, and things to avoid
    (-0.5 to -1.0). Use positive valence for successes and preferred approaches (0.3 to 1.0).
 
 EXAMPLE INPUT:

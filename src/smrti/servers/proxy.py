@@ -124,17 +124,55 @@ async def _extract_and_link(
     await extract_and_link(episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model, cfg.EXTRACT_URL)
 
 
-def _format_memory(r: RecallResult) -> tuple[str, str]:
+def _enrich_content(r: RecallResult, mem) -> str:
+    """For concept atoms with no content, synthesize a description from outgoing graph edges.
+
+    Produces e.g. "Nico [person] — works_for: GetProductized, is: senior programmer"
+    so the LLM receives relational context instead of a bare entity label.
+    """
+    atom = r.atom
+    if atom.content:
+        return atom.content
+    if atom.type.value != "concept":
+        return atom.label
+
+    rows = mem.db.fetchall(
+        "SELECT relation, target_id FROM atoms "
+        "WHERE source_id = ? AND type = 'relation' AND tenant_id = ? AND space = ?",
+        (atom.id, atom.tenant_id, atom.space),
+    )
+    target_ids = [row["target_id"] for row in rows if row["target_id"]]
+
+    entity_qualifier = f" [{atom.entity_type.value}]" if atom.entity_type else ""
+
+    if not target_ids:
+        return f"{atom.label}{entity_qualifier}"
+
+    ph = ",".join("?" * len(target_ids))
+    target_rows = mem.db.fetchall(
+        f"SELECT id, label FROM atoms WHERE id IN ({ph})", tuple(target_ids)
+    )
+    target_map = {t["id"]: t["label"] for t in target_rows}
+    parts = [
+        f"{row['relation']}: {target_map[row['target_id']]}"
+        for row in rows
+        if row["target_id"] in target_map
+    ]
+    suffix = f" — {', '.join(parts)}" if parts else ""
+    return f"{atom.label}{entity_qualifier}{suffix}"
+
+
+def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, str]:
     """Format a recall result as a plain imperative instruction plus its severity."""
     severity = classify_memory(r)
-    content = r.atom.content or r.atom.label
+    text = content if content is not None else (r.atom.content or r.atom.label)
     conf = r.atom.truth.confidence
     if severity == "critical_warning":
-        line = f"- YOU MUST NOT: {content} (confirmed mistake; confidence {conf:.2f})"
+        line = f"- YOU MUST NOT: {text} (confirmed mistake; confidence {conf:.2f})"
     elif severity == "known_antipattern":
-        line = f"- AVOID: {content} (disproven approach; confidence {conf:.2f})"
+        line = f"- AVOID: {text} (disproven approach; confidence {conf:.2f})"
     else:
-        line = f"- Note: {content} (confidence {conf:.2f})"
+        line = f"- Note: {text} (confidence {conf:.2f})"
     return line, severity
 
 
@@ -174,7 +212,8 @@ async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spa
     if not memories:
         return body
 
-    formatted = [_format_memory(r) for r in memories]
+    mem = get_mem(tenant_id, write_space)
+    formatted = [_format_memory(r, _enrich_content(r, mem)) for r in memories]
     warning_lines = [line for line, sev in formatted if sev in ("critical_warning", "known_antipattern")]
     context_lines = [line for line, sev in formatted if sev == "context"]
 

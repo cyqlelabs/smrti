@@ -12,7 +12,9 @@ OUTPUT FORMAT — return ONLY valid JSON, no explanation:
 
 RULES:
 1. COREFERENCE RESOLUTION: Never extract pronouns ("he", "it", "they"). Resolve them to
-   explicit entity names found within the same input text.
+   explicit entity names. When a [Known entities] block is provided, use it to resolve
+   pronouns and vague references (e.g. "I" → the person entity, "we" → the organization).
+   Only extract entities and claims from the [Text to extract] section.
 2. FIXED TYPES ONLY: Classify entities into exactly these 10 types:
    person, organization, project, tool, preference, constraint, location, event, concept, goal
 3. ATOMIC CLAIMS: Break complex sentences into simple (subject, predicate, object) triplets.

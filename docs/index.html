@@ -1,0 +1,914 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>smrti — memory engine for AI agents</title>
+  <meta name="description" content="AtomSpace-inspired memory engine with Bayesian truth values, emotional valence, and attention-weighted salience. Single SQLite file. Python 3.10+.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Plus+Jakarta+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+
+    :root {
+      --bg: oklch(8% 0.01 55);
+      --bg-surface: oklch(11% 0.01 55);
+      /* --bg-elevated: oklch(14% 0.012 55); available if needed */
+      --border: oklch(20% 0.01 55);
+      --border-subtle: oklch(16% 0.008 55);
+      --text: oklch(82% 0.02 60);
+      --text-dim: oklch(55% 0.02 55);
+      --text-bright: oklch(92% 0.015 65);
+      --accent: oklch(55% 0.17 25);
+      --accent-warm: oklch(65% 0.14 70);
+      --accent-sage: oklch(55% 0.06 155);
+      --code-bg: oklch(10% 0.012 55);
+      --font-display: 'Instrument Serif', Georgia, serif;
+      --font-body: 'Plus Jakarta Sans', system-ui, sans-serif;
+      --font-mono: 'JetBrains Mono', 'Menlo', monospace;
+      --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+      --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+    }
+
+    html {
+      font-size: 16px;
+      scroll-behavior: smooth;
+      -webkit-text-size-adjust: 100%;
+    }
+
+    body {
+      font-family: var(--font-body);
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.65;
+      font-weight: 400;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after {
+        animation-duration: 0.01ms !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+
+    /* --- Utilities --- */
+    .wrap {
+      max-width: 920px;
+      margin: 0 auto;
+      padding: 0 clamp(1.25rem, 4vw, 2.5rem);
+    }
+
+    /* --- Hero --- */
+    .hero {
+      padding: clamp(5rem, 14vh, 10rem) 0 clamp(4rem, 10vh, 8rem);
+    }
+    .hero-title {
+      font-family: var(--font-display);
+      font-style: italic;
+      font-size: clamp(4rem, 10vw, 7.5rem);
+      line-height: 1;
+      color: var(--text-bright);
+      letter-spacing: -0.03em;
+      opacity: 0;
+      transform: translateY(20px);
+      animation: reveal 700ms var(--ease-out-expo) 100ms forwards;
+    }
+    .hero-sub {
+      font-size: clamp(1.125rem, 2.5vw, 1.5rem);
+      color: var(--text-dim);
+      margin-top: 1rem;
+      font-weight: 500;
+      opacity: 0;
+      transform: translateY(16px);
+      animation: reveal 700ms var(--ease-out-expo) 250ms forwards;
+    }
+    .hero-prop {
+      font-size: clamp(0.925rem, 1.5vw, 1.05rem);
+      color: var(--text-dim);
+      margin-top: 1.5rem;
+      max-width: 50ch;
+      line-height: 1.7;
+      opacity: 0;
+      transform: translateY(14px);
+      animation: reveal 700ms var(--ease-out-expo) 400ms forwards;
+    }
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 1rem;
+      margin-top: 2.5rem;
+      opacity: 0;
+      transform: translateY(12px);
+      animation: reveal 700ms var(--ease-out-expo) 550ms forwards;
+    }
+    .install-cmd {
+      font-family: var(--font-mono);
+      font-size: 0.875rem;
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      padding: 0.6rem 1.2rem;
+      border-radius: 4px;
+      color: var(--text);
+      cursor: pointer;
+      transition: border-color 200ms;
+      user-select: all;
+    }
+    .install-cmd:hover { border-color: var(--accent); }
+    .install-cmd .dollar { color: var(--text-dim); user-select: none; }
+
+    .gh-link {
+      font-size: 0.875rem;
+      font-weight: 600;
+      color: var(--text-dim);
+      text-decoration: none;
+      transition: color 200ms;
+    }
+    .gh-link:hover { color: var(--text-bright); }
+    .gh-link svg {
+      width: 16px;
+      height: 16px;
+      vertical-align: -2px;
+      margin-right: 0.35rem;
+      fill: currentColor;
+    }
+
+    @keyframes reveal {
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    /* --- Section --- */
+    section {
+      padding: clamp(3rem, 8vh, 6rem) 0;
+    }
+    .section-label {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--accent);
+      margin-bottom: 1rem;
+    }
+    .section-title {
+      font-family: var(--font-display);
+      font-size: clamp(1.75rem, 4vw, 2.5rem);
+      color: var(--text-bright);
+      line-height: 1.2;
+      margin-bottom: 1.5rem;
+    }
+    .section-text {
+      max-width: 58ch;
+      color: var(--text);
+      line-height: 1.75;
+    }
+    .section-text + .section-text { margin-top: 1rem; }
+
+    /* --- About --- */
+    .about {
+      border-top: 1px solid var(--border-subtle);
+    }
+    .atom-model {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      margin-top: 2.5rem;
+      border: 1px solid var(--border);
+    }
+    .atom-field {
+      background: var(--bg-surface);
+      padding: 1.25rem 1.5rem;
+    }
+    .atom-field-name {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--accent);
+    }
+    .atom-field-desc {
+      font-size: 0.825rem;
+      color: var(--text-dim);
+      margin-top: 0.3rem;
+      line-height: 1.5;
+    }
+
+    /* --- Architecture --- */
+    .arch-section {
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border-subtle);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .arch-container {
+      display: grid;
+      grid-template-columns: 36px 1fr;
+      gap: 0;
+      margin-top: 2.5rem;
+    }
+    .arch-facade {
+      writing-mode: vertical-lr;
+      text-orientation: mixed;
+      font-family: var(--font-mono);
+      font-size: 0.7rem;
+      font-weight: 500;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-right: 2px solid var(--accent);
+      padding: 1rem 0.5rem;
+    }
+    .arch-layers {
+      display: flex;
+      flex-direction: column;
+    }
+    .arch-layer {
+      display: flex;
+      align-items: baseline;
+      gap: 1rem;
+      padding: 0.9rem 1.25rem;
+      border-bottom: 1px solid var(--border-subtle);
+      opacity: 0;
+      transform: translateX(-12px);
+      transition: opacity 500ms var(--ease-out-expo), transform 500ms var(--ease-out-expo);
+    }
+    .arch-layer:last-child { border-bottom: none; }
+    .arch-layer.visible {
+      opacity: 1;
+      transform: translateX(0);
+    }
+    .arch-layer-name {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--accent-warm);
+      min-width: 100px;
+      flex-shrink: 0;
+    }
+    .arch-layer-files {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      color: var(--text-dim);
+    }
+    .arch-layer-arrow {
+      padding: 0 1.25rem;
+      color: var(--border);
+      font-size: 0.75rem;
+      line-height: 1;
+      text-align: center;
+      user-select: none;
+    }
+    @media (max-width: 600px) {
+      .arch-container { grid-template-columns: 1fr; }
+      .arch-facade {
+        writing-mode: horizontal-tb;
+        border-right: none;
+        border-bottom: 2px solid var(--accent);
+        padding: 0.5rem 0;
+        justify-content: flex-start;
+      }
+      .arch-layer { flex-direction: column; gap: 0.25rem; }
+      .arch-layer-name { min-width: auto; }
+    }
+
+    /* --- API / Code --- */
+    .code-tabs {
+      display: flex;
+      gap: 0;
+      border-bottom: 1px solid var(--border);
+      margin-top: 2.5rem;
+    }
+    .code-tab {
+      font-family: var(--font-mono);
+      font-size: 0.75rem;
+      font-weight: 500;
+      padding: 0.6rem 1.2rem;
+      color: var(--text-dim);
+      cursor: pointer;
+      border: none;
+      background: none;
+      border-bottom: 2px solid transparent;
+      transition: color 200ms, border-color 200ms;
+    }
+    .code-tab:hover { color: var(--text); }
+    .code-tab.active {
+      color: var(--accent);
+      border-bottom-color: var(--accent);
+    }
+    .code-panel {
+      display: none;
+      background: var(--code-bg);
+      border: 1px solid var(--border);
+      border-top: none;
+      padding: clamp(1rem, 3vw, 1.75rem);
+      overflow-x: auto;
+    }
+    .code-panel.active { display: block; }
+    .code-panel pre {
+      font-family: var(--font-mono);
+      font-size: 0.825rem;
+      line-height: 1.7;
+      color: var(--text);
+      white-space: pre;
+      margin: 0;
+    }
+    .code-panel .cm { color: var(--text-dim); }
+    .code-panel .kw { color: var(--accent); }
+    .code-panel .st { color: var(--accent-sage); }
+    .code-panel .fn { color: var(--accent-warm); }
+    .code-panel .nb { color: oklch(65% 0.12 50); }
+
+    /* --- Salience --- */
+    .salience-section {
+      border-top: 1px solid var(--border-subtle);
+    }
+    .formula-block {
+      background: var(--bg-surface);
+      border: 1px solid var(--border);
+      border-left: 3px solid var(--accent);
+      padding: clamp(1.5rem, 4vw, 2.5rem);
+      margin-top: 2.5rem;
+      overflow-x: auto;
+    }
+    .formula {
+      font-family: var(--font-display);
+      font-size: clamp(1rem, 2vw, 1.2rem);
+      line-height: 2;
+      color: var(--text-bright);
+    }
+    .formula .var {
+      font-family: var(--font-mono);
+      font-size: 0.85em;
+      color: var(--accent-warm);
+    }
+    .formula .op {
+      color: var(--text-dim);
+      padding: 0 0.15em;
+    }
+    .salience-detail {
+      margin-top: 2rem;
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 2rem;
+    }
+    .salience-card-title {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      font-weight: 500;
+      color: var(--accent);
+      margin-bottom: 0.5rem;
+    }
+    .salience-card-text {
+      font-size: 0.9rem;
+      line-height: 1.7;
+      color: var(--text-dim);
+    }
+    .severity-list {
+      list-style: none;
+      margin-top: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .severity-list li {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      padding-left: 1rem;
+      position: relative;
+    }
+    .severity-list li::before {
+      content: '';
+      position: absolute;
+      left: 0;
+      top: 0.55em;
+      width: 6px;
+      height: 6px;
+      border-radius: 1px;
+    }
+    .severity-list li.sev-crit::before { background: var(--accent); }
+    .severity-list li.sev-anti::before { background: var(--accent-warm); }
+    .severity-list li.sev-ctx::before { background: var(--text-dim); }
+
+    /* --- Personality --- */
+    .personality-section {
+      background: var(--bg-surface);
+      border-top: 1px solid var(--border-subtle);
+      border-bottom: 1px solid var(--border-subtle);
+    }
+    .preset-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      margin-top: 2.5rem;
+      border: 1px solid var(--border);
+    }
+    .preset {
+      background: var(--bg);
+      padding: 1.5rem;
+    }
+    .preset-name {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--text-bright);
+    }
+    .preset-desc {
+      font-size: 0.8rem;
+      color: var(--text-dim);
+      margin-top: 0.3rem;
+      line-height: 1.5;
+    }
+    .preset-bars {
+      margin-top: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    .preset-bar {
+      display: grid;
+      grid-template-columns: 72px 1fr 32px;
+      align-items: center;
+      gap: 0.5rem;
+    }
+    .preset-bar-label {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      text-align: right;
+    }
+    .preset-bar-track {
+      height: 4px;
+      background: var(--border);
+      border-radius: 2px;
+      overflow: hidden;
+    }
+    .preset-bar-fill {
+      height: 100%;
+      border-radius: 2px;
+      width: 0;
+      transition: width 800ms var(--ease-out-quart);
+    }
+    .preset-bar-fill.fill-accent { background: var(--accent); }
+    .preset-bar-fill.fill-warm { background: var(--accent-warm); }
+    .preset-bar-fill.fill-sage { background: var(--accent-sage); }
+    .preset-bar-fill.fill-text { background: var(--text-dim); }
+    .preset-bar-value {
+      font-family: var(--font-mono);
+      font-size: 0.65rem;
+      color: var(--text-dim);
+      text-align: right;
+    }
+
+    /* --- Serve --- */
+    .serve-section {
+      border-top: 1px solid var(--border-subtle);
+    }
+    .serve-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      margin-top: 2.5rem;
+      border: 1px solid var(--border);
+    }
+    .serve-mode {
+      background: var(--bg-surface);
+      padding: 1.5rem;
+    }
+    .serve-mode-name {
+      font-family: var(--font-mono);
+      font-size: 0.85rem;
+      font-weight: 500;
+      color: var(--accent-warm);
+    }
+    .serve-mode-desc {
+      font-size: 0.85rem;
+      color: var(--text-dim);
+      margin-top: 0.4rem;
+      line-height: 1.6;
+    }
+    .serve-mode-cmd {
+      font-family: var(--font-mono);
+      font-size: 0.8rem;
+      color: var(--text);
+      background: var(--code-bg);
+      padding: 0.5rem 0.75rem;
+      margin-top: 0.75rem;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+    }
+
+    /* --- Footer --- */
+    footer {
+      padding: clamp(3rem, 8vh, 5rem) 0;
+      border-top: 1px solid var(--border-subtle);
+    }
+    .footer-inner {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+    .footer-left {
+      font-size: 0.825rem;
+      color: var(--text-dim);
+    }
+    .footer-left a {
+      color: var(--text);
+      text-decoration: none;
+    }
+    .footer-left a:hover { color: var(--accent); }
+    .footer-right {
+      font-family: var(--font-display);
+      font-style: italic;
+      font-size: 1.25rem;
+      color: var(--text-dim);
+    }
+  </style>
+</head>
+<body>
+  <header class="hero">
+    <div class="wrap">
+      <h1 class="hero-title">smrti</h1>
+      <p class="hero-sub">Memory engine for AI agents.</p>
+      <p class="hero-prop">Bayesian beliefs. Emotional valence. Attention-weighted salience. A single SQLite file.</p>
+      <div class="hero-actions">
+        <code class="install-cmd"><span class="dollar">$ </span>pip install smrti-memory</code>
+        <a class="gh-link" href="https://github.com/cyqlelabs/smrti" target="_blank" rel="noopener">
+          <svg viewBox="0 0 16 16"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/></svg>
+          GitHub
+        </a>
+      </div>
+    </div>
+  </header>
+
+  <main>
+    <!-- About -->
+    <section class="about">
+      <div class="wrap">
+        <p class="section-label">What it is</p>
+        <h2 class="section-title">Knowledge stored as atoms</h2>
+        <p class="section-text">smrti is an <a href="https://wiki.opencog.org/w/AtomSpace" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;border-bottom:1px solid var(--border)">AtomSpace</a>-inspired graph database for agent memory. Each node&mdash;an atom&mdash;carries a Bayesian truth value, an emotional valence, and an attention weight. Retrieval ranks by computed salience across five dimensions, not by timestamp. Your agent remembers what matters, not just what happened last.</p>
+        <p class="section-text">Evidence is append-only. Truth values are never mutated directly&mdash;observations are logged and merged during consolidation epochs via PLN (Probabilistic Logic Networks). Multi-tenant isolation keeps agent memories separate by tenant and space.</p>
+
+        <div class="atom-model">
+          <div class="atom-field">
+            <div class="atom-field-name">type</div>
+            <div class="atom-field-desc">concept &middot; belief &middot; episode &middot; goal &middot; relation</div>
+          </div>
+          <div class="atom-field">
+            <div class="atom-field-name">truth</div>
+            <div class="atom-field-desc">probability [0,1] + confidence [0,1]</div>
+          </div>
+          <div class="atom-field">
+            <div class="atom-field-name">attention</div>
+            <div class="atom-field-desc">STI (short-term) + LTI (long-term)</div>
+          </div>
+          <div class="atom-field">
+            <div class="atom-field-name">valence</div>
+            <div class="atom-field-desc">emotional tone [-1,1] + intensity [0,1]</div>
+          </div>
+          <div class="atom-field">
+            <div class="atom-field-name">entity</div>
+            <div class="atom-field-desc">person &middot; org &middot; project &middot; tool &middot; preference &middot; &hellip;</div>
+          </div>
+          <div class="atom-field">
+            <div class="atom-field-name">links</div>
+            <div class="atom-field-desc">source &rarr; target with typed relations</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Architecture -->
+    <section class="arch-section">
+      <div class="wrap">
+        <p class="section-label">Architecture</p>
+        <h2 class="section-title">Six layers, one SQLite file</h2>
+        <p class="section-text">Vector indexing via sqlite-vec (BAAI/bge-small-en-v1.5, 384 dimensions). Entity resolution cascades through exact match, alias lookup, fuzzy matching (RapidFuzz), and embedding similarity before creating new nodes.</p>
+
+        <div class="arch-container" id="archDiagram">
+          <div class="arch-facade">smrti facade</div>
+          <div class="arch-layers">
+            <div class="arch-layer">
+              <span class="arch-layer-name">servers</span>
+              <span class="arch-layer-files">mcp.py &middot; rest.py &middot; proxy.py &middot; reflect_loop.py &middot; tools.py</span>
+            </div>
+            <div class="arch-layer-arrow">&darr;</div>
+            <div class="arch-layer">
+              <span class="arch-layer-name">personality</span>
+              <span class="arch-layer-files">params.py &middot; presets/</span>
+            </div>
+            <div class="arch-layer-arrow">&darr;</div>
+            <div class="arch-layer">
+              <span class="arch-layer-name">evolution</span>
+              <span class="arch-layer-files">epoch.py &middot; truth.py (PLN)</span>
+            </div>
+            <div class="arch-layer-arrow">&darr;</div>
+            <div class="arch-layer">
+              <span class="arch-layer-name">retrieval</span>
+              <span class="arch-layer-files">fan_out.py &middot; salience.py &middot; classify.py</span>
+            </div>
+            <div class="arch-layer-arrow">&darr;</div>
+            <div class="arch-layer">
+              <span class="arch-layer-name">extraction</span>
+              <span class="arch-layer-files">resolve.py (entity resolution)</span>
+            </div>
+            <div class="arch-layer-arrow">&darr;</div>
+            <div class="arch-layer">
+              <span class="arch-layer-name">core</span>
+              <span class="arch-layer-files">models.py &middot; atomspace.py &middot; db.py &middot; embed.py</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- API -->
+    <section>
+      <div class="wrap">
+        <p class="section-label">API</p>
+        <h2 class="section-title">Six operations</h2>
+        <p class="section-text">remember, recall, believe, reflect, forget, personality. The Python API is the same interface the MCP and REST servers expose.</p>
+
+        <div class="code-tabs" role="tablist">
+          <button class="code-tab active" role="tab" aria-selected="true" aria-controls="tab-remember" data-panel="tab-remember">remember</button>
+          <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-recall" data-panel="tab-recall">recall</button>
+          <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-believe" data-panel="tab-believe">believe</button>
+          <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-reflect" data-panel="tab-reflect">reflect</button>
+        </div>
+
+        <div class="code-panel active" role="tabpanel" id="tab-remember"><pre><span class="kw">from</span> smrti <span class="kw">import</span> Smrti
+
+engine = Smrti(<span class="fn">personality</span>=<span class="st">"deterministic"</span>)
+
+<span class="cm"># Store a memory with negative valence</span>
+engine.<span class="fn">remember</span>(
+    <span class="st">"Deploying on Friday caused a 2-hour outage"</span>,
+    <span class="fn">valence</span>=<span class="nb">-0.8</span>
+)
+
+<span class="cm"># Positive experience</span>
+engine.<span class="fn">remember</span>(
+    <span class="st">"Feature flags made the rollout safe"</span>,
+    <span class="fn">valence</span>=<span class="nb">0.6</span>
+)</pre></div>
+
+        <div class="code-panel" role="tabpanel" id="tab-recall"><pre><span class="cm"># Salience-ranked retrieval</span>
+results = engine.<span class="fn">recall</span>(<span class="st">"deployment risks"</span>)
+
+<span class="kw">for</span> r <span class="kw">in</span> results:
+    <span class="fn">print</span>(
+        <span class="st">f"</span><span class="st">{r.atom.content}</span><span class="st">"</span>,
+        <span class="st">f"</span><span class="st">salience={r.salience:.2f}</span><span class="st">"</span>,
+        <span class="st">f"</span><span class="st">confidence={r.atom.truth.confidence:.2f}</span><span class="st">"</span>,
+        <span class="st">f"</span><span class="st">valence={r.atom.valence.valence:.1f}</span><span class="st">"</span>,
+    )
+
+<span class="cm"># KNN search &rarr; 1-hop graph expansion &rarr; salience scoring</span>
+<span class="cm"># Negative-valence atoms surface first when relevant</span></pre></div>
+
+        <div class="code-panel" role="tabpanel" id="tab-believe"><pre><span class="cm"># Assert a belief with supporting evidence</span>
+engine.<span class="fn">believe</span>(
+    <span class="st">"Feature flags reduce deployment risk"</span>,
+    <span class="fn">probability</span>=<span class="nb">0.85</span>,
+    <span class="fn">evidence</span>=<span class="st">"3 successful staged rollouts"</span>
+)
+
+<span class="cm"># Evidence is appended, not overwritten.</span>
+<span class="cm"># Conflicting observations create contradiction links.</span>
+<span class="cm"># The consolidation epoch merges via PLN.</span></pre></div>
+
+        <div class="code-panel" role="tabpanel" id="tab-reflect"><pre><span class="cm"># Run a consolidation epoch</span>
+epoch = engine.<span class="fn">reflect</span>()
+
+<span class="fn">print</span>(epoch)
+<span class="cm"># EpochResult(</span>
+<span class="cm">#   beliefs_updated=3,</span>
+<span class="cm">#   atoms_decayed=12,</span>
+<span class="cm">#   atoms_pruned=1,</span>
+<span class="cm">#   lti_promoted=2,</span>
+<span class="cm">#   new_connections=4,</span>
+<span class="cm">#   contradictions_resolved=1</span>
+<span class="cm"># )</span>
+
+<span class="cm"># Process evidence &rarr; decay STI/LTI &rarr; promote high-LTI</span>
+<span class="cm"># &rarr; resolve contradictions &rarr; prune low-salience atoms</span></pre></div>
+      </div>
+    </section>
+
+    <!-- Salience -->
+    <section class="salience-section">
+      <div class="wrap">
+        <p class="section-label">Retrieval</p>
+        <h2 class="section-title">Salience scoring</h2>
+        <p class="section-text">Every recall computes a weighted sum across five dimensions. Personality hyperparameters control the weights.</p>
+
+        <div class="formula-block">
+          <div class="formula">
+            <em>S</em> <span class="op">=</span>
+            <span class="var">w<sub>sim</sub></span> <span class="op">&times;</span> similarity
+            <span class="op">+</span> <span class="var">w<sub>sti</sub></span> <span class="op">&times;</span> STI
+            <span class="op">+</span> <span class="var">w<sub>conf</sub></span> <span class="op">&times;</span> confidence
+            <span class="op">+</span> <span class="var">w<sub>lti</sub></span> <span class="op">&times;</span> LTI
+            <span class="op">+</span> <span class="var">w<sub>val</sub></span> <span class="op">&times;</span> |valence| <span class="op">&times;</span> intensity
+          </div>
+        </div>
+
+        <div class="salience-detail">
+          <div>
+            <p class="salience-card-title">Dynamic weight shifting</p>
+            <p class="salience-card-text">When valence drops below &minus;0.5, weight shifts from STI to valence. Severe negative-valence atoms (errors, failures) get an LTI floor of 0.5 on creation, preventing epoch pruning. Critical errors outrank recent trivia.</p>
+          </div>
+          <div>
+            <p class="salience-card-title">Severity classification</p>
+            <p class="salience-card-text">Each recall result carries a severity tag. The proxy server injects these as XML tags into the LLM context.</p>
+            <ul class="severity-list">
+              <li class="sev-crit">critical_warning &mdash; valence &lt; &minus;0.5, intensity &gt; 0.5</li>
+              <li class="sev-anti">known_antipattern &mdash; probability &lt; 0.3, confidence &gt; 0.3</li>
+              <li class="sev-ctx">context &mdash; neutral background</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Personality -->
+    <section class="personality-section">
+      <div class="wrap">
+        <p class="section-label">Personality</p>
+        <h2 class="section-title">16 hyperparameters, 6 presets</h2>
+        <p class="section-text">Each preset tunes how the agent learns, forgets, and weighs emotion. Swap at runtime with <code style="font-family:var(--font-mono);font-size:0.9em;color:var(--accent-warm)">set_personality()</code> or define custom profiles.</p>
+
+        <div class="preset-grid" id="presetGrid">
+          <div class="preset">
+            <div class="preset-name">balanced</div>
+            <div class="preset-desc">Default. Equal weight distribution across all dimensions.</div>
+            <div class="preset-bars">
+              <div class="preset-bar"><span class="preset-bar-label">learn</span><div class="preset-bar-track"><div class="preset-bar-fill fill-accent" data-width="60%"></div></div><span class="preset-bar-value">0.30</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">decay</span><div class="preset-bar-track"><div class="preset-bar-fill fill-warm" data-width="50%"></div></div><span class="preset-bar-value">0.10</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">promote</span><div class="preset-bar-track"><div class="preset-bar-fill fill-sage" data-width="78%"></div></div><span class="preset-bar-value">0.70</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">valence</span><div class="preset-bar-track"><div class="preset-bar-fill fill-text" data-width="29%"></div></div><span class="preset-bar-value">0.10</span></div>
+            </div>
+          </div>
+
+          <div class="preset">
+            <div class="preset-name">analytical</div>
+            <div class="preset-desc">Slow belief updates. Strict promotion. Confidence-heavy retrieval.</div>
+            <div class="preset-bars">
+              <div class="preset-bar"><span class="preset-bar-label">learn</span><div class="preset-bar-track"><div class="preset-bar-fill fill-accent" data-width="30%"></div></div><span class="preset-bar-value">0.15</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">decay</span><div class="preset-bar-track"><div class="preset-bar-fill fill-warm" data-width="25%"></div></div><span class="preset-bar-value">0.05</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">promote</span><div class="preset-bar-track"><div class="preset-bar-fill fill-sage" data-width="100%"></div></div><span class="preset-bar-value">0.90</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">valence</span><div class="preset-bar-track"><div class="preset-bar-fill fill-text" data-width="14%"></div></div><span class="preset-bar-value">0.05</span></div>
+            </div>
+          </div>
+
+          <div class="preset">
+            <div class="preset-name">curious</div>
+            <div class="preset-desc">Fast learning. Aggressive exploration. Attention-weighted recall.</div>
+            <div class="preset-bars">
+              <div class="preset-bar"><span class="preset-bar-label">learn</span><div class="preset-bar-track"><div class="preset-bar-fill fill-accent" data-width="100%"></div></div><span class="preset-bar-value">0.50</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">decay</span><div class="preset-bar-track"><div class="preset-bar-fill fill-warm" data-width="100%"></div></div><span class="preset-bar-value">0.20</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">promote</span><div class="preset-bar-track"><div class="preset-bar-fill fill-sage" data-width="56%"></div></div><span class="preset-bar-value">0.50</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">valence</span><div class="preset-bar-track"><div class="preset-bar-fill fill-text" data-width="43%"></div></div><span class="preset-bar-value">0.15</span></div>
+            </div>
+          </div>
+
+          <div class="preset">
+            <div class="preset-name">empathetic</div>
+            <div class="preset-desc">Emotion-dominant. High valence weight. Mood-sensitive scoring.</div>
+            <div class="preset-bars">
+              <div class="preset-bar"><span class="preset-bar-label">learn</span><div class="preset-bar-track"><div class="preset-bar-fill fill-accent" data-width="80%"></div></div><span class="preset-bar-value">0.40</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">decay</span><div class="preset-bar-track"><div class="preset-bar-fill fill-warm" data-width="40%"></div></div><span class="preset-bar-value">0.08</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">promote</span><div class="preset-bar-track"><div class="preset-bar-fill fill-sage" data-width="78%"></div></div><span class="preset-bar-value">0.70</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">valence</span><div class="preset-bar-track"><div class="preset-bar-fill fill-text" data-width="100%"></div></div><span class="preset-bar-value">0.35</span></div>
+            </div>
+          </div>
+
+          <div class="preset">
+            <div class="preset-name">maverick</div>
+            <div class="preset-desc">Low decay. Broad connections. Eclectic, exploratory recall.</div>
+            <div class="preset-bars">
+              <div class="preset-bar"><span class="preset-bar-label">learn</span><div class="preset-bar-track"><div class="preset-bar-fill fill-accent" data-width="20%"></div></div><span class="preset-bar-value">0.10</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">decay</span><div class="preset-bar-track"><div class="preset-bar-fill fill-warm" data-width="75%"></div></div><span class="preset-bar-value">0.15</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">promote</span><div class="preset-bar-track"><div class="preset-bar-fill fill-sage" data-width="44%"></div></div><span class="preset-bar-value">0.40</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">valence</span><div class="preset-bar-track"><div class="preset-bar-fill fill-text" data-width="57%"></div></div><span class="preset-bar-value">0.20</span></div>
+            </div>
+          </div>
+
+          <div class="preset">
+            <div class="preset-name">deterministic</div>
+            <div class="preset-desc">Agentic workflows. Fast learning + slow decay. Strict LTI promotion.</div>
+            <div class="preset-bars">
+              <div class="preset-bar"><span class="preset-bar-label">learn</span><div class="preset-bar-track"><div class="preset-bar-fill fill-accent" data-width="80%"></div></div><span class="preset-bar-value">0.40</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">decay</span><div class="preset-bar-track"><div class="preset-bar-fill fill-warm" data-width="40%"></div></div><span class="preset-bar-value">0.08</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">promote</span><div class="preset-bar-track"><div class="preset-bar-fill fill-sage" data-width="94%"></div></div><span class="preset-bar-value">0.85</span></div>
+              <div class="preset-bar"><span class="preset-bar-label">valence</span><div class="preset-bar-track"><div class="preset-bar-fill fill-text" data-width="34%"></div></div><span class="preset-bar-value">0.12</span></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Serve -->
+    <section class="serve-section">
+      <div class="wrap">
+        <p class="section-label">Serve</p>
+        <h2 class="section-title">Three modes, same engine</h2>
+
+        <div class="serve-grid">
+          <div class="serve-mode">
+            <div class="serve-mode-name">MCP</div>
+            <div class="serve-mode-desc">Stdio server for Claude, Cursor, and any MCP-compatible client. Tool-based interface.</div>
+            <div class="serve-mode-cmd">smrti serve mcp</div>
+          </div>
+          <div class="serve-mode">
+            <div class="serve-mode-name">REST</div>
+            <div class="serve-mode-desc">FastAPI on port 8420. JSON request/response. Direct HTTP integration.</div>
+            <div class="serve-mode-cmd">smrti serve rest</div>
+          </div>
+          <div class="serve-mode">
+            <div class="serve-mode-name">Proxy</div>
+            <div class="serve-mode-desc">OpenAI-compatible on port 8421. Injects severity-tagged memories as XML into the LLM context window.</div>
+            <div class="serve-mode-cmd">smrti serve proxy</div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      <div class="footer-inner">
+        <div class="footer-left">
+          <a href="https://github.com/cyqlelabs/smrti" target="_blank" rel="noopener">GitHub</a>
+          &ensp;&middot;&ensp; Python 3.10+ &ensp;&middot;&ensp; MIT
+          &ensp;&middot;&ensp; by cyqlelabs
+        </div>
+        <div class="footer-right">smrti</div>
+      </div>
+    </div>
+  </footer>
+
+  <script>
+    // Tabs
+    const tabs = document.querySelectorAll('.code-tab');
+    function activateTab(tab) {
+      tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
+      document.querySelectorAll('.code-panel').forEach(p => p.classList.remove('active'));
+      tab.classList.add('active');
+      tab.setAttribute('aria-selected', 'true');
+      document.getElementById(tab.dataset.panel).classList.add('active');
+    }
+    tabs.forEach(tab => {
+      tab.addEventListener('click', () => activateTab(tab));
+      tab.addEventListener('keydown', (e) => {
+        const idx = Array.from(tabs).indexOf(tab);
+        if (e.key === 'ArrowRight') { e.preventDefault(); activateTab(tabs[(idx + 1) % tabs.length]); tabs[(idx + 1) % tabs.length].focus(); }
+        if (e.key === 'ArrowLeft') { e.preventDefault(); activateTab(tabs[(idx - 1 + tabs.length) % tabs.length]); tabs[(idx - 1 + tabs.length) % tabs.length].focus(); }
+      });
+    });
+
+    // Scroll-triggered architecture layers
+    const archObs = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          const layers = entry.target.querySelectorAll('.arch-layer');
+          // Reveal from bottom to top
+          const reversed = Array.from(layers).reverse();
+          reversed.forEach((layer, i) => {
+            setTimeout(() => layer.classList.add('visible'), i * 80);
+          });
+          archObs.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.2 });
+
+    const archDiagram = document.getElementById('archDiagram');
+    if (archDiagram) archObs.observe(archDiagram);
+
+    // Scroll-triggered personality bars
+    const barObs = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        if (entry.isIntersecting) {
+          entry.target.querySelectorAll('.preset-bar-fill').forEach(bar => {
+            bar.style.width = bar.dataset.width;
+          });
+          barObs.unobserve(entry.target);
+        }
+      });
+    }, { threshold: 0.15 });
+
+    const presetGrid = document.getElementById('presetGrid');
+    if (presetGrid) barObs.observe(presetGrid);
+  </script>
+</body>
+</html>

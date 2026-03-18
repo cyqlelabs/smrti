@@ -23,6 +23,7 @@ from smrti.servers.reflect_loop import run_reflect_loop
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    _bootstrap()  # write personality to DB before any other process can claim it
     task = asyncio.create_task(run_reflect_loop(lambda: list(_instances.values())))
     yield
     task.cancel()

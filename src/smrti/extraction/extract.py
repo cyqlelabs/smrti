@@ -206,12 +206,26 @@ def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti") -
         subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
         obj_id = _db_resolve_label(obj_raw, entity_ids, mem)
         if subj_id and obj_id and subj_id != obj_id:
+            predicate = claim.get("predicate", "related_to")
             claim_valence = float(claim.get("valence") or 0.0)
             mem.atomspace.link_atoms(
-                subj_id, obj_id, claim.get("predicate", "related_to"),
+                subj_id, obj_id, predicate,
                 mem.tenant_id, mem.write_space,
                 valence=claim_valence,
             )
+            # Safety net: promote target atom to goal type on has_goal claims
+            if predicate == "has_goal":
+                _promote_to_goal(obj_id, mem)
+
+
+def _promote_to_goal(atom_id: str, mem: "Smrti") -> None:
+    """Promote an atom to goal type if it isn't already."""
+    row = mem.db.fetchone("SELECT type, entity_type FROM atoms WHERE id = ?", (atom_id,))
+    if row and row["type"] != "goal":
+        mem.db.execute(
+            "UPDATE atoms SET type = 'goal', entity_type = 'goal' WHERE id = ?",
+            (atom_id,),
+        )
 
 
 # ── Full LLM extraction path (original) ──────────────────────────────────────
@@ -396,10 +410,26 @@ async def extract_and_link_hybrid(
     if not claims_result:
         return
 
-    def _sync_link() -> None:
+    def _sync_resolve_and_link() -> None:
+        # Resolve any new goal entities the LLM emitted
+        new_entities = claims_result.get("entities", [])
+        if new_entities:
+            from .resolve import EntityResolver
+            resolver = EntityResolver(mem.db, mem.embed)
+            for ent in new_entities:
+                name = (ent.get("name") or "").strip()
+                etype = ent.get("type", "")
+                if not name or etype != "goal":
+                    continue
+                if name in entity_ids or name.lower() in entity_ids:
+                    continue
+                atom_id = resolver.resolve(name, "goal", mem.tenant_id, mem.write_space, [mem.write_space])
+                entity_ids[name] = atom_id
+                entity_ids.setdefault(name.lower(), atom_id)
+                mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
         _link_claims(claims_result.get("claims", []), entity_ids, mem)
 
-    await loop.run_in_executor(None, _sync_link)
+    await loop.run_in_executor(None, _sync_resolve_and_link)
 
 
 # ── Serialized wrapper ────────────────────────────────────────────────────────

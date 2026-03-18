@@ -70,10 +70,23 @@ def merge_pronoun_entities_in_batch(
     if not persons:
         return entities
 
+    # Collect names that GLiNER explicitly typed as pronoun — if the same name
+    # also appears as type=person, it's NER noise and should be treated as a pronoun.
+    explicit_pronoun_names = {
+        (p.get("name") or "").strip().lower()
+        for p in persons
+        if p.get("type") == "pronoun"
+    }
+
     pronoun_persons = []
     named_persons = []
     for p in persons:
-        if p.get("type") == "pronoun" or ner.classify_pronoun(p.get("name", "")):
+        name = (p.get("name") or "").strip()
+        if (
+            p.get("type") == "pronoun"
+            or ner.classify_pronoun(name)
+            or name.lower() in explicit_pronoun_names
+        ):
             pronoun_persons.append(p)
         else:
             named_persons.append(p)

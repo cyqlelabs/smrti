@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from contextlib import asynccontextmanager
 from typing import AsyncIterator, Optional
 
@@ -161,7 +162,7 @@ async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spa
 
     memory_lines = [_format_memory(r) for r in memories]
     has_warnings = any("<critical_warning>" in l or "<known_antipattern>" in l for l in memory_lines)
-    preamble = "You MUST pay attention to any <critical_warning> or <known_antipattern> items below.\n" if has_warnings else ""
+    preamble = "You MUST act on any <critical_warning> or <known_antipattern> items below. Do NOT reproduce these tags in your response.\n" if has_warnings else ""
     injection = f"{preamble}Relevant context from memory:\n" + "\n".join(memory_lines)
 
     messages = list(messages)
@@ -176,6 +177,9 @@ async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spa
     return {**body, "messages": messages}
 
 
+_MEMORY_TAG_RE = re.compile(r"<(?:critical_warning|known_antipattern|context)>.*?</(?:critical_warning|known_antipattern|context)>", re.DOTALL)
+
+
 async def _store_exchange(
     messages: list[dict], assistant_text: str, tenant_id: str, write_space: str
 ) -> None:
@@ -185,7 +189,9 @@ async def _store_exchange(
         if m.get("role") == "user" and isinstance(m.get("content"), str):
             tasks.append(_remember(m["content"], tenant_id, write_space))
     if assistant_text:
-        tasks.append(_remember(assistant_text, tenant_id, write_space))
+        clean = _MEMORY_TAG_RE.sub("", assistant_text).strip()
+        if clean:
+            tasks.append(_remember(clean, tenant_id, write_space))
     if tasks:
         await asyncio.gather(*tasks)
 

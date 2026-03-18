@@ -16,6 +16,9 @@ _http: Optional[httpx.AsyncClient] = None
 
 _VALID_TYPES = set(ENTITY_TYPES)
 
+# Per-session locks to serialize extractions within the same (tenant_id, write_space)
+_session_locks: dict[str, asyncio.Lock] = {}
+
 
 def _get_http() -> httpx.AsyncClient:
     global _http
@@ -397,3 +400,31 @@ async def extract_and_link_hybrid(
         _link_claims(claims_result.get("claims", []), entity_ids, mem)
 
     await loop.run_in_executor(None, _sync_link)
+
+
+# ── Serialized wrapper ────────────────────────────────────────────────────────
+
+
+async def extract_and_link_serialized(
+    episode_id: str,
+    content: str,
+    mem: "Smrti",
+    auth: str,
+    model: str,
+    upstream: str,
+    source: str = "user",
+    mode: str = "hybrid",
+) -> None:
+    """Serialize extractions within the same (tenant_id, write_space) session.
+
+    Acquires a per-session asyncio.Lock so that episode N's entities are fully
+    committed before episode N+1's ``_build_entity_context()`` query runs.
+    Cross-session concurrency is preserved (different keys = different locks).
+    """
+    key = f"{mem.tenant_id}:{mem.write_space}"
+    if key not in _session_locks:
+        _session_locks[key] = asyncio.Lock()
+    async with _session_locks[key]:
+        await extract_and_link_hybrid(
+            episode_id, content, mem, auth, model, upstream, source, mode
+        )

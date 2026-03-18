@@ -129,9 +129,9 @@ def run_mcp_server() -> None:
             episode_id = result.get("atom_id", "")
             content = arguments.get("content", "")
             if episode_id and content:
-                from smrti.extraction.extract import extract_and_link_hybrid
+                from smrti.extraction.extract import extract_and_link_serialized
                 asyncio.create_task(
-                    extract_and_link_hybrid(episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL, mode=cfg.EXTRACT_MODE)
+                    extract_and_link_serialized(episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL, mode=cfg.EXTRACT_MODE)
                 )
         return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 

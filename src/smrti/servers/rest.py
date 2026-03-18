@@ -78,10 +78,10 @@ async def remember(req: RememberRequest, request: Request):
     if cfg.EXTRACT:
         episode_id = result.get("atom_id", "")
         if episode_id:
-            from smrti.extraction.extract import extract_and_link_hybrid
+            from smrti.extraction.extract import extract_and_link_serialized
             auth = request.headers.get("Authorization", "")
             asyncio.create_task(
-                extract_and_link_hybrid(episode_id, req.content, get_mem(), auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL, mode=cfg.EXTRACT_MODE)
+                extract_and_link_serialized(episode_id, req.content, get_mem(), auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL, mode=cfg.EXTRACT_MODE)
             )
     return result
 

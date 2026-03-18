@@ -124,9 +124,9 @@ async def _extract_and_link(
     model: str,
     source: str = "user",
 ) -> None:
-    from smrti.extraction.extract import extract_and_link_hybrid
+    from smrti.extraction.extract import extract_and_link_serialized
     mem = get_mem(tenant_id, write_space)
-    await extract_and_link_hybrid(episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model, cfg.EXTRACT_URL, source, mode=cfg.EXTRACT_MODE)
+    await extract_and_link_serialized(episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model, cfg.EXTRACT_URL, source, mode=cfg.EXTRACT_MODE)
 
 
 def _enrich_content(r: RecallResult, mem) -> str:
@@ -287,14 +287,12 @@ async def _store_exchange(
     episode_ids = await asyncio.gather(*[_remember(c, tenant_id, write_space) for c, _ in to_store])
 
     if cfg.EXTRACT:
-        await asyncio.gather(
-            *[
-                _extract_and_link(eid, content, tenant_id, write_space, auth, model, source)
-                for eid, (content, source) in zip(episode_ids, to_store)
-                if eid
-            ],
-            return_exceptions=True,
-        )
+        for eid, (content, source) in zip(episode_ids, to_store):
+            if eid:
+                try:
+                    await _extract_and_link(eid, content, tenant_id, write_space, auth, model, source)
+                except Exception:
+                    pass
 
 
 def _upstream_headers(request: Request) -> dict:

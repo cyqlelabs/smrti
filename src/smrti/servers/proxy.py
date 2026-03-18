@@ -13,6 +13,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from smrti import Smrti
 from smrti.core.models import RecallResult
+from smrti.extraction.sentiment import estimate_valence
 from smrti.retrieval.classify import classify_memory
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
@@ -100,9 +101,11 @@ async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: lis
 
 async def _remember(content: str, tenant_id: str, write_space: str) -> None:
     mem = get_mem(tenant_id, write_space)
+    valence = estimate_valence(content, mem.embed)
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(
-        None, lambda: mem.remember(content, type="episode", probability=0.75)
+        None,
+        lambda: mem.remember(content, type="episode", probability=0.75, valence=valence),
     )
 
 

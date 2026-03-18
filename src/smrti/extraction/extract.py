@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 
-from .prompts import EXTRACTION_PROMPT
+from .prompts import AGENT_EXTRACTION_PROMPT, EXTRACTION_PROMPT
 
 if TYPE_CHECKING:
     from smrti import Smrti
@@ -29,12 +29,14 @@ async def extract_knowledge(
     auth: str,
     model: str,
     entity_context: str = "",
+    source: str = "user",
 ) -> Optional[dict]:
     """Call the upstream LLM to extract entities and claims from text.
 
     Returns a dict with 'entities' and 'claims' lists, or None on failure.
     """
-    if entity_context:
+    system_prompt = AGENT_EXTRACTION_PROMPT if source == "agent" else EXTRACTION_PROMPT
+    if entity_context and source != "agent":
         user_content = (
             f"[Known entities — use these to resolve pronouns and references]\n"
             f"{entity_context}\n\n"
@@ -49,7 +51,7 @@ async def extract_knowledge(
             json={
                 "model": model,
                 "messages": [
-                    {"role": "system", "content": EXTRACTION_PROMPT},
+                    {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_content},
                 ],
                 "temperature": 0.0,
@@ -102,6 +104,7 @@ async def extract_and_link(
     auth: str,
     model: str,
     upstream: str,
+    source: str = "user",
 ) -> None:
     """Extract entities/claims from content and link them to the episode atom.
 
@@ -113,7 +116,7 @@ async def extract_and_link(
     entity_context = await asyncio.get_running_loop().run_in_executor(
         None, _build_entity_context, mem
     )
-    extracted = await extract_knowledge(content, _get_http(), upstream, auth, model, entity_context)
+    extracted = await extract_knowledge(content, _get_http(), upstream, auth, model, entity_context, source)
     if not extracted:
         return
 
@@ -141,10 +144,12 @@ async def extract_and_link(
             obj_raw = claim.get("object", "")
             subj_id = entity_ids.get(subj_raw) or entity_ids.get(subj_raw.lower())
             obj_id = entity_ids.get(obj_raw) or entity_ids.get(obj_raw.lower())
-            if subj_id and obj_id:
+            if subj_id and obj_id and subj_id != obj_id:
+                claim_valence = float(claim.get("valence") or 0.0)
                 mem.atomspace.link_atoms(
                     subj_id, obj_id, claim.get("predicate", "related_to"),
                     mem.tenant_id, mem.write_space,
+                    valence=claim_valence,
                 )
 
     loop = asyncio.get_running_loop()

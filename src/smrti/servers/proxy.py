@@ -121,10 +121,11 @@ async def _extract_and_link(
     write_space: str,
     auth: str,
     model: str,
+    source: str = "user",
 ) -> None:
     from smrti.extraction.extract import extract_and_link
     mem = get_mem(tenant_id, write_space)
-    await extract_and_link(episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model, cfg.EXTRACT_URL)
+    await extract_and_link(episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model, cfg.EXTRACT_URL, source)
 
 
 def _enrich_content(r: RecallResult, mem) -> str:
@@ -273,22 +274,22 @@ async def _store_exchange(
         if clean:
             clean_assistant = clean
 
-    to_store: list[str] = []
+    to_store: list[tuple[str, str]] = []
     if last_user:
-        to_store.append(last_user)
+        to_store.append((last_user, "user"))
     if clean_assistant:
-        to_store.append(clean_assistant)
+        to_store.append((clean_assistant, "agent"))
 
     if not to_store:
         return
 
-    episode_ids = await asyncio.gather(*[_remember(c, tenant_id, write_space) for c in to_store])
+    episode_ids = await asyncio.gather(*[_remember(c, tenant_id, write_space) for c, _ in to_store])
 
     if cfg.EXTRACT:
         await asyncio.gather(
             *[
-                _extract_and_link(eid, content, tenant_id, write_space, auth, model)
-                for eid, content in zip(episode_ids, to_store)
+                _extract_and_link(eid, content, tenant_id, write_space, auth, model, source)
+                for eid, (content, source) in zip(episode_ids, to_store)
                 if eid
             ],
             return_exceptions=True,

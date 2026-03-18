@@ -138,6 +138,7 @@ class AtomSpace:
         tenant_id: str,
         space: str,
         truth: Optional[TruthValue] = None,
+        valence: float = 0.0,
     ) -> str:
         # Idempotent: boost STI and return existing relation if already present
         existing = self._db.fetchone(
@@ -155,6 +156,7 @@ class AtomSpace:
         if truth is None:
             truth = TruthValue(probability=0.8, confidence=0.5)
         label = f"{relation}({source_id[:8]}, {target_id[:8]})"
+        from smrti.core.models import Valence as ValenceModel
         link_atom = Atom(
             type=AtomType.RELATION,
             label=label,
@@ -164,6 +166,7 @@ class AtomSpace:
             truth=truth,
             tenant_id=tenant_id,
             space=space,
+            valence=ValenceModel(valence=max(-1.0, min(1.0, valence)), intensity=abs(valence)),
         )
         return self.add_atom(link_atom)
 

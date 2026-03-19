@@ -1,11 +1,13 @@
 """Shared visualization endpoints — mounted by both REST and proxy servers."""
 from __future__ import annotations
 
+import asyncio
+import json as _json
 import os
 from typing import Callable
 
 from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from smrti import Smrti
 
@@ -103,6 +105,30 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
     async def get_llm_calls():
         from smrti.call_log import get_all
         return get_all()
+
+    @router.get("/llm-calls/stream")
+    async def stream_llm_calls():
+        from smrti.call_log import subscribe, unsubscribe
+
+        async def event_generator():
+            q = subscribe()
+            try:
+                while True:
+                    try:
+                        entry = await asyncio.wait_for(q.get(), timeout=15.0)
+                        yield f"data: {_json.dumps(entry)}\n\n"
+                    except asyncio.TimeoutError:
+                        yield ": keepalive\n\n"
+            except asyncio.CancelledError:
+                pass
+            finally:
+                unsubscribe(q)
+
+        return StreamingResponse(
+            event_generator(),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
 
     @router.delete("/llm-calls")
     async def clear_llm_calls():

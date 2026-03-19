@@ -14,7 +14,7 @@
   --border:  #30363d;
   --text:    #e6edf3;
   --muted:   #8b949e;
-  --dim:     #484f58;
+  --dim:     #6e7681;
   --accent:  #58a6ff;
   --concept: #3b82f6;
   --belief:  #a855f7;
@@ -255,6 +255,8 @@ select.slim { width: 70px; }
   height: 40px; background: var(--bg); border-bottom: 1px solid var(--border);
   display: flex; align-items: center; padding: 0 14px; gap: 10px; flex-shrink: 0;
 }
+#btn-calls-live { color: var(--muted); }
+#btn-calls-live.live-on { color: #3fb950; }
 #calls-body { flex: 1; display: flex; overflow: hidden; }
 
 /* ── Call list panel ─────────────────────────────────────────────── */
@@ -324,20 +326,20 @@ select.slim { width: 70px; }
 }
 .mem-row1 { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
 .mem-lbl { font-size: 13px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.mem-cnt { font-size: 12px; color: var(--muted); line-height: 1.4; margin-bottom: 3px; }
-.mem-stats { font-size: 11px; color: var(--dim); font-family: monospace; display: flex; gap: 8px; }
-.inject-lbl { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+.mem-cnt { font-size: 12px; color: var(--text); line-height: 1.4; margin-bottom: 3px; }
+.mem-stats { font-size: 11px; color: var(--muted); font-family: monospace; display: flex; gap: 8px; }
+.inject-lbl { font-size: 11px; color: var(--muted); margin-bottom: 4px; }
 .inject-orig {
   background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
   padding: 7px 10px; font-size: 12px; font-family: 'SF Mono','Fira Code',monospace;
-  color: var(--dim); white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+  color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5;
   max-height: 100px; overflow-y: auto; margin-bottom: 8px;
 }
 .inject-block {
   background: rgba(88,166,255,.06); border: 1px solid rgba(88,166,255,.18);
   border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0;
   padding: 8px 12px; font-size: 12px; font-family: 'SF Mono','Fira Code',monospace;
-  color: var(--muted); white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+  color: var(--text); white-space: pre-wrap; word-break: break-word; line-height: 1.5;
   max-height: 200px; overflow-y: auto;
 }
 .msg-list { display: flex; flex-direction: column; gap: 5px; }
@@ -350,7 +352,7 @@ select.slim { width: 70px; }
 .msg-role.user      { color: var(--concept); background: rgba(59,130,246,.08); }
 .msg-role.assistant { color: var(--episode); background: rgba(34,197,94,.08); }
 .msg-body {
-  padding: 6px 10px; font-size: 12px; color: var(--muted); white-space: pre-wrap;
+  padding: 6px 10px; font-size: 12px; color: var(--text); white-space: pre-wrap;
   word-break: break-word; line-height: 1.5; max-height: 140px; overflow-y: auto;
 }
 .hdr-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
@@ -634,15 +636,7 @@ select.slim { width: 70px; }
     <button id="btn-calls-refresh" class="icon" title="Refresh">↻</button>
     <button id="btn-calls-clear" title="Clear all">✕ Clear</button>
     <div class="vsep" style="height:18px;margin:0 2px"></div>
-    <div class="fgroup">
-      <span class="lbl">Auto</span>
-      <select id="s-calls-auto" class="slim" style="width:54px">
-        <option value="0">Off</option>
-        <option value="3000">3s</option>
-        <option value="5000">5s</option>
-        <option value="10000">10s</option>
-      </select>
-    </div>
+    <button id="btn-calls-live" title="Connect live stream">⬤ Live</button>
     <div class="hfill"></div>
     <span id="calls-count-lbl" style="font-size:13px;color:var(--muted)">—</span>
   </div>
@@ -1256,7 +1250,7 @@ function bindControls() {
 }
 
 // ─── LLM Calls Panel ──────────────────────────────────────────────────
-const SC = { calls: [], sel: null, autoTimer: null };
+const SC = { calls: [], sel: null, es: null };
 
 const llmBase = () => { const v = $('llm-url').value.trim(); return v || window.location.origin; };
 
@@ -1294,11 +1288,7 @@ async function loadCalls() {
       renderCallDetail(SC.sel);
     }
     renderCallList();
-    const n = SC.calls.length;
-    const cnt = $('tab-calls-count');
-    cnt.textContent = n || '';
-    cnt.classList.toggle('visible', n > 0);
-    $('calls-count-lbl').textContent = n + ' call' + (n !== 1 ? 's' : '');
+    _updateCallsCount();
   } catch(e) {
     $('calls-count-lbl').textContent = '⚠ ' + e.message;
   }
@@ -1312,6 +1302,53 @@ async function clearCalls() {
     $('calls-count-lbl').textContent = '0 calls';
     $('tab-calls-count').classList.remove('visible');
   } catch {}
+}
+
+function _updateCallsCount() {
+  const n = SC.calls.length;
+  const cnt = $('tab-calls-count');
+  cnt.textContent = n || '';
+  cnt.classList.toggle('visible', n > 0);
+  $('calls-count-lbl').textContent = n + ' call' + (n !== 1 ? 's' : '');
+}
+
+function connectLive() {
+  if (SC.es) { SC.es.close(); SC.es = null; }
+  const btn = $('btn-calls-live');
+  SC.es = new EventSource(llmBase() + '/llm-calls/stream');
+  SC.es.onopen = () => { btn.classList.add('live-on'); btn.title = 'Disconnect live stream'; };
+  SC.es.onerror = () => { btn.classList.remove('live-on'); btn.title = 'Reconnecting…'; };
+  SC.es.onmessage = (ev) => {
+    let entry;
+    try { entry = JSON.parse(ev.data); } catch { return; }
+    if (entry.__clear__) {
+      SC.calls = []; SC.sel = null;
+      renderCallList(); renderCallDetail(null);
+      _updateCallsCount();
+      return;
+    }
+    if (entry.__update__) {
+      const idx = SC.calls.findIndex(c => c.id === entry.id);
+      if (idx !== -1) {
+        const { __update__: _, ...rest } = entry;
+        SC.calls[idx] = rest;
+        if (SC.sel && SC.sel.id === entry.id) { SC.sel = SC.calls[idx]; renderCallDetail(SC.sel); }
+        renderCallList();
+      }
+      return;
+    }
+    SC.calls.unshift(entry);
+    if (SC.calls.length > 200) SC.calls.pop();
+    renderCallList();
+    _updateCallsCount();
+  };
+}
+
+function disconnectLive() {
+  if (SC.es) { SC.es.close(); SC.es = null; }
+  const btn = $('btn-calls-live');
+  btn.classList.remove('live-on');
+  btn.title = 'Connect live stream';
 }
 
 function renderCallList() {
@@ -1527,18 +1564,17 @@ function bindTabsAndCalls() {
       $('filters').style.display   = isGraph ? '' : 'none';
       $('main').style.display      = isGraph ? '' : 'none';
       $('calls-view').style.display = isGraph ? 'none' : 'flex';
-      if (!isGraph) loadCalls();
+      if (!isGraph) { loadCalls(); connectLive(); }
     });
   });
 
   $('btn-calls-refresh').addEventListener('click', loadCalls);
   $('btn-calls-clear').addEventListener('click', clearCalls);
-  $('llm-url').addEventListener('change', loadCalls);
+  $('llm-url').addEventListener('change', () => { disconnectLive(); loadCalls(); });
 
-  $('s-calls-auto').addEventListener('change', () => {
-    clearInterval(SC.autoTimer); SC.autoTimer = null;
-    const ms = parseInt($('s-calls-auto').value);
-    if (ms > 0) SC.autoTimer = setInterval(loadCalls, ms);
+  $('btn-calls-live').addEventListener('click', () => {
+    if (SC.es && SC.es.readyState !== EventSource.CLOSED) disconnectLive();
+    else connectLive();
   });
 }
 
@@ -1547,8 +1583,8 @@ async function init() {
   if (window.location.protocol !== 'file:') {
     $('api-base').value = window.location.origin;
     $('api-base').placeholder = window.location.origin;
-    $('llm-url').value = window.location.origin;
-    $('llm-url').placeholder = window.location.origin;
+    $('llm-url').value = window.location.protocol + '//' + window.location.hostname + ':8421';
+    $('llm-url').placeholder = window.location.protocol + '//' + window.location.hostname + ':8421';
   }
   bindControls();
   bindTabsAndCalls();

@@ -14,6 +14,7 @@ def compute_salience(
     w_confidence: float = 0.20,
     w_lti: float = 0.10,
     w_valence: float = 0.10,
+    valence_weight: float = 0.2,
 ) -> float:
     """
     S = (w_sim  x cosine_similarity)
@@ -23,11 +24,16 @@ def compute_salience(
       + (w_val  x |valence| x intensity)
 
     STI and LTI are normalized by dividing by 2.0 and clamping to [0, 1].
+
+    ``valence_weight`` is the global scaling factor for emotional influence:
+    it controls how aggressively the dynamic weight shift operates when
+    valence < -0.5 (higher = stronger shift from STI toward valence).
     """
     # Dynamic weight scaling: severe negative-valence atoms shift weight
     # from STI to valence so old-but-critical errors outrank recent trivia.
+    # valence_weight controls the strength of this shift per personality.
     if valence < -0.5:
-        boost = abs(valence) * intensity * 0.15
+        boost = abs(valence) * intensity * valence_weight
         w_sti = max(w_sti - boost, 0.0)
         w_valence = w_valence + boost
 

@@ -636,6 +636,8 @@ select.slim { width: 70px; }
     <button id="btn-calls-refresh" class="icon" title="Refresh">↻</button>
     <button id="btn-calls-clear" title="Clear all">✕ Clear</button>
     <div class="vsep" style="height:18px;margin:0 2px"></div>
+    <button id="btn-calls-export" title="Copy all calls as JSON to clipboard">⬇ Export JSON</button>
+    <div class="vsep" style="height:18px;margin:0 2px"></div>
     <button id="btn-calls-live" title="Connect live stream">⬤ Live</button>
     <div class="hfill"></div>
     <span id="calls-count-lbl" style="font-size:13px;color:var(--muted)">—</span>
@@ -1554,6 +1556,16 @@ function renderExtractionDetail(c) {
   return html;
 }
 
+function exportCallsJson() {
+  const json = JSON.stringify(SC.calls, null, 2);
+  navigator.clipboard.writeText(json).then(() => {
+    const btn = $('btn-calls-export');
+    const orig = btn.textContent;
+    btn.textContent = '✓ Copied!';
+    setTimeout(() => { btn.textContent = orig; }, 1800);
+  }).catch(() => {});
+}
+
 function bindTabsAndCalls() {
   // Tab switching
   document.querySelectorAll('.tab').forEach(tab => {
@@ -1570,6 +1582,7 @@ function bindTabsAndCalls() {
 
   $('btn-calls-refresh').addEventListener('click', loadCalls);
   $('btn-calls-clear').addEventListener('click', clearCalls);
+  $('btn-calls-export').addEventListener('click', exportCallsJson);
   $('llm-url').addEventListener('change', () => { disconnectLive(); loadCalls(); });
 
   $('btn-calls-live').addEventListener('click', () => {

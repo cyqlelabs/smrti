@@ -244,11 +244,20 @@ def _resolve_ner_entities(
 
 def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti") -> None:
     """Create relation edges from claim triplets."""
+    _resolver = None
     for claim in claims:
         subj_raw = claim.get("subject", "")
         obj_raw = claim.get("object", "")
         subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
         obj_id = _db_resolve_label(obj_raw, entity_ids, mem)
+        # Auto-create missing object atoms as concepts rather than silently dropping
+        if not obj_id and obj_raw:
+            if _resolver is None:
+                from .resolve import EntityResolver
+                _resolver = EntityResolver(mem.db, mem.embed)
+            obj_id = _resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
+            entity_ids[obj_raw] = obj_id
+            entity_ids.setdefault(obj_raw.lower(), obj_id)
         if subj_id and obj_id and subj_id != obj_id:
             predicate = claim.get("predicate", "related_to")
             claim_valence = float(claim.get("valence") or 0.0)
@@ -488,7 +497,7 @@ async def extract_and_link_hybrid(
         # Resolve new entities the LLM emitted: goals (new atoms) and
         # preference/constraint reclassifications (resolve to existing atom,
         # updating its entity_type so it becomes a belief atom).
-        _ALLOWED_NEW_TYPES = {"goal", "preference", "constraint"}
+        _ALLOWED_NEW_TYPES = {"goal", "preference", "constraint", "concept"}
         new_entities = claims_result.get("entities", [])
         if new_entities:
             from .resolve import EntityResolver
@@ -507,7 +516,7 @@ async def extract_and_link_hybrid(
                         "UPDATE atoms SET type = 'belief', entity_type = ? WHERE id = ? AND type = 'concept'",
                         (etype, atom_id),
                     )
-                elif name not in entity_ids and name.lower() not in entity_ids:
+                elif etype == "concept":
                     mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
         _link_claims(claims_result.get("claims", []), entity_ids, mem)
 

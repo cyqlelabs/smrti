@@ -15,8 +15,9 @@ READ_SPACES: list[str] | None = [s.strip() for s in _read_raw.split(",") if s.st
 _ignore_raw: str = os.environ.get("SMRTI_IGNORE_PATTERNS", "")
 IGNORE_PATTERNS: list[str] = [p.strip() for p in _ignore_raw.splitlines() if p.strip()]
 
-# Extraction — LLM-based entity/claim extraction after remember() calls
+# Extraction — entity/claim extraction after remember() calls
 EXTRACT: bool = os.environ.get("SMRTI_EXTRACT", "1") == "1"
+EXTRACT_MODE: str = os.environ.get("SMRTI_EXTRACT_MODE", "hybrid")
 EXTRACT_URL: str = (
     os.environ.get("SMRTI_EXTRACT_URL")
     or os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")

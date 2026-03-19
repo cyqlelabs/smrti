@@ -7,12 +7,14 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 
-from .prompts import AGENT_EXTRACTION_PROMPT, EXTRACTION_PROMPT
+from .prompts import AGENT_EXTRACTION_PROMPT, CLAIMS_ONLY_PROMPT, ENTITY_TYPES, EXTRACTION_PROMPT
 
 if TYPE_CHECKING:
     from smrti import Smrti
 
 _http: Optional[httpx.AsyncClient] = None
+
+_VALID_TYPES = set(ENTITY_TYPES)
 
 
 def _get_http() -> httpx.AsyncClient:
@@ -97,6 +99,78 @@ def _build_entity_context(mem: "Smrti") -> str:
     return "\n".join(lines)
 
 
+# ── Reusable helpers ──────────────────────────────────────────────────────────
+
+
+def _db_resolve_label(label: str, entity_ids: dict[str, str], mem: "Smrti") -> str | None:
+    """Resolve a claim subject/object to an atom_id, falling back to DB lookup."""
+    atom_id = entity_ids.get(label) or entity_ids.get(label.lower())
+    if atom_id:
+        return atom_id
+    row = mem.db.fetchone(
+        "SELECT id FROM atoms WHERE LOWER(label) = LOWER(?) AND tenant_id = ? AND space = ?",
+        (label, mem.tenant_id, mem.write_space),
+    )
+    if row:
+        entity_ids[label] = row["id"]
+        entity_ids[label.lower()] = row["id"]
+        return row["id"]
+    return None
+
+
+def _resolve_ner_entities(
+    entities: list[dict],
+    episode_id: str,
+    mem: "Smrti",
+) -> dict[str, str]:
+    """Resolve a list of {"name", "type"} dicts via the entity cascade.
+
+    Returns a mapping of name → atom_id. Also creates mentions edges.
+    """
+    from .resolve import EntityResolver
+
+    resolver = EntityResolver(mem.db, mem.embed)
+    entity_ids: dict[str, str] = {}
+
+    for ent in entities:
+        name = (ent.get("name") or "").strip()
+        etype = ent.get("type", "concept")
+        if not name:
+            continue
+        if etype not in _VALID_TYPES:
+            etype = "concept"
+        atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
+        entity_ids[name] = atom_id
+        entity_ids.setdefault(name.lower(), atom_id)
+        for alias in ent.get("aliases", []):
+            if alias and alias.lower() != name.lower():
+                resolver.aliases.add(atom_id, alias, mem.tenant_id, mem.write_space)
+                entity_ids.setdefault(alias, atom_id)
+                entity_ids.setdefault(alias.lower(), atom_id)
+        mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
+
+    return entity_ids
+
+
+def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti") -> None:
+    """Create relation edges from claim triplets."""
+    for claim in claims:
+        subj_raw = claim.get("subject", "")
+        obj_raw = claim.get("object", "")
+        subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
+        obj_id = _db_resolve_label(obj_raw, entity_ids, mem)
+        if subj_id and obj_id and subj_id != obj_id:
+            claim_valence = float(claim.get("valence") or 0.0)
+            mem.atomspace.link_atoms(
+                subj_id, obj_id, claim.get("predicate", "related_to"),
+                mem.tenant_id, mem.write_space,
+                valence=claim_valence,
+            )
+
+
+# ── Full LLM extraction path (original) ──────────────────────────────────────
+
+
 async def extract_and_link(
     episode_id: str,
     content: str,
@@ -111,8 +185,6 @@ async def extract_and_link(
     Shared by all serve modes (proxy, MCP, REST). Silently no-ops if the LLM
     call fails or returns no usable structure.
     """
-    from .resolve import EntityResolver
-
     entity_context = await asyncio.get_running_loop().run_in_executor(
         None, _build_entity_context, mem
     )
@@ -120,57 +192,138 @@ async def extract_and_link(
     if not extracted:
         return
 
-    from .prompts import ENTITY_TYPES
-    _VALID_TYPES = set(ENTITY_TYPES)
-
-    def _resolve_label(label: str) -> str | None:
-        """Resolve a claim subject/object to an atom_id, falling back to DB lookup."""
-        atom_id = entity_ids.get(label) or entity_ids.get(label.lower())
-        if atom_id:
-            return atom_id
-        row = mem.db.fetchone(
-            "SELECT id FROM atoms WHERE LOWER(label) = LOWER(?) AND tenant_id = ? AND space = ?",
-            (label, mem.tenant_id, mem.write_space),
-        )
-        if row:
-            entity_ids[label] = row["id"]
-            entity_ids[label.lower()] = row["id"]
-            return row["id"]
-        return None
-
     def _sync_work() -> None:
-        resolver = EntityResolver(mem.db, mem.embed)
-        entity_ids: dict[str, str] = {}
-
-        for ent in extracted.get("entities", []):
-            name = (ent.get("name") or "").strip()
-            etype = ent.get("type", "concept")
-            if not name:
-                continue
-            if etype not in _VALID_TYPES:
-                etype = "concept"
-            atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
-            entity_ids[name] = atom_id
-            entity_ids.setdefault(name.lower(), atom_id)
-            for alias in ent.get("aliases", []):
-                if alias and alias.lower() != name.lower():
-                    resolver.aliases.add(atom_id, alias, mem.tenant_id, mem.write_space)
-                    entity_ids.setdefault(alias, atom_id)
-                    entity_ids.setdefault(alias.lower(), atom_id)
-            mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
-
-        for claim in extracted.get("claims", []):
-            subj_raw = claim.get("subject", "")
-            obj_raw = claim.get("object", "")
-            subj_id = _resolve_label(subj_raw)
-            obj_id = _resolve_label(obj_raw)
-            if subj_id and obj_id and subj_id != obj_id:
-                claim_valence = float(claim.get("valence") or 0.0)
-                mem.atomspace.link_atoms(
-                    subj_id, obj_id, claim.get("predicate", "related_to"),
-                    mem.tenant_id, mem.write_space,
-                    valence=claim_valence,
-                )
+        entity_ids = _resolve_ner_entities(extracted.get("entities", []), episode_id, mem)
+        _link_claims(extracted.get("claims", []), entity_ids, mem)
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _sync_work)
+
+
+# ── Claims-only LLM call ─────────────────────────────────────────────────────
+
+
+async def extract_claims_only(
+    text: str,
+    entities: list[dict],
+    upstream: str,
+    auth: str,
+    model: str,
+    entity_context: str = "",
+) -> Optional[dict]:
+    """Call the LLM with a shorter claims-only prompt, given pre-extracted entities.
+
+    Returns {"claims": [...]} or None on failure.
+    """
+    entities_block = "\n".join(
+        f"- {e['name']} ({e['type']})" for e in entities if e.get("name")
+    )
+    system_prompt = CLAIMS_ONLY_PROMPT.replace("{entities_block}", entities_block)
+
+    user_content = text
+    if entity_context:
+        user_content = (
+            f"[Known entities — use these to resolve pronouns and references]\n"
+            f"{entity_context}\n\n"
+            f"[Text to extract]\n{text}"
+        )
+
+    try:
+        resp = await _get_http().post(
+            f"{upstream}/v1/chat/completions",
+            headers={"Content-Type": "application/json", "Authorization": auth},
+            json={
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_content},
+                ],
+                "temperature": 0.0,
+                "max_tokens": 512,
+            },
+            timeout=30.0,
+        )
+        data = resp.json()
+        raw = data["choices"][0]["message"]["content"].strip()
+        if raw.startswith("```"):
+            raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+# ── Hybrid dispatch ───────────────────────────────────────────────────────────
+
+
+async def extract_and_link_hybrid(
+    episode_id: str,
+    content: str,
+    mem: "Smrti",
+    auth: str,
+    model: str,
+    upstream: str,
+    source: str = "user",
+    mode: str = "hybrid",
+) -> None:
+    """Hybrid extraction: GLiNER for entities, LLM only for claims when needed.
+
+    Modes:
+      - "llm"    — full LLM path (backward compatible)
+      - "hybrid" — GLiNER entities + LLM claims when 2+ entities
+      - "local"  — GLiNER entities only, no LLM calls
+    source == "agent" always takes the full LLM path.
+    """
+    if source == "agent" or mode == "llm":
+        await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
+        return
+
+    # Try GLiNER for entity extraction
+    ner_entities: list[dict] | None = None
+    try:
+        from smrti.extraction import ner as ner_mod
+
+        ner_instance = ner_mod.get_ner()
+        loop = asyncio.get_running_loop()
+        ner_entities = await loop.run_in_executor(None, ner_instance.extract, content)
+    except ImportError:
+        if mode == "hybrid":
+            await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
+            return
+        # local mode with no gliner installed — nothing we can do
+        return
+    except Exception:
+        if mode == "hybrid":
+            await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
+            return
+        return
+
+    if not ner_entities:
+        return
+
+    # Resolve entities and create mentions edges
+    def _sync_resolve() -> dict[str, str]:
+        return _resolve_ner_entities(ner_entities, episode_id, mem)
+
+    loop = asyncio.get_running_loop()
+    entity_ids = await loop.run_in_executor(None, _sync_resolve)
+
+    # In local mode, we're done — no LLM calls
+    if mode == "local":
+        return
+
+    # Hybrid mode: call LLM for claims only when 2+ unique entities
+    unique_ids = set(entity_ids.values())
+    if len(unique_ids) < 2:
+        return
+
+    entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
+    claims_result = await extract_claims_only(
+        content, ner_entities, upstream, auth, model, entity_context
+    )
+    if not claims_result:
+        return
+
+    def _sync_link() -> None:
+        _link_claims(claims_result.get("claims", []), entity_ids, mem)
+
+    await loop.run_in_executor(None, _sync_link)

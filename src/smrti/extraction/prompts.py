@@ -207,3 +207,40 @@ IN: "I'd be happy to help you with your project. Here's what I can do:
 1. Research best practices.
 2. Break it into manageable milestones."
 OUT: {"entities":[],"claims":[]}"""
+
+
+CLAIMS_ONLY_PROMPT = """Extract ONLY relationship claims between pre-extracted entities. Return ONLY valid JSON — no prose, no fences.
+
+FORMAT:
+{"claims":[{"subject":string,"predicate":string,"object":string,"valence":number}]}
+
+PRE-EXTRACTED ENTITIES:
+{entities_block}
+
+RULES:
+- subject and object MUST be character-identical to an entity name listed above
+- One fact per claim triplet (atomic)
+- "valence" is optional; omit when neutral
+  negative (−0.5 to −1.0): errors, fears, avoidance, displeasure
+  positive (0.3 to 1.0): preferences, successes, enjoyment
+- Extract only explicitly stated facts; no inference or invention
+- No metaphor — figurative language ≠ literal fact
+- If no clear relationships exist, return {"claims":[]}
+
+EXAMPLES:
+
+Entities: Dave (person), Next.js (tool), build times (concept)
+Text: "Dave said he's moving to Next.js because he hates the build times."
+OUT:
+{"claims":[
+  {"subject":"Dave","predicate":"is_migrating_to","object":"Next.js"},
+  {"subject":"Dave","predicate":"dislikes","object":"build times","valence":-0.6}
+]}
+
+Entities: test suite (tool), production (concept), deploying without tests (constraint)
+Text: "We deployed without running the test suite and it broke production."
+OUT:
+{"claims":[
+  {"subject":"deploying without tests","predicate":"caused","object":"production","valence":-0.9},
+  {"subject":"deploying without tests","predicate":"must_avoid","object":"production","valence":-0.9}
+]}"""

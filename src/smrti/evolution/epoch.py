@@ -15,10 +15,12 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     Executes in order:
       1. Apply pending evidence to update belief probabilities/confidence
       2. Decay STI and confidence for all atoms in this space
-      3. Promote high-STI atoms to LTI
-      4. Resolve contradictions by weakening the less confident belief
-      5. Discover cross-domain connections (every 10th epoch)
-      6. Prune dead atoms below confidence and LTI floors
+      3. Propagate STI and valence to 1-hop neighbors of active atoms
+      4. Heal orphaned episodes (link to most salient person)
+      5. Promote high-STI atoms to LTI
+      6. Resolve contradictions by weakening the less confident belief
+      7. Discover cross-domain connections (every 10th epoch)
+      8. Prune dead atoms below confidence and LTI floors
     """
     db.execute(
         "UPDATE personality SET epoch_count = epoch_count + 1 WHERE tenant_id = ? AND space = ?",
@@ -97,6 +99,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # 2b. Propagate STI and valence to 1-hop neighbors
     propagation_factor = p.get("sti_propagation_factor", 0.15)
     valence_prop_factor = p.get("valence_propagation", 0.1)
+    mood_inertia = p.get("mood_inertia", 0.8)
     if propagation_factor > 0 or valence_prop_factor > 0:
         active = db.fetchall(
             "SELECT id, sti, valence, intensity FROM atoms WHERE tenant_id = ? AND space = ? AND (sti > 0.3 OR (valence < -0.3 AND intensity > 0.3))",
@@ -106,7 +109,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             if propagation_factor > 0 and row["sti"] > 0.3:
                 propagate_sti(row["id"], row["sti"], propagation_factor, db, tenant_id)
             if valence_prop_factor > 0 and abs(row["valence"]) > 0.3 and row["intensity"] > 0.3:
-                propagate_valence(row["id"], row["valence"], row["intensity"], valence_prop_factor, db, tenant_id)
+                propagate_valence(row["id"], row["valence"], row["intensity"], valence_prop_factor, db, tenant_id, mood_inertia=mood_inertia)
 
     # 2c. Heal orphaned episodes (link to most salient person)
     orphans_healed = heal_orphaned_episodes(tenant_id, space, db)

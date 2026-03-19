@@ -9,17 +9,23 @@ def propagate_valence(
     propagation_factor: float,
     db,
     tenant_id: str,
+    mood_inertia: float = 0.8,
 ) -> None:
     """Propagate emotional valence to 1-hop connected atoms, attenuated by factor.
 
-    Uses an 80/20 weighted blend: existing valence contributes 80%, the incoming
-    propagated signal contributes 20%, keeping emotional drift gradual.
+    Uses a weighted blend controlled by ``mood_inertia`` (0–1): existing valence
+    contributes ``mood_inertia`` fraction, incoming signal contributes the rest,
+    keeping emotional drift gradual for high-inertia presets and more reactive
+    for low-inertia ones (e.g. empathetic=0.4).
     """
     spread_v = valence * propagation_factor
     spread_i = intensity * propagation_factor
 
     if abs(spread_v) < 0.01:
         return
+
+    keep = max(0.0, min(1.0, mood_inertia))
+    absorb = 1.0 - keep
 
     forward = db.fetchall(
         "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ?",
@@ -36,8 +42,8 @@ def propagate_valence(
     for nid in neighbor_ids:
         db.execute(
             """UPDATE atoms SET
-                   valence   = (valence   * 0.8 + ? * 0.2),
-                   intensity = MIN(intensity * 0.8 + ? * 0.2, 1.0)
+                   valence   = (valence   * ? + ? * ?),
+                   intensity = MIN(intensity * ? + ? * ?, 1.0)
                WHERE id = ?""",
-            (spread_v, spread_i, nid),
+            (keep, spread_v, absorb, keep, spread_i, absorb, nid),
         )

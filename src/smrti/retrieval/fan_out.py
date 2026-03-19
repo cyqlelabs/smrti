@@ -39,6 +39,7 @@ def retrieve(
     w_confidence = p.get("w_confidence", 0.20)
     w_lti = p.get("w_lti", 0.10)
     w_valence = p.get("w_valence", 0.10)
+    valence_weight = p.get("valence_weight", 0.2)
     sti_boost = p.get("sti_boost_on_access", 0.5)
 
     # Step 1: KNN entry points — search across the full tenant partition
@@ -108,6 +109,7 @@ def retrieve(
             w_confidence=w_confidence,
             w_lti=w_lti,
             w_valence=w_valence,
+            valence_weight=valence_weight,
         )
         results.append(RecallResult(atom=atom, salience=salience, similarity=similarity))
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from typing import TYPE_CHECKING, Optional
 
 import httpx
@@ -20,6 +21,18 @@ _VALID_TYPES = set(ENTITY_TYPES)
 _session_locks: dict[str, asyncio.Lock] = {}
 
 
+def _apply_thinking_mode(body: dict, mode: str) -> None:
+    """Mutate a chat-completion request body to control thinking mode.
+
+    Supports llama.cpp / vLLM Qwen3-style chat_template_kwargs.
+    mode="auto" leaves the body untouched.
+    """
+    if mode == "disabled":
+        body.setdefault("chat_template_kwargs", {})["enable_thinking"] = False
+    elif mode == "enabled":
+        body.setdefault("chat_template_kwargs", {})["enable_thinking"] = True
+
+
 def _get_http() -> httpx.AsyncClient:
     global _http
     if _http is None:
@@ -35,11 +48,14 @@ async def extract_knowledge(
     model: str,
     entity_context: str = "",
     source: str = "user",
+    tenant_id: str = "",
 ) -> Optional[dict]:
     """Call the upstream LLM to extract entities and claims from text.
 
     Returns a dict with 'entities' and 'claims' lists, or None on failure.
     """
+    from smrti.call_log import append as _log
+
     system_prompt = AGENT_EXTRACTION_PROMPT if source == "agent" else EXTRACTION_PROMPT
     if entity_context and source != "agent":
         user_content = (
@@ -49,29 +65,57 @@ async def extract_knowledge(
         )
     else:
         user_content = text
+
+    from smrti.servers import config as _cfg
+    request_body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 4096,
+    }
+    _apply_thinking_mode(request_body, _cfg.EXTRACT_THINKING)
+    entry: dict = {
+        "kind": "extraction",
+        "subkind": "full",
+        "tenant_id": tenant_id,
+        "upstream": upstream,
+        "model": model,
+        "source": source,
+        "request": request_body,
+        "status": 0,
+        "response_raw": "",
+        "response_parsed": None,
+        "error": None,
+        "duration_ms": 0.0,
+    }
+    t0 = time.monotonic()
     try:
         resp = await http.post(
             f"{upstream}/v1/chat/completions",
             headers={"Content-Type": "application/json", "Authorization": auth},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": 0.0,
-                "max_tokens": 1024,
-            },
-            timeout=30.0,
+            json=request_body,
+            timeout=60.0,
         )
+        entry["status"] = resp.status_code
         data = resp.json()
-        raw = data["choices"][0]["message"]["content"].strip()
+        msg = data["choices"][0]["message"]
+        raw = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+        entry["response_raw"] = raw[:2000]
         # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        return json.loads(raw)
-    except Exception:
+        parsed = json.loads(raw)
+        entry["response_parsed"] = parsed
+        return parsed
+    except Exception as exc:
+        entry["error"] = str(exc)
         return None
+    finally:
+        entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _log(entry)
 
 
 _COREF_TYPES = {"person", "organization", "project", "tool", "location", "event", "goal", "preference", "constraint"}
@@ -248,7 +292,7 @@ async def extract_and_link(
     entity_context = await asyncio.get_running_loop().run_in_executor(
         None, _build_entity_context, mem
     )
-    extracted = await extract_knowledge(content, _get_http(), upstream, auth, model, entity_context, source)
+    extracted = await extract_knowledge(content, _get_http(), upstream, auth, model, entity_context, source, mem.tenant_id)
     if not extracted:
         return
 
@@ -270,11 +314,14 @@ async def extract_claims_only(
     auth: str,
     model: str,
     entity_context: str = "",
+    tenant_id: str = "",
 ) -> Optional[dict]:
     """Call the LLM with a shorter claims-only prompt, given pre-extracted entities.
 
     Returns {"claims": [...]} or None on failure.
     """
+    from smrti.call_log import append as _log
+
     entities_block = "\n".join(
         f"- {e['name']} ({e['type']})" for e in entities
         if e.get("name") and e.get("type") != "pronoun"
@@ -289,28 +336,55 @@ async def extract_claims_only(
             f"[Text to extract]\n{text}"
         )
 
+    from smrti.servers import config as _cfg
+    request_body = {
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_content},
+        ],
+        "temperature": 0.0,
+        "max_tokens": 4096,
+    }
+    _apply_thinking_mode(request_body, _cfg.EXTRACT_THINKING)
+    entry: dict = {
+        "kind": "extraction",
+        "subkind": "claims_only",
+        "tenant_id": tenant_id,
+        "upstream": upstream,
+        "model": model,
+        "source": "hybrid",
+        "request": request_body,
+        "status": 0,
+        "response_raw": "",
+        "response_parsed": None,
+        "error": None,
+        "duration_ms": 0.0,
+    }
+    t0 = time.monotonic()
     try:
         resp = await _get_http().post(
             f"{upstream}/v1/chat/completions",
             headers={"Content-Type": "application/json", "Authorization": auth},
-            json={
-                "model": model,
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_content},
-                ],
-                "temperature": 0.0,
-                "max_tokens": 1024,
-            },
-            timeout=30.0,
+            json=request_body,
+            timeout=60.0,
         )
+        entry["status"] = resp.status_code
         data = resp.json()
-        raw = data["choices"][0]["message"]["content"].strip()
+        msg = data["choices"][0]["message"]
+        raw = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+        entry["response_raw"] = raw[:2000]
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        return json.loads(raw)
-    except Exception:
+        parsed = json.loads(raw)
+        entry["response_parsed"] = parsed
+        return parsed
+    except Exception as exc:
+        entry["error"] = str(exc)
         return None
+    finally:
+        entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _log(entry)
 
 
 # ── Hybrid dispatch ───────────────────────────────────────────────────────────
@@ -405,7 +479,7 @@ async def extract_and_link_hybrid(
 
     entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
     claims_result = await extract_claims_only(
-        content, ner_entities, upstream, auth, model, entity_context
+        content, ner_entities, upstream, auth, model, entity_context, mem.tenant_id
     )
     if not claims_result:
         return

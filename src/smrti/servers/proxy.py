@@ -5,11 +5,15 @@ import asyncio
 import json
 import os
 import re
+import time
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 import httpx
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from smrti import Smrti
@@ -30,6 +34,12 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Smrti Proxy", version="0.1.0", lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["GET", "DELETE"],
+    allow_headers=["*"],
+)
 
 # Per-(tenant_id, write_space) Smrti instances
 _instances: dict[tuple[str, str], Smrti] = {}
@@ -203,22 +213,42 @@ def _build_query(messages: list[dict]) -> str | None:
     return last_user
 
 
-async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spaces: list[str]) -> dict:
-    """Recall memories relevant to the conversation and inject into the system prompt."""
+async def _inject_context(
+    body: dict, tenant_id: str, write_space: str, read_spaces: list[str]
+) -> tuple[dict, str, list[dict]]:
+    """Recall memories relevant to the conversation and inject into the system prompt.
+
+    Returns (modified_body, injected_context_text, recalled_memory_dicts).
+    """
     messages: list[dict] = body.get("messages", [])
     if not messages:
-        return body
+        return body, "", []
 
     query = _build_query(messages)
     if not query:
-        return body
+        return body, "", []
 
     memories = await _recall(query, tenant_id, write_space, read_spaces)
     if not memories:
-        return body
+        return body, "", []
 
     mem = get_mem(tenant_id, write_space)
-    formatted = [_format_memory(r, _enrich_content(r, mem)) for r in memories]
+    enriched_contents = [_enrich_content(r, mem) for r in memories]
+    formatted = [_format_memory(r, c) for r, c in zip(memories, enriched_contents)]
+
+    memory_dicts = [
+        {
+            "label": r.atom.label,
+            "content": c,
+            "severity": sev,
+            "confidence": round(r.atom.truth.confidence, 3),
+            "probability": round(r.atom.truth.probability, 3),
+            "valence": round(r.atom.valence.valence, 3),
+            "salience": round(r.salience, 3),
+        }
+        for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
+    ]
+
     warning_lines = [line for line, sev in formatted if sev in ("critical_warning", "known_antipattern")]
     context_lines = [line for line, sev in formatted if sev == "context"]
 
@@ -245,7 +275,7 @@ async def _inject_context(body: dict, tenant_id: str, write_space: str, read_spa
     else:
         messages.insert(0, {"role": "system", "content": injection})
 
-    return {**body, "messages": messages}
+    return {**body, "messages": messages}, injection, memory_dicts
 
 
 _MEMORY_TAG_RE = re.compile(r"<(?:critical_warning|known_antipattern|context)>.*?</(?:critical_warning|known_antipattern|context)>", re.DOTALL)
@@ -306,22 +336,58 @@ def _upstream_headers(request: Request) -> dict:
 _DROP_RESPONSE_HEADERS = {"content-encoding", "transfer-encoding", "content-length"}
 
 
+def _sanitize_headers(headers: dict) -> dict:
+    return {
+        k: (v[:7] + "***" if k.lower() == "authorization" and len(v) > 7 else v)
+        for k, v in headers.items()
+    }
+
+
 @app.post("/v1/chat/completions", response_model=None)
 async def chat_completions(request: Request) -> StreamingResponse | JSONResponse:
-    body: dict = await request.json()
+    from smrti.call_log import append as _log
+
+    raw_body: dict = await request.json()
     tenant_id, write_space, read_spaces = _parse_request_identity(request)
 
-    body = await _inject_context(body, tenant_id, write_space, read_spaces)
-    original_messages: list[dict] = body.get("messages", [])
+    pre_inject_messages: list[dict] = raw_body.get("messages", [])
+    t0 = time.monotonic()
+
+    body, injected_context, recalled_memories = await _inject_context(
+        raw_body, tenant_id, write_space, read_spaces
+    )
+    post_inject_messages: list[dict] = body.get("messages", [])
+
+    log_entry: dict = {
+        "id": uuid.uuid4().hex[:8],
+        "ts": datetime.now(timezone.utc).isoformat(),
+        "kind": "proxy",
+        "tenant_id": tenant_id,
+        "write_space": write_space,
+        "model": body.get("model", ""),
+        "stream": bool(body.get("stream", False)),
+        "upstream": _UPSTREAM,
+        "request_headers": _sanitize_headers(dict(request.headers)),
+        "original_messages": pre_inject_messages,
+        "injected_messages": post_inject_messages,
+        "injected_context": injected_context,
+        "memories": recalled_memories,
+        "status": 0,
+        "response_snippet": "",
+        "duration_ms": 0.0,
+    }
+    _log(log_entry)
 
     if body.get("stream", False):
         return StreamingResponse(
-            _stream_proxy(body, original_messages, tenant_id, write_space, _upstream_headers(request)),
+            _stream_proxy(body, post_inject_messages, tenant_id, write_space,
+                          _upstream_headers(request), log_entry, t0),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
 
-    return await _non_stream_proxy(body, original_messages, tenant_id, write_space, _upstream_headers(request))
+    return await _non_stream_proxy(body, post_inject_messages, tenant_id, write_space,
+                                   _upstream_headers(request), log_entry, t0)
 
 
 async def _non_stream_proxy(
@@ -330,6 +396,8 @@ async def _non_stream_proxy(
     tenant_id: str,
     write_space: str,
     headers: dict,
+    log_entry: dict,
+    t0: float,
 ) -> JSONResponse:
     response = await get_http().post(
         f"{_UPSTREAM}/v1/chat/completions",
@@ -341,6 +409,10 @@ async def _non_stream_proxy(
     assistant_text = (
         data.get("choices", [{}])[0].get("message", {}).get("content", "")
     )
+    log_entry["status"] = response.status_code
+    log_entry["response_snippet"] = (assistant_text or "")[:500]
+    log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+
     auth = headers.get("Authorization", "")
     model = body.get("model", "")
     asyncio.create_task(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model))
@@ -359,6 +431,8 @@ async def _stream_proxy(
     tenant_id: str,
     write_space: str,
     headers: dict,
+    log_entry: dict,
+    t0: float,
 ) -> AsyncIterator[bytes]:
     accumulated: list[str] = []
     auth = headers.get("Authorization", "")
@@ -367,6 +441,7 @@ async def _stream_proxy(
         async with get_http().stream(
             "POST", f"{_UPSTREAM}/v1/chat/completions", headers=headers, json=body
         ) as upstream:
+            log_entry["status"] = upstream.status_code
             async for line in upstream.aiter_lines():
                 if not line:
                     yield b"\n"
@@ -383,8 +458,11 @@ async def _stream_proxy(
                 payload = line[6:]
 
                 if payload.strip() == "[DONE]":
+                    full_text = "".join(accumulated)
+                    log_entry["response_snippet"] = full_text[:500]
+                    log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
                     asyncio.create_task(
-                        _store_exchange(original_messages, "".join(accumulated), tenant_id, write_space, auth, model)
+                        _store_exchange(original_messages, full_text, tenant_id, write_space, auth, model)
                     )
                     yield b"data: [DONE]\n\n"
                     return
@@ -404,8 +482,24 @@ async def _stream_proxy(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
+        log_entry["status"] = 500
+        log_entry["error"] = str(exc)
+        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
         err = {"error": {"message": str(exc), "type": "proxy_error"}}
         yield f"data: {json.dumps(err)}\n\ndata: [DONE]\n\n".encode()
+
+
+@app.get("/llm-calls")
+async def get_llm_calls():
+    from smrti.call_log import get_all
+    return get_all()
+
+
+@app.delete("/llm-calls")
+async def clear_llm_calls():
+    from smrti.call_log import clear
+    clear()
+    return {"status": "ok"}
 
 
 def run_proxy_server(host: str = "0.0.0.0", port: int = 8421) -> None:

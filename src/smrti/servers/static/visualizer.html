@@ -230,6 +230,146 @@ select.slim { width: 70px; }
 #tdist { display: flex; align-items: center; gap: 2px; }
 .dbar { height: 7px; border-radius: 2px; min-width: 3px; }
 
+/* ── Tab Bar ─────────────────────────────────────────────────────── */
+#tabbar {
+  height: 34px; background: var(--surface); border-bottom: 1px solid var(--border);
+  display: flex; align-items: stretch; padding: 0 14px; gap: 0; flex-shrink: 0;
+}
+.tab {
+  display: flex; align-items: center; gap: 6px; padding: 0 13px;
+  font-size: 13px; color: var(--muted); cursor: pointer; user-select: none;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  transition: color 0.12s, border-color 0.12s;
+}
+.tab:hover { color: var(--text); }
+.tab.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-count {
+  font-size: 10px; font-family: monospace; background: rgba(88,166,255,.15);
+  color: var(--accent); border-radius: 8px; padding: 1px 5px; display: none;
+}
+.tab-count.visible { display: inline; }
+
+/* ── Calls View ──────────────────────────────────────────────────── */
+#calls-view { flex: 1; display: none; flex-direction: column; overflow: hidden; }
+#calls-toolbar {
+  height: 40px; background: var(--bg); border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; padding: 0 14px; gap: 10px; flex-shrink: 0;
+}
+#calls-body { flex: 1; display: flex; overflow: hidden; }
+
+/* ── Call list panel ─────────────────────────────────────────────── */
+#calls-list-panel {
+  width: 300px; background: var(--surface); border-right: 1px solid var(--border);
+  display: flex; flex-direction: column; overflow: hidden; flex-shrink: 0;
+}
+#calls-list { flex: 1; overflow-y: auto; }
+.call-item {
+  padding: 9px 12px; border-bottom: 1px solid var(--border);
+  cursor: pointer; transition: background 0.1s; border-left: 2px solid transparent;
+}
+.call-item:hover { background: var(--surface2); }
+.call-item.active {
+  background: rgba(88,166,255,.07); border-left-color: var(--accent);
+}
+.call-item-row1 { display: flex; align-items: center; gap: 5px; margin-bottom: 3px; }
+.call-item-row2 { display: flex; align-items: center; gap: 5px; font-size: 11px; color: var(--muted); }
+.call-item-model {
+  font-size: 13px; font-family: 'SF Mono', 'Fira Code', monospace;
+  color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.call-item-ts { font-size: 11px; color: var(--dim); margin-left: auto; flex-shrink: 0; }
+.bk {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  padding: 1px 5px; border-radius: 4px; flex-shrink: 0;
+}
+.bk.proxy      { background: rgba(88,166,255,.15); color: var(--accent); }
+.bk.extraction { background: rgba(245,158,11,.15);  color: var(--warn); }
+.bs {
+  font-size: 11px; font-family: monospace; padding: 1px 5px; border-radius: 4px;
+  flex-shrink: 0;
+}
+.bs.ok      { background: rgba(34,197,94,.12);  color: var(--pos); }
+.bs.err     { background: rgba(239,68,68,.12);  color: var(--neg); }
+.bs.pending { background: rgba(107,114,128,.12); color: var(--dim); }
+.call-dur { font-size: 11px; color: var(--dim); font-family: monospace; flex-shrink: 0; }
+.calls-empty-list { padding: 20px 12px; text-align: center; font-size: 13px; color: var(--dim); }
+
+/* ── Call detail ─────────────────────────────────────────────────── */
+#calls-detail { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+#calls-detail-empty {
+  flex: 1; display: flex; flex-direction: column; align-items: center;
+  justify-content: center; color: var(--dim); gap: 9px; text-align: center;
+}
+#calls-detail-body { flex: 1; overflow-y: auto; }
+.cd-header {
+  padding: 12px 16px 10px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex-shrink: 0;
+  background: var(--surface);
+}
+.cd-title { font-size: 14px; font-weight: 600; color: var(--text); }
+.cd-meta { font-size: 12px; color: var(--muted); font-family: monospace; }
+.cd-section { padding: 11px 16px; border-bottom: 1px solid var(--border); }
+.cd-stitle {
+  font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .08em;
+  color: var(--muted); margin-bottom: 8px; display: flex; align-items: center; gap: 6px;
+  cursor: pointer; user-select: none;
+}
+.cd-stitle .tog { font-size: 9px; color: var(--dim); margin-left: auto; }
+.cd-sbody { }
+.cd-collapsed .cd-sbody { display: none; }
+.mem-list { display: flex; flex-direction: column; gap: 5px; }
+.mem-item {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 10px;
+}
+.mem-row1 { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; }
+.mem-lbl { font-size: 13px; color: var(--text); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mem-cnt { font-size: 12px; color: var(--muted); line-height: 1.4; margin-bottom: 3px; }
+.mem-stats { font-size: 11px; color: var(--dim); font-family: monospace; display: flex; gap: 8px; }
+.inject-lbl { font-size: 11px; color: var(--dim); margin-bottom: 4px; }
+.inject-orig {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 10px; font-size: 12px; font-family: 'SF Mono','Fira Code',monospace;
+  color: var(--dim); white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+  max-height: 100px; overflow-y: auto; margin-bottom: 8px;
+}
+.inject-block {
+  background: rgba(88,166,255,.06); border: 1px solid rgba(88,166,255,.18);
+  border-left: 3px solid var(--accent); border-radius: 0 6px 6px 0;
+  padding: 8px 12px; font-size: 12px; font-family: 'SF Mono','Fira Code',monospace;
+  color: var(--muted); white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+  max-height: 200px; overflow-y: auto;
+}
+.msg-list { display: flex; flex-direction: column; gap: 5px; }
+.msg-item { background: var(--surface2); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+.msg-role {
+  font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: .06em;
+  padding: 3px 10px; border-bottom: 1px solid var(--border);
+}
+.msg-role.system    { color: var(--warn); background: rgba(245,158,11,.08); }
+.msg-role.user      { color: var(--concept); background: rgba(59,130,246,.08); }
+.msg-role.assistant { color: var(--episode); background: rgba(34,197,94,.08); }
+.msg-body {
+  padding: 6px 10px; font-size: 12px; color: var(--muted); white-space: pre-wrap;
+  word-break: break-word; line-height: 1.5; max-height: 140px; overflow-y: auto;
+}
+.hdr-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+.hdr-tbl tr { border-bottom: 1px solid var(--border); }
+.hdr-tbl tr:last-child { border-bottom: none; }
+.hdr-tbl td { padding: 3px 0; vertical-align: top; }
+.hdr-tbl td:first-child { color: var(--muted); width: 42%; font-family: monospace; padding-right: 8px; word-break: break-all; }
+.hdr-tbl td:last-child  { color: var(--text); font-family: monospace; font-size: 11px; word-break: break-all; }
+.resp-snip {
+  background: var(--surface2); border: 1px solid var(--border); border-radius: 6px;
+  padding: 7px 10px; font-size: 12px; color: var(--muted); white-space: pre-wrap;
+  word-break: break-word; line-height: 1.5; max-height: 150px; overflow-y: auto;
+}
+.err-block {
+  background: rgba(239,68,68,.08); border: 1px solid rgba(239,68,68,.22);
+  border-radius: 6px; padding: 7px 10px; font-size: 12px; color: #fca5a5; font-family: monospace;
+}
+.no-data { font-size: 13px; color: var(--dim); font-style: italic; }
+
 /* ── SVG graph styles ─────────────────────────────────────────────── */
 .egroup .eline {
   stroke: #2a3038; stroke-width: 1.5; fill: none;
@@ -279,6 +419,15 @@ select.slim { width: 70px; }
   <div class="hfill"></div>
   <span class="lbl">API</span>
   <input id="api-base" type="text" placeholder="http://localhost:8420" title="API base URL">
+</div>
+
+<!-- ── Tab Bar ─────────────────────────────────────────────────────── -->
+<div id="tabbar">
+  <div class="tab active" data-tab="graph">Memory Graph</div>
+  <div class="tab" data-tab="calls">
+    LLM Calls
+    <span class="tab-count" id="tab-calls-count"></span>
+  </div>
 </div>
 
 <!-- ── Filters ─────────────────────────────────────────────────────── -->
@@ -473,6 +622,55 @@ select.slim { width: 70px; }
     </div>
   </aside>
 
+</div>
+
+<!-- ── LLM Calls View ─────────────────────────────────────────────────── -->
+<div id="calls-view">
+
+  <!-- Toolbar -->
+  <div id="calls-toolbar">
+    <span class="lbl">LLM URL</span>
+    <input id="llm-url" type="text" placeholder="http://localhost:8420" style="width:200px;font-size:13px">
+    <button id="btn-calls-refresh" class="icon" title="Refresh">↻</button>
+    <button id="btn-calls-clear" title="Clear all">✕ Clear</button>
+    <div class="vsep" style="height:18px;margin:0 2px"></div>
+    <div class="fgroup">
+      <span class="lbl">Auto</span>
+      <select id="s-calls-auto" class="slim" style="width:54px">
+        <option value="0">Off</option>
+        <option value="3000">3s</option>
+        <option value="5000">5s</option>
+        <option value="10000">10s</option>
+      </select>
+    </div>
+    <div class="hfill"></div>
+    <span id="calls-count-lbl" style="font-size:13px;color:var(--muted)">—</span>
+  </div>
+
+  <!-- Body: list + detail -->
+  <div id="calls-body">
+
+    <!-- Left: call list -->
+    <div id="calls-list-panel">
+      <div id="calls-list"></div>
+    </div>
+
+    <!-- Right: call detail -->
+    <div id="calls-detail">
+      <div id="calls-detail-empty">
+        <svg width="38" height="38" viewBox="0 0 38 38" fill="none">
+          <rect x="5" y="7" width="28" height="24" rx="3" stroke="currentColor" stroke-width="1.4"/>
+          <line x1="5" y1="13" x2="33" y2="13" stroke="currentColor" stroke-width="1.4"/>
+          <line x1="11" y1="19" x2="22" y2="19" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2 2"/>
+          <line x1="11" y1="23" x2="18" y2="23" stroke="currentColor" stroke-width="1.4" stroke-dasharray="2 2"/>
+        </svg>
+        <span style="font-size:12px">Select a call to inspect</span>
+        <span style="font-size:11px">Proxy forwards and extraction calls appear here</span>
+      </div>
+      <div id="calls-detail-body"></div>
+    </div>
+
+  </div>
 </div>
 
 <!-- ── Status Bar ────────────────────────────────────────────────────── -->
@@ -1057,13 +1255,286 @@ function bindControls() {
   });
 }
 
+// ─── LLM Calls Panel ──────────────────────────────────────────────────
+const SC = { calls: [], sel: null, autoTimer: null };
+
+const llmBase = () => { const v = $('llm-url').value.trim(); return v || window.location.origin; };
+
+function relTime(ts) {
+  if (!ts) return '';
+  const diff = (Date.now() - new Date(ts)) / 1000;
+  if (diff < 5)     return 'just now';
+  if (diff < 60)    return Math.floor(diff) + 's ago';
+  if (diff < 3600)  return Math.floor(diff / 60) + 'm ago';
+  if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+  return Math.floor(diff / 86400) + 'd ago';
+}
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+function durStr(ms) {
+  if (!ms && ms !== 0) return '…';
+  return ms > 1000 ? (ms / 1000).toFixed(1) + 's' : Math.round(ms) + 'ms';
+}
+
+function statusCls(code) {
+  if (!code) return 'pending';
+  return (code >= 200 && code < 300) ? 'ok' : 'err';
+}
+
+async function loadCalls() {
+  try {
+    const data = await fetch(llmBase() + '/llm-calls').then(r => { if (!r.ok) throw new Error('HTTP '+r.status); return r.json(); });
+    SC.calls = Array.isArray(data) ? data : [];
+    if (SC.sel) {
+      SC.sel = SC.calls.find(c => c.id === SC.sel.id) || null;
+      renderCallDetail(SC.sel);
+    }
+    renderCallList();
+    const n = SC.calls.length;
+    const cnt = $('tab-calls-count');
+    cnt.textContent = n || '';
+    cnt.classList.toggle('visible', n > 0);
+    $('calls-count-lbl').textContent = n + ' call' + (n !== 1 ? 's' : '');
+  } catch(e) {
+    $('calls-count-lbl').textContent = '⚠ ' + e.message;
+  }
+}
+
+async function clearCalls() {
+  try {
+    await fetch(llmBase() + '/llm-calls', { method: 'DELETE' });
+    SC.calls = []; SC.sel = null;
+    renderCallList(); renderCallDetail(null);
+    $('calls-count-lbl').textContent = '0 calls';
+    $('tab-calls-count').classList.remove('visible');
+  } catch {}
+}
+
+function renderCallList() {
+  const list = $('calls-list');
+  if (!SC.calls.length) {
+    list.innerHTML = '<div class="calls-empty-list">No calls intercepted yet</div>';
+    return;
+  }
+  list.innerHTML = SC.calls.map((c, i) => {
+    const isProxy = c.kind === 'proxy';
+    const sc = statusCls(c.status);
+    const memCount = isProxy && c.memories ? c.memories.length : 0;
+    const sub = !isProxy && c.subkind ? ' · ' + c.subkind : '';
+    const active = SC.sel && SC.sel.id === c.id ? ' active' : '';
+    return `<div class="call-item${active}" data-idx="${i}">
+      <div class="call-item-row1">
+        <span class="bk ${isProxy ? 'proxy' : 'extraction'}">${isProxy ? 'PROXY' : 'EXTR'}</span>
+        <span class="call-item-model">${escHtml(trunc(c.model || '—', 22))}</span>
+        <span class="bs ${sc}">${c.status || '…'}</span>
+        <span class="call-dur">${durStr(c.duration_ms)}</span>
+      </div>
+      <div class="call-item-row2">
+        <span>${escHtml(c.tenant_id || '')}${sub}</span>
+        ${memCount ? `<span>⬡ ${memCount} mem</span>` : ''}
+        <span class="call-item-ts">${relTime(c.ts)}</span>
+      </div>
+    </div>`;
+  }).join('');
+  list.querySelectorAll('.call-item').forEach(el =>
+    el.addEventListener('click', () => {
+      SC.sel = SC.calls[+el.dataset.idx];
+      list.querySelectorAll('.call-item').forEach(x => x.classList.remove('active'));
+      el.classList.add('active');
+      renderCallDetail(SC.sel);
+    })
+  );
+}
+
+function renderCallDetail(call) {
+  const empty = $('calls-detail-empty');
+  const body  = $('calls-detail-body');
+  if (!call) { empty.style.display = 'flex'; body.style.display = 'none'; body.innerHTML = ''; return; }
+  empty.style.display = 'none'; body.style.display = 'block';
+  body.innerHTML = call.kind === 'proxy' ? renderProxyDetail(call) : renderExtractionDetail(call);
+  body.querySelectorAll('.cd-stitle').forEach(t =>
+    t.addEventListener('click', () => {
+      const sec = t.closest('.cd-section');
+      sec.classList.toggle('cd-collapsed');
+      const tog = t.querySelector('.tog');
+      if (tog) tog.textContent = sec.classList.contains('cd-collapsed') ? '▶' : '▼';
+    })
+  );
+}
+
+function cdSection(title, bodyHtml, collapsed) {
+  const col = collapsed ? ' cd-collapsed' : '';
+  const arr = collapsed ? '▶' : '▼';
+  return `<div class="cd-section${col}">
+    <div class="cd-stitle">${escHtml(title)} <span class="tog">${arr}</span></div>
+    <div class="cd-sbody">${bodyHtml}</div>
+  </div>`;
+}
+
+function renderMsgs(msgs) {
+  if (!msgs || !msgs.length) return '<span class="no-data">none</span>';
+  return '<div class="msg-list">' + msgs.map(m => {
+    const role = m.role || 'unknown';
+    const content = typeof m.content === 'string' ? m.content : JSON.stringify(m.content, null, 2);
+    return `<div class="msg-item">
+      <div class="msg-role ${escHtml(role)}">${escHtml(role)}</div>
+      <div class="msg-body">${escHtml(content)}</div>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+function renderProxyDetail(c) {
+  const sc = statusCls(c.status);
+  const ts = c.ts ? new Date(c.ts).toLocaleTimeString() : '';
+  let html = `<div class="cd-header">
+    <span class="bk proxy">PROXY</span>
+    <span class="cd-title">${escHtml(c.model || '—')}</span>
+    <span class="bs ${sc}">${c.status || '…'}</span>
+    <span class="cd-meta">${escHtml(c.tenant_id || '')}${c.write_space ? ' / ' + escHtml(c.write_space) : ''}</span>
+    <span class="cd-meta" style="color:var(--dim)">${escHtml(c.upstream || '')}</span>
+    <span style="margin-left:auto;font-size:12px;color:var(--dim)">${escHtml(ts)} · ${durStr(c.duration_ms)}${c.stream ? ' · stream' : ''}</span>
+  </div>`;
+
+  // Recalled memories
+  const mems = c.memories || [];
+  const memsHtml = mems.length
+    ? '<div class="mem-list">' + mems.map(m => {
+        const sev = m.severity || 'context';
+        return `<div class="mem-item">
+          <div class="mem-row1">
+            <span class="badge ${sev}">${escHtml(sev.replace(/_/g,' '))}</span>
+            <span class="mem-lbl" title="${escHtml(m.label)}">${escHtml(m.label)}</span>
+          </div>
+          ${m.content && m.content !== m.label ? `<div class="mem-cnt">${escHtml(m.content)}</div>` : ''}
+          <div class="mem-stats">
+            <span>conf ${m.confidence != null ? m.confidence.toFixed(3) : '—'}</span>
+            <span>prob ${m.probability != null ? m.probability.toFixed(3) : '—'}</span>
+            <span>val ${m.valence != null ? m.valence.toFixed(3) : '—'}</span>
+            <span>sal ${m.salience != null ? m.salience.toFixed(3) : '—'}</span>
+          </div>
+        </div>`;
+      }).join('') + '</div>'
+    : '<span class="no-data">No memories recalled</span>';
+  html += cdSection(`Recalled Memories (${mems.length})`, memsHtml, false);
+
+  // Injected context
+  if (c.injected_context) {
+    const origSys = (c.original_messages || []).find(m => m.role === 'system');
+    let injectHtml = origSys
+      ? `<div class="inject-lbl">Original system message:</div>
+         <div class="inject-orig">${escHtml(origSys.content)}</div>
+         <div class="inject-lbl" style="margin-top:8px">Injected addition:</div>`
+      : '<div class="inject-lbl">Injected as new system message:</div>';
+    injectHtml += `<div class="inject-block">${escHtml(c.injected_context)}</div>`;
+    html += cdSection('Injected Context', injectHtml, false);
+  }
+
+  // Original messages (collapsed)
+  const origMsgs = c.original_messages || [];
+  if (origMsgs.length) {
+    html += cdSection(`Original Messages (${origMsgs.length})`, renderMsgs(origMsgs), true);
+  }
+
+  // Request headers (collapsed)
+  const hdrs = c.request_headers || {};
+  const hdrEntries = Object.entries(hdrs);
+  if (hdrEntries.length) {
+    const tblHtml = '<table class="hdr-tbl">' +
+      hdrEntries.map(([k,v]) => `<tr><td>${escHtml(k)}</td><td>${escHtml(v)}</td></tr>`).join('') +
+      '</table>';
+    html += cdSection(`Request Headers (${hdrEntries.length})`, tblHtml, true);
+  }
+
+  // Response
+  if (c.response_snippet || c.status) {
+    const respHtml = c.response_snippet
+      ? `<div class="resp-snip">${escHtml(c.response_snippet)}</div>`
+      : '<span class="no-data">No response text captured</span>';
+    html += cdSection('Response', respHtml, false);
+  }
+
+  return html;
+}
+
+function renderExtractionDetail(c) {
+  const sc = statusCls(c.status);
+  const ts = c.ts ? new Date(c.ts).toLocaleTimeString() : '';
+  const sub = c.subkind || 'full';
+  let html = `<div class="cd-header">
+    <span class="bk extraction">EXTR</span>
+    <span class="cd-title">${escHtml(c.model || '—')}</span>
+    <span class="bs ${sc}">${c.status || '…'}</span>
+    <span class="cd-meta">${escHtml(sub)} · ${escHtml(c.source || '')}</span>
+    <span class="cd-meta">${escHtml(c.tenant_id || '')}</span>
+    <span style="margin-left:auto;font-size:12px;color:var(--dim)">${escHtml(ts)} · ${durStr(c.duration_ms)}</span>
+  </div>`;
+
+  if (c.error) {
+    html += `<div class="cd-section"><div class="cd-sbody"><div class="err-block">⚠ ${escHtml(c.error)}</div></div></div>`;
+  }
+
+  const msgs = (c.request || {}).messages || [];
+  if (msgs.length) {
+    html += cdSection(`Request (${msgs.length} messages)`, renderMsgs(msgs), false);
+  }
+
+  if (c.response_raw) {
+    html += cdSection('Response Raw', `<div class="resp-snip">${escHtml(c.response_raw)}</div>`, false);
+  }
+
+  if (c.response_parsed) {
+    const entities = (c.response_parsed.entities || []).length;
+    const claims   = (c.response_parsed.claims   || []).length;
+    const json     = JSON.stringify(c.response_parsed, null, 2);
+    html += cdSection(
+      `Parsed (${entities} entities, ${claims} claims)`,
+      `<pre class="jsonbox">${escHtml(json)}</pre>`,
+      false
+    );
+  }
+
+  return html;
+}
+
+function bindTabsAndCalls() {
+  // Tab switching
+  document.querySelectorAll('.tab').forEach(tab => {
+    tab.addEventListener('click', () => {
+      const which = tab.dataset.tab;
+      document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t.dataset.tab === which));
+      const isGraph = which === 'graph';
+      $('filters').style.display   = isGraph ? '' : 'none';
+      $('main').style.display      = isGraph ? '' : 'none';
+      $('calls-view').style.display = isGraph ? 'none' : 'flex';
+      if (!isGraph) loadCalls();
+    });
+  });
+
+  $('btn-calls-refresh').addEventListener('click', loadCalls);
+  $('btn-calls-clear').addEventListener('click', clearCalls);
+  $('llm-url').addEventListener('change', loadCalls);
+
+  $('s-calls-auto').addEventListener('change', () => {
+    clearInterval(SC.autoTimer); SC.autoTimer = null;
+    const ms = parseInt($('s-calls-auto').value);
+    if (ms > 0) SC.autoTimer = setInterval(loadCalls, ms);
+  });
+}
+
 // ─── Init ─────────────────────────────────────────────────────────────
 async function init() {
   if (window.location.protocol !== 'file:') {
     $('api-base').value = window.location.origin;
     $('api-base').placeholder = window.location.origin;
+    $('llm-url').value = window.location.origin;
+    $('llm-url').placeholder = window.location.origin;
   }
   bindControls();
+  bindTabsAndCalls();
   initGraph();
   await loadTenants();
   await loadSpaces();

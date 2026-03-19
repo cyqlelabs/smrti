@@ -206,6 +206,19 @@ async def get_graph(
     return {"nodes": nodes, "edges": edges}
 
 
+@app.get("/llm-calls")
+async def get_llm_calls():
+    from smrti.call_log import get_all
+    return get_all()
+
+
+@app.delete("/llm-calls")
+async def clear_llm_calls():
+    from smrti.call_log import clear
+    clear()
+    return {"status": "ok"}
+
+
 def run_rest_server(host: str = "0.0.0.0", port: int = 8420) -> None:
     import uvicorn
     uvicorn.run(app, host=host, port=port)

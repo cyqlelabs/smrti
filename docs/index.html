@@ -798,7 +798,7 @@
           </div>
           <div class="atom-field">
             <div class="atom-field-name">entity</div>
-            <div class="atom-field-desc">person &middot; org &middot; project &middot; tool &middot; preference &middot; &hellip;</div>
+            <div class="atom-field-desc">person &middot; org &middot; project &middot; role &middot; tool &middot; technology &middot; skill &middot; topic &middot; media &middot; health &middot; &hellip;</div>
           </div>
           <div class="atom-field">
             <div class="atom-field-name">links</div>
@@ -813,14 +813,14 @@
       <div class="wrap">
         <p class="section-label">Architecture</p>
         <h2 class="section-title">Six layers, one SQLite file</h2>
-        <p class="section-text">Vector indexing via sqlite-vec (multilingual-MiniLM-L12-v2, 384 dimensions, 50+ languages). Entity resolution cascades through exact match, alias lookup, fuzzy matching (RapidFuzz), and embedding similarity before creating new nodes.</p>
+        <p class="section-text">Vector indexing via sqlite-vec (multilingual-MiniLM-L12-v2, 384 dimensions, 50+ languages). Entity resolution cascades through exact match, cross-type label match, alias lookup, fuzzy matching (RapidFuzz), and embedding similarity before creating new nodes.</p>
 
         <div class="arch-container" id="archDiagram">
           <div class="arch-facade">smrti facade</div>
           <div class="arch-layers">
             <div class="arch-layer">
               <span class="arch-layer-name">servers</span>
-              <span class="arch-layer-files">mcp.py &middot; rest.py &middot; proxy.py &middot; reflect_loop.py &middot; tools.py</span>
+              <span class="arch-layer-files">mcp.py &middot; rest.py &middot; proxy.py &middot; viz_routes.py &middot; reflect_loop.py &middot; tools.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -840,7 +840,7 @@
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
               <span class="arch-layer-name">extraction</span>
-              <span class="arch-layer-files">extract.py (LLM entity/claim extraction) &middot; resolve.py (4-tier entity resolution) &middot; sentiment.py &middot; aliases.py</span>
+              <span class="arch-layer-files">extract.py (hybrid GLiNER + LLM extraction) &middot; ner.py (17-type zero-shot NER) &middot; resolve.py (5-tier entity resolution) &middot; pronouns.py &middot; sentiment.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -1186,7 +1186,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           accent: '#38bdf8', bg: '#1e3a5f', text: '#bae6fd',
           desc: 'Named entities are extracted, resolved, and linked to existing graph nodes. Pronouns are disambiguated. Claims, goals, and constraints are pulled from the text.',
           nodes: [
-            { name: 'NER',               tip: 'Extracts people, orgs, places, tools, events from text' },
+            { name: 'NER',               tip: '17 entity types: person, org, project, role, tool, technology, skill, topic, media, health, and more' },
             { name: 'Entity Resolution', tip: 'Links mentions to known graph nodes or creates new ones' },
             { name: 'Pronoun Disambig.', tip: '\u2018she\u2019 \u2192 Alice, \u2018we\u2019 \u2192 Acme' },
             { name: 'Claim Extraction',  tip: 'Pulls relations, beliefs, goals, constraints from text' },

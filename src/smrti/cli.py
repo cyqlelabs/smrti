@@ -116,6 +116,7 @@ def serve_proxy(
 
     effective_upstream = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
     typer.echo(f"Starting Smrti proxy on http://{host}:{port}/v1")
+    typer.echo(f"Visualizer:  http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port}/viz")
     typer.echo(f"Upstream: {effective_upstream}")
     run_proxy_server(host=host, port=port)
 

@@ -19,6 +19,12 @@ def append(entry: dict[str, Any]) -> None:
     _CALL_LOG.append(entry)
 
 
+def update(entry: dict[str, Any]) -> None:
+    """No-op for the in-memory backend: the deque holds a reference to the same
+    dict so caller mutations are already reflected.  Reserved for future
+    persistence backends."""
+
+
 def get_all() -> list[dict[str, Any]]:
     return list(reversed(_CALL_LOG))
 

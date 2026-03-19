@@ -23,6 +23,7 @@ from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
+from smrti.servers.viz_routes import create_viz_router
 
 
 @asynccontextmanager
@@ -80,6 +81,9 @@ def get_mem(tenant_id: str, write_space: str) -> Smrti:
             ignore_patterns=cfg.IGNORE_PATTERNS or None,
         )
     return _instances[key]
+
+
+app.include_router(create_viz_router(get_mem))
 
 
 def get_http() -> httpx.AsyncClient:
@@ -357,6 +361,7 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
         raw_body, tenant_id, write_space, read_spaces
     )
     post_inject_messages: list[dict] = body.get("messages", [])
+    upstream_hdrs = _upstream_headers(request)
 
     log_entry: dict = {
         "id": uuid.uuid4().hex[:8],
@@ -368,6 +373,7 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
         "stream": bool(body.get("stream", False)),
         "upstream": _UPSTREAM,
         "request_headers": _sanitize_headers(dict(request.headers)),
+        "upstream_headers": _sanitize_headers(upstream_hdrs),
         "original_messages": pre_inject_messages,
         "injected_messages": post_inject_messages,
         "injected_context": injected_context,
@@ -381,13 +387,13 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
     if body.get("stream", False):
         return StreamingResponse(
             _stream_proxy(body, post_inject_messages, tenant_id, write_space,
-                          _upstream_headers(request), log_entry, t0),
+                          upstream_hdrs, log_entry, t0),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
 
     return await _non_stream_proxy(body, post_inject_messages, tenant_id, write_space,
-                                   _upstream_headers(request), log_entry, t0)
+                                   upstream_hdrs, log_entry, t0)
 
 
 async def _non_stream_proxy(
@@ -412,6 +418,8 @@ async def _non_stream_proxy(
     log_entry["status"] = response.status_code
     log_entry["response_snippet"] = (assistant_text or "")[:500]
     log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+    from smrti.call_log import update as _update_log
+    _update_log(log_entry)
 
     auth = headers.get("Authorization", "")
     model = body.get("model", "")
@@ -461,6 +469,8 @@ async def _stream_proxy(
                     full_text = "".join(accumulated)
                     log_entry["response_snippet"] = full_text[:500]
                     log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+                    from smrti.call_log import update as _update_log
+                    _update_log(log_entry)
                     asyncio.create_task(
                         _store_exchange(original_messages, full_text, tenant_id, write_space, auth, model)
                     )
@@ -485,21 +495,10 @@ async def _stream_proxy(
         log_entry["status"] = 500
         log_entry["error"] = str(exc)
         log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        from smrti.call_log import update as _update_log
+        _update_log(log_entry)
         err = {"error": {"message": str(exc), "type": "proxy_error"}}
         yield f"data: {json.dumps(err)}\n\ndata: [DONE]\n\n".encode()
-
-
-@app.get("/llm-calls")
-async def get_llm_calls():
-    from smrti.call_log import get_all
-    return get_all()
-
-
-@app.delete("/llm-calls")
-async def clear_llm_calls():
-    from smrti.call_log import clear
-    clear()
-    return {"status": "ok"}
 
 
 def run_proxy_server(host: str = "0.0.0.0", port: int = 8421) -> None:

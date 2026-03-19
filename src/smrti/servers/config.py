@@ -23,3 +23,10 @@ EXTRACT_URL: str = (
     or os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
 )
 EXTRACT_MODEL: str = os.environ.get("SMRTI_EXTRACT_MODEL", "")
+# Thinking mode for extraction LLM calls.
+# "auto"     — don't modify the request (default)
+# "disabled" — pass chat_template_kwargs={"enable_thinking":false} to suppress
+#              chain-of-thought (llama.cpp / vLLM Qwen3 style); faster and avoids
+#              token-budget exhaustion on thinking models
+# "enabled"  — pass chat_template_kwargs={"enable_thinking":true} to force thinking on
+EXTRACT_THINKING: str = os.environ.get("SMRTI_EXTRACT_THINKING", "auto")

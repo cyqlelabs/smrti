@@ -23,7 +23,12 @@ class NERProvider:
                 if self._model is None:
                     from gliner2 import GLiNER2
 
-                    self._model = GLiNER2.from_pretrained(self._model_name)
+                    try:
+                        self._model = GLiNER2.from_pretrained(
+                            self._model_name, local_files_only=True
+                        )
+                    except Exception:
+                        self._model = GLiNER2.from_pretrained(self._model_name)
                     self._has_classify = hasattr(self._model, "classify_text")
         return self._model
 

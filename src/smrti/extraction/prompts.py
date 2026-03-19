@@ -232,16 +232,21 @@ IN: "I'd be happy to help you with your project. Here's what I can do:
 OUT: {"entities":[],"claims":[]}"""
 
 
-CLAIMS_ONLY_PROMPT = """Extract ONLY relationship claims between pre-extracted entities. Return ONLY valid JSON — no prose, no fences.
+CLAIMS_ONLY_PROMPT = """Extract relationship claims between pre-extracted entities. You MAY also emit NEW goal entities that the NER missed. Return ONLY valid JSON — no prose, no fences.
 
 FORMAT:
-{"claims":[{"subject":string,"predicate":string,"object":string,"valence":number}]}
+{"entities":[{"name":string,"type":"goal"}],
+ "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}]}
+
+"entities" is OPTIONAL — include it ONLY when you detect a durable objective not already
+listed below. The only allowed type for new entities is "goal".
 
 PRE-EXTRACTED ENTITIES:
 {entities_block}
 
 RULES:
-- subject and object MUST be character-identical to an entity name listed above
+- subject and object in claims MUST be character-identical to a pre-extracted entity name
+  OR a new goal entity you emitted in "entities"
 - One fact per claim triplet (atomic)
 - "valence" is optional; omit when neutral
   negative (−0.5 to −1.0): errors, fears, avoidance, displeasure
@@ -252,7 +257,14 @@ RULES:
 - PERSON ANCHORING — when a person entity is listed, they must be the subject of claims
   that describe their goals, intentions, preferences, or actions. Never leave the person
   entity disconnected if the text describes something they intend, want, or are doing.
-- GOAL CLAIMS — when a goal or project entity is listed alongside a person, emit a
+- GOAL EXTRACTION — when the text expresses a durable objective (goal, aim, plan, intention,
+  ambition, mission, aspiration) and no goal entity is already listed above:
+  1. Emit a NEW entity with type "goal" whose name captures the objective as an action phrase
+     (e.g. "establish community permaculture project", "automate data workflows")
+  2. Emit a `has_goal` claim from person→goal
+  3. If a related project/tool entity exists, also emit goal→targets→project
+  Not for transient desires ("I want a coffee", "I'd like to understand X").
+- GOAL CLAIMS — when a goal or project entity is already listed alongside a person, emit a
   `has_goal` claim from person→goal and/or a `works_on` claim from person→project.
 
 EXAMPLES:
@@ -273,10 +285,23 @@ OUT:
   {"subject":"deploying without tests","predicate":"must_avoid","object":"production","valence":-0.9}
 ]}
 
-Entities: Elias (person), open-source platform (project)
-Text: "My primary goal is to launch an open-source platform that helps independent artists."
+Entities: Elias (person), community-led permaculture project (project), food-insecure neighborhoods (location)
+Text: "My primary goal is to establish a community-led permaculture project that provides fresh produce to food-insecure neighborhoods."
 OUT:
-{"claims":[
-  {"subject":"Elias","predicate":"has_goal","object":"open-source platform","valence":0.8},
-  {"subject":"Elias","predicate":"works_on","object":"open-source platform","valence":0.7}
+{"entities":[
+  {"name":"establish community permaculture project","type":"goal"}
+],"claims":[
+  {"subject":"Elias","predicate":"has_goal","object":"establish community permaculture project","valence":0.8},
+  {"subject":"establish community permaculture project","predicate":"targets","object":"community-led permaculture project","valence":0.7}
+]}
+
+Entities: Alice (person), mobile app (project), dark mode (preference)
+Text: "Our goal for Q3 is to ship the mobile app. I also really prefer dark mode."
+OUT:
+{"entities":[
+  {"name":"ship mobile app by Q3","type":"goal"}
+],"claims":[
+  {"subject":"Alice","predicate":"has_goal","object":"ship mobile app by Q3","valence":0.8},
+  {"subject":"ship mobile app by Q3","predicate":"targets","object":"mobile app","valence":0.7},
+  {"subject":"Alice","predicate":"prefers","object":"dark mode","valence":0.7}
 ]}"""

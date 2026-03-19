@@ -118,6 +118,45 @@ def test_batch_merge_pronoun_type_from_gliner():
     assert "I" in elara["aliases"]
 
 
+def test_batch_merge_dual_typed_pronoun():
+    """When GLiNER emits same name as both person and pronoun, treat as pronoun."""
+    from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
+
+    ner = _mock_ner()  # classify_pronoun returns False for everything
+    entities = [
+        {"name": "I", "type": "person", "aliases": []},
+        {"name": "I", "type": "pronoun", "aliases": []},
+        {"name": "slow productivity", "type": "preference", "aliases": []},
+    ]
+    result = merge_pronoun_entities_in_batch(entities, ner)
+
+    names = [e["name"] for e in result]
+    # "I" should be removed (no named person to merge into, all pronoun)
+    assert "I" not in names
+    assert "slow productivity" in names
+
+
+def test_batch_merge_dual_typed_with_named_person():
+    """When GLiNER emits 'I' as both person and pronoun alongside a real name, merge into named."""
+    from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
+
+    ner = _mock_ner()  # classify_pronoun returns False for everything
+    entities = [
+        {"name": "Elias", "type": "person", "aliases": []},
+        {"name": "I", "type": "person", "aliases": []},
+        {"name": "I", "type": "pronoun", "aliases": []},
+        {"name": "Python", "type": "tool", "aliases": []},
+    ]
+    result = merge_pronoun_entities_in_batch(entities, ner)
+
+    names = [e["name"] for e in result]
+    assert "Elias" in names
+    assert "I" not in names
+    assert "Python" in names
+    elias = next(e for e in result if e["name"] == "Elias")
+    assert "I" in elias["aliases"]
+
+
 # ── Alias-based pronoun resolution tests ─────────────────────────────────────
 
 

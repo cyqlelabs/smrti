@@ -28,7 +28,7 @@
 - **Multi-tenant isolation** — Tenant/space overlay model with cross-space reads and single-space writes
 - **Three server modes** — MCP (stdio), REST API, and OpenAI-compatible proxy
 - **Automatic entity extraction** — all server modes build concept nodes and relation edges from stored episodes automatically; cross-session coreference resolution grounds pronouns against the live memory graph (on by default; set `SMRTI_EXTRACT_MODEL` and optionally `SMRTI_EXTRACT_URL` to configure)
-- **Entity resolution** — 4-tier cascade: exact match, alias lookup, fuzzy (RapidFuzz), embedding similarity
+- **Entity resolution** — 5-tier cascade: exact match, cross-type label match, alias lookup, fuzzy (RapidFuzz), embedding similarity
 - **Memory visualizer** — Built-in graph explorer (`smrti serve viz`) to inspect atoms, relations, and attention weights in the browser; includes an **LLM Calls** debug tab showing every extraction request with full request/response, timing, and recalled memories
 
 [![Smrti Visualizer](docs/visualizer.png)](docs/visualizer.png)

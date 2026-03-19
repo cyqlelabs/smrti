@@ -27,7 +27,7 @@ flowchart TD
     end
 
     subgraph UNDERSTAND ["  ② Understand  "]
-        NER["🔍 Named Entity Recognition\nPeople · Organizations · Places\nTools · Events · Goals · Beliefs"]
+        NER["🔍 Named Entity Recognition\n17 types: person · organization · project\nrole · tool · technology · skill · topic\nmedia · health · location · event & more"]
         RESOLVE["🔗 Entity Resolution\nLink to known entities\nor create new ones"]
         PRONOUNS["👥 Pronoun Disambiguation\n'she' → Alice\n'we' → Acme"]
         CLAIMS["🧠 Claim Extraction\nRelations · Beliefs · Goals\nConstraints · Preferences"]

@@ -81,6 +81,15 @@
       --font-mono: 'JetBrains Mono', 'Menlo', monospace;
       --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
       --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+      /* Pipeline diagram */
+      --p-receive-accent: #6366f1; --p-receive-bg: #1e1b4b;
+      --p-understand-accent: #38bdf8; --p-understand-bg: #1e3a5f;
+      --p-store-accent: #06b6d4; --p-store-bg: #14303d;
+      --p-consolidate-accent: #22c55e; --p-consolidate-bg: #1a2e1a;
+      --p-recall-accent: #a855f7; --p-recall-bg: #2d1b4e;
+      --p-critical-accent: #ef4444; --p-critical-bg: #3b1515;
+      --p-antipattern-accent: #f59e0b; --p-antipattern-bg: #3b2c00;
+      --p-context-accent: #10b981; --p-context-bg: #1a2e1a;
     }
 
     html {
@@ -115,7 +124,7 @@
 
     /* --- Hero --- */
     .hero {
-      padding: clamp(5rem, 14vh, 10rem) 0 clamp(4rem, 10vh, 8rem);
+      padding: clamp(5rem, 14vh, 10rem) 0 clamp(2rem, 4vh, 3.5rem);
     }
     .hero-title {
       font-family: var(--font-display);
@@ -590,6 +599,109 @@
       font-size: 1.25rem;
       color: var(--text-dim);
     }
+
+    /* --- Pipeline step viewer --- */
+    .ph-wrap {
+      margin-top: clamp(3rem, 6vh, 4.5rem);
+      max-width: 920px;
+      margin-left: auto;
+      margin-right: auto;
+      padding: 0 clamp(1.25rem, 4vw, 2.5rem);
+      opacity: 0;
+      transform: translateY(22px);
+      animation: reveal 900ms var(--ease-out-expo) 750ms forwards;
+    }
+    /* Flow bar */
+    .ph-bar {
+      display: flex; align-items: center; gap: 0; margin-bottom: 1.75rem;
+    }
+    .ph-bar-user {
+      flex-shrink: 0; background: oklch(10% 0.025 270);
+      border: 1px solid rgba(99,102,241,0.28); border-radius: 10px 10px 10px 3px;
+      padding: 6px 10px; font-size: 10.5px; line-height: 1.45; color: #c7d2fe;
+      width: 140px; min-height: 38px; box-shadow: 0 0 12px rgba(99,102,241,0.1);
+    }
+    .ph-bar-cursor {
+      display: inline-block; width: 2px; height: 0.85em; background: #818cf8;
+      margin-left: 1px; vertical-align: text-bottom;
+      animation: ph-blink 0.8s step-end infinite;
+    }
+    @keyframes ph-blink { 0%,100%{opacity:1} 50%{opacity:0} }
+    .ph-bar-stages { display: flex; align-items: center; flex: 1; justify-content: center; gap: 0; }
+    .ph-bar-conn { height: 1px; flex: 1; min-width: 6px; transition: background 0.4s; }
+    .ph-bar-pill {
+      display: flex; align-items: center; justify-content: center;
+      width: 32px; height: 32px; border-radius: 50%; font-size: 14.5px; font-weight: 700;
+      padding: 0; line-height: 1; appearance: none;
+      border: 1px solid rgba(255,255,255,0.12); background: rgba(255,255,255,0.04);
+      color: rgba(255,255,255,0.3); cursor: pointer; flex-shrink: 0;
+      transition: transform 0.3s var(--ease-out-expo), box-shadow 0.3s, color 0.3s, border-color 0.3s, background 0.3s;
+    }
+    .ph-bar-pill:hover { color: rgba(255,255,255,0.6); }
+    .ph-bar-pill.ph-done { color: rgba(255,255,255,0.45); }
+    .ph-bar-pill.ph-active { transform: scale(1.2); }
+    .ph-bar-response {
+      flex-shrink: 0; background: oklch(11% 0.045 270);
+      border: 1px solid rgba(129,140,248,0.22); border-radius: 3px 10px 10px 10px;
+      padding: 6px 10px; font-size: 10.5px; line-height: 1.45;
+      color: rgba(129,140,248,0.35); max-width: 110px; text-align: center;
+      transition: color 0.5s, border-color 0.5s, box-shadow 0.5s;
+    }
+    .ph-bar-response.ph-lit { color: #c7d2fe; border-color: rgba(129,140,248,0.55); animation: ph-resp-glow 2.2s ease-in-out infinite; }
+    @keyframes ph-resp-glow { 0%,100%{box-shadow:0 0 8px rgba(129,140,248,.2)} 50%{box-shadow:0 0 22px rgba(129,140,248,.5)} }
+    /* Stage display */
+    .ph-display-wrap { min-height: 210px; }
+    .ph-display { width: 100%; transition: opacity 0.2s ease, transform 0.2s ease; }
+    .ph-display.ph-hidden { opacity: 0; transform: translateY(10px); pointer-events: none; }
+    .ph-disp-header { display: flex; align-items: baseline; gap: 0.6rem; margin-bottom: 0.5rem; }
+    .ph-disp-num { font-size: clamp(1.54rem, 3.3vw, 2.09rem); font-weight: 700; line-height: 1; }
+    .ph-disp-label { font-family: var(--font-display); font-style: italic; font-size: clamp(1.32rem, 2.75vw, 1.815rem); color: var(--text-bright); line-height: 1; }
+    .ph-disp-desc { font-size: 0.963rem; color: var(--text); max-width: 58ch; line-height: 1.65; margin-bottom: 1.2rem; }
+    .ph-nodes { display: flex; flex-wrap: wrap; gap: 8px; }
+    .ph-node {
+      display: inline-flex; align-items: center; padding: 6px 14px; border-radius: 22px;
+      font-size: 12.5px; font-weight: 500; border: 1px solid; cursor: default;
+      position: relative; user-select: none;
+      opacity: 0; transform: translateY(8px) scale(0.95);
+      transition: opacity 0.3s, transform 0.3s var(--ease-out-expo), box-shadow 0.2s;
+    }
+    .ph-node.ph-in { opacity: 1; transform: none; }
+    .ph-node:hover { transform: scale(1.06) !important; z-index: 10; }
+    .ph-node.ph-cycle { box-shadow: 0 0 0 2px currentColor !important; transform: scale(1.07) !important; }
+    .ph-ntip {
+      position: absolute; bottom: calc(100% + 7px); left: 50%; transform: translateX(-50%);
+      background: oklch(15% 0.015 270); border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 7px; padding: 6px 10px; font-size: 11px; color: #cbd5e1;
+      pointer-events: none; opacity: 0; transition: opacity 0.15s; z-index: 100;
+      box-shadow: 0 4px 14px rgba(0,0,0,.5); max-width: 220px; white-space: normal; text-align: center; line-height: 1.4;
+    }
+    .ph-node:hover .ph-ntip { opacity: 1; }
+    /* Nav */
+    .ph-nav { display: flex; align-items: center; gap: 0.75rem; margin-top: 1.75rem; }
+    .ph-nav-btn {
+      background: none; border: 1px solid var(--border); color: var(--text-dim);
+      cursor: pointer; width: 34px; height: 34px; border-radius: 50%;
+      display: flex; align-items: center; justify-content: center; font-size: 20px;
+      transition: color 0.2s, background 0.2s; flex-shrink: 0;
+    }
+    .ph-nav-btn:hover { color: var(--text-bright); background: rgba(255,255,255,0.06); }
+    .ph-dots { display: flex; gap: 6px; align-items: center; }
+    .ph-dot { width: 6px; height: 6px; border-radius: 50%; background: rgba(255,255,255,0.18); cursor: pointer; transition: background 0.3s, width 0.3s; flex-shrink: 0; }
+    .ph-dot.ph-active { width: 18px; border-radius: 3px; }
+    .ph-auto-bar { flex: 1; height: 2px; background: rgba(255,255,255,0.07); border-radius: 1px; overflow: hidden; }
+    .ph-auto-fill { height: 100%; width: 0; border-radius: 1px; animation: ph-fill var(--ph-dur,5000ms) linear forwards; }
+    .ph-auto-fill.ph-paused { animation-play-state: paused; }
+    @keyframes ph-fill { from{width:0} to{width:100%} }
+    @media (prefers-reduced-motion: reduce) {
+      .ph-node,.ph-bar-cursor,.ph-bar-response,.ph-display { animation: none !important; transition: none !important; }
+      .ph-node.ph-in { opacity: 1; transform: none; }
+      .ph-auto-fill { animation: none !important; width: 100%; }
+    }
+    @media (max-width: 600px) {
+      .ph-bar-user, .ph-bar-response { display: none; }
+      .ph-bar-pill { width: 27px; height: 27px; font-size: 13px; }
+      .ph-node { font-size: 12px; padding: 5px 11px; }
+    }
   </style>
 </head>
 <body>
@@ -606,6 +718,56 @@
         </a>
       </div>
     </div>
+
+    <!-- Pipeline step viewer -->
+    <div class="ph-wrap" id="ph-wrap" aria-label="How smrti processes a message">
+      <!-- Flow bar: user → stages → response -->
+      <div class="ph-bar">
+        <div class="ph-bar-user">
+          <span id="ph-tw"></span><span class="ph-bar-cursor" aria-hidden="true"></span>
+        </div>
+        <div class="ph-bar-stages">
+          <div class="ph-bar-conn"></div>
+          <button class="ph-bar-pill" data-idx="0" aria-label="Stage 1: Receive">①</button>
+          <div class="ph-bar-conn"></div>
+          <button class="ph-bar-pill" data-idx="1" aria-label="Stage 2: Understand">②</button>
+          <div class="ph-bar-conn"></div>
+          <button class="ph-bar-pill" data-idx="2" aria-label="Stage 3: Store">③</button>
+          <div class="ph-bar-conn"></div>
+          <button class="ph-bar-pill" data-idx="3" aria-label="Stage 4: Consolidate">④</button>
+          <div class="ph-bar-conn"></div>
+          <button class="ph-bar-pill" data-idx="4" aria-label="Stage 5: Recall">⑤</button>
+          <div class="ph-bar-conn"></div>
+          <button class="ph-bar-pill" data-idx="5" aria-label="Stage 6: Classify">⑥</button>
+          <div class="ph-bar-conn"></div>
+        </div>
+        <div class="ph-bar-response" id="ph-bar-resp">Memory&#8209;Enriched<br>Response</div>
+      </div>
+
+      <!-- Stage display -->
+      <div class="ph-display-wrap">
+        <div class="ph-display" id="ph-display">
+          <!-- filled by JS -->
+        </div>
+      </div>
+
+      <!-- Navigation -->
+      <div class="ph-nav">
+        <button class="ph-nav-btn" id="ph-prev" aria-label="Previous stage">‹</button>
+        <div class="ph-dots">
+          <div class="ph-dot" data-idx="0"></div>
+          <div class="ph-dot" data-idx="1"></div>
+          <div class="ph-dot" data-idx="2"></div>
+          <div class="ph-dot" data-idx="3"></div>
+          <div class="ph-dot" data-idx="4"></div>
+          <div class="ph-dot" data-idx="5"></div>
+        </div>
+        <div class="ph-auto-bar"><div class="ph-auto-fill" id="ph-fill"></div></div>
+        <button class="ph-nav-btn" id="ph-next" aria-label="Next stage">›</button>
+      </div>
+
+    </div><!-- /.ph-wrap -->
+
   </header>
 
   <main>
@@ -1004,6 +1166,230 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
 
     const presetGrid = document.getElementById('presetGrid');
     if (presetGrid) barObs.observe(presetGrid);
+
+    // ── Pipeline step viewer ─────────────────────────────────────
+    (function () {
+      'use strict';
+
+      const STAGES = [
+        {
+          id: 'receive', num: '①', label: 'Receive',
+          accent: '#6366f1', bg: '#1e1b4b', text: '#c7d2fe',
+          desc: 'The message enters through MCP, REST, or a proxy interface. Emotional tone — valence and intensity — is auto-detected from the text.',
+          nodes: [
+            { name: 'Interface',      tip: 'Entry point — MCP, REST, or proxy protocol' },
+            { name: 'Emotional Tone', tip: 'Detects valence and intensity of the message' },
+          ]
+        },
+        {
+          id: 'understand', num: '②', label: 'Understand',
+          accent: '#38bdf8', bg: '#1e3a5f', text: '#bae6fd',
+          desc: 'Named entities are extracted, resolved, and linked to existing graph nodes. Pronouns are disambiguated. Claims, goals, and constraints are pulled from the text.',
+          nodes: [
+            { name: 'NER',               tip: 'Extracts people, orgs, places, tools, events from text' },
+            { name: 'Entity Resolution', tip: 'Links mentions to known graph nodes or creates new ones' },
+            { name: 'Pronoun Disambig.', tip: '\u2018she\u2019 \u2192 Alice, \u2018we\u2019 \u2192 Acme' },
+            { name: 'Claim Extraction',  tip: 'Pulls relations, beliefs, goals, constraints from text' },
+            { name: 'Context Injection', tip: 'Injects known entities to guide extraction' },
+          ]
+        },
+        {
+          id: 'store', num: '③', label: 'Store',
+          accent: '#06b6d4', bg: '#14303d', text: '#a5f3fc',
+          desc: 'Each entity and claim becomes an atom in the graph with a Bayesian truth value, an attention weight, an emotional valence, and typed relation edges.',
+          nodes: [
+            { name: 'Atom Graph',       tip: 'Every entity and claim becomes a typed node' },
+            { name: 'Truth Value',      tip: 'Bayesian PLN merging of probability \u00d7 confidence' },
+            { name: 'Attention Value',  tip: 'STI/LTI importance weights for ranking' },
+            { name: 'Emotional Valence',tip: 'Positive / Negative / Neutral with intensity' },
+            { name: 'Relation Edges',   tip: 'Directional typed links between all entities' },
+          ]
+        },
+        {
+          id: 'consolidate', num: '④', label: 'Consolidate',
+          accent: '#22c55e', bg: '#1a2e1a', text: '#bbf7d0',
+          desc: 'A continuous background cycle maintains graph health: memories decay, importance propagates, orphaned episodes are healed, key nodes are promoted to long-term memory, stale nodes are pruned.',
+          cycle: true,
+          nodes: [
+            { name: 'Decay',    tip: 'Fades less-used memories over time' },
+            { name: 'Propagate',tip: 'Spreads importance and emotion through the graph' },
+            { name: 'Heal',     tip: 'Reconnects orphaned episodes to known entities' },
+            { name: 'Promote',  tip: 'Elevates high-importance nodes to long-term memory' },
+            { name: 'Prune',    tip: 'Removes irrelevant, contradicted, or stale nodes' },
+          ]
+        },
+        {
+          id: 'recall', num: '⑤', label: 'Recall',
+          accent: '#a855f7', bg: '#2d1b4e', text: '#e9d5ff',
+          desc: 'KNN semantic search retrieves similar atoms. Graph expansion follows relation edges outward. Salience ranking weights results by similarity, attention, confidence, and valence.',
+          nodes: [
+            { name: 'Semantic Search', tip: 'KNN vector similarity across all memories' },
+            { name: 'Graph Expansion', tip: 'Follow relation edges to related concepts' },
+            { name: 'Salience Ranking',tip: 'Weighted score: similarity \u00d7 attention \u00d7 confidence \u00d7 valence' },
+          ]
+        },
+        {
+          id: 'classify', num: '⑥', label: 'Classify',
+          accent: '#e879f9', bg: '#2a1040', text: '#f5d0fe',
+          desc: 'Retrieved memories are classified by severity. Critical failures become hard behavioral constraints. Known antipatterns become avoidance signals. Context is woven into the response.',
+          nodes: [
+            { name: '\uD83D\uDEA8 Critical Warning',  tip: 'Must-not-repeat failures \u2014 injected as hard constraints', accent:'#ef4444', bg:'#3b1515', text:'#fca5a5' },
+            { name: '\u26A0\uFE0F Known Antipattern', tip: 'Low-probability beliefs \u2014 injected as avoidance signals',  accent:'#f59e0b', bg:'#3b2c00', text:'#fde68a' },
+            { name: '\uD83D\uDCA1 Background Context',tip: 'Relevant facts and goals woven into the response',           accent:'#10b981', bg:'#1a2e1a', text:'#a7f3d0' },
+          ]
+        },
+      ];
+
+      const DUR = 5000;
+      const reduced = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      let current = 0, autoTimer = null, cycleTimer = null, cycleIdx = 0;
+
+      const display  = document.getElementById('ph-display');
+      const pills    = document.querySelectorAll('.ph-bar-pill');
+      const conns    = document.querySelectorAll('.ph-bar-conn');
+      const dots     = document.querySelectorAll('.ph-dot');
+      const prevBtn  = document.getElementById('ph-prev');
+      const nextBtn  = document.getElementById('ph-next');
+      const fillEl   = document.getElementById('ph-fill');
+      const respEl   = document.getElementById('ph-bar-resp');
+      const wrap     = document.getElementById('ph-wrap');
+
+      // Typewriter on the flow-bar user bubble
+      const msgs = [
+        'Alice from Acme used the wrong API in Berlin',
+        'We shipped the new auth module last Tuesday',
+        "Don't ever use that vendor again"
+      ];
+      let mi = 0, ci = 0, fwd = true;
+      const twEl = document.getElementById('ph-tw');
+      if (twEl) {
+        function twStep() {
+          const m = msgs[mi];
+          if (fwd) {
+            if (ci < m.length) { twEl.textContent = m.slice(0, ++ci); setTimeout(twStep, 38 + Math.random() * 28); }
+            else { fwd = false; setTimeout(twStep, 2100); }
+          } else {
+            if (ci > 0) { twEl.textContent = m.slice(0, --ci); setTimeout(twStep, 18 + Math.random() * 14); }
+            else { mi = (mi + 1) % msgs.length; fwd = true; setTimeout(twStep, 300); }
+          }
+        }
+        setTimeout(twStep, 900);
+      }
+
+      // Render a stage into #ph-display
+      function renderStage(idx) {
+        const s = STAGES[idx];
+        display.innerHTML = `
+          <div class="ph-disp-header">
+            <span class="ph-disp-num" style="color:${s.accent}">${s.num}</span>
+            <span class="ph-disp-label">${s.label}</span>
+          </div>
+          <p class="ph-disp-desc">${s.desc}</p>
+          <div class="ph-nodes">${s.nodes.map(n => {
+            const a=n.accent||s.accent, b=n.bg||s.bg, t=n.text||s.text;
+            return `<div class="ph-node" style="background:${b};border-color:${a};color:${t};">${n.name}<span class="ph-ntip">${n.tip}</span></div>`;
+          }).join('')}</div>
+        `;
+        // Staggered entrance
+        display.querySelectorAll('.ph-node').forEach((n, i) => {
+          setTimeout(() => n.classList.add('ph-in'), i * 55);
+        });
+        // Pills
+        pills.forEach((p, i) => {
+          p.classList.toggle('ph-active', i === idx);
+          p.classList.toggle('ph-done',   i < idx);
+          p.style.cssText = i === idx
+            ? `background:${s.bg};color:${s.text};border-color:${s.accent};box-shadow:0 0 14px ${s.accent}55`
+            : '';
+        });
+        // Connector colors (segment before each pill)
+        conns.forEach((c, i) => {
+          const segIdx = i - 1;
+          c.style.background = segIdx >= 0 && segIdx < idx
+            ? STAGES[segIdx].accent + '55'
+            : segIdx === idx ? s.accent + '30' : 'rgba(255,255,255,0.1)';
+        });
+        // Dots
+        dots.forEach((d, i) => {
+          d.classList.toggle('ph-active', i === idx);
+          d.style.background = i === idx ? s.accent : '';
+        });
+        // Response glow
+        if (respEl) respEl.classList.toggle('ph-lit', idx === STAGES.length - 1);
+        // Consolidate cycle
+        if (cycleTimer) { clearInterval(cycleTimer); cycleTimer = null; cycleIdx = 0; }
+        if (s.cycle && !reduced) {
+          setTimeout(() => {
+            const nodes = display.querySelectorAll('.ph-node');
+            cycleTimer = setInterval(() => {
+              nodes.forEach((n, i) => n.classList.toggle('ph-cycle', i === cycleIdx));
+              cycleIdx = (cycleIdx + 1) % nodes.length;
+            }, 700);
+          }, 400);
+        }
+      }
+
+      // Navigate to a stage with a fade transition
+      function goTo(idx) {
+        display.classList.add('ph-hidden');
+        if (cycleTimer) { clearInterval(cycleTimer); cycleTimer = null; }
+        setTimeout(() => {
+          current = idx;
+          renderStage(idx);
+          requestAnimationFrame(() => requestAnimationFrame(() => display.classList.remove('ph-hidden')));
+        }, 210);
+        resetFill();
+      }
+
+      function advance() { goTo((current + 1) % STAGES.length); }
+
+      function resetFill() {
+        if (!fillEl) return;
+        fillEl.style.animation = 'none';
+        fillEl.offsetHeight;
+        fillEl.style.background = STAGES[current].accent;
+        fillEl.classList.remove('ph-paused');
+        fillEl.style.animation = '';
+      }
+
+      function startAuto() {
+        if (autoTimer) clearInterval(autoTimer);
+        if (reduced) return;
+        autoTimer = setInterval(advance, DUR);
+      }
+
+      // Controls
+      if (prevBtn) prevBtn.addEventListener('click', () => { goTo((current - 1 + STAGES.length) % STAGES.length); startAuto(); });
+      if (nextBtn) nextBtn.addEventListener('click', () => { advance(); startAuto(); });
+      pills.forEach(p => {
+        p.addEventListener('click', () => { goTo(parseInt(p.dataset.idx)); startAuto(); });
+        p.addEventListener('keydown', e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); p.click(); } });
+      });
+      dots.forEach(d => d.addEventListener('click', () => { goTo(parseInt(d.dataset.idx)); startAuto(); }));
+
+      // Pause on hover
+      if (wrap) {
+        wrap.addEventListener('mouseenter', () => {
+          if (autoTimer) { clearInterval(autoTimer); autoTimer = null; }
+          if (fillEl) fillEl.classList.add('ph-paused');
+        });
+        wrap.addEventListener('mouseleave', () => {
+          if (fillEl) fillEl.classList.remove('ph-paused');
+          startAuto();
+        });
+      }
+
+      // Keyboard
+      document.addEventListener('keydown', e => {
+        if (e.key === 'ArrowRight') { advance(); startAuto(); }
+        if (e.key === 'ArrowLeft')  { goTo((current - 1 + STAGES.length) % STAGES.length); startAuto(); }
+      });
+
+      // Init
+      renderStage(0);
+      resetFill();
+      startAuto();
+    })();
   </script>
 </body>
 </html>

@@ -4,11 +4,14 @@ FORMAT:
 {"entities":[{"name":string,"type":string,"aliases":[string]}],
  "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}]}
 
-ENTITY TYPES (exactly these 13): person · organization · project · role · tool · technology · preference · constraint · location · event · topic · concept · goal
+ENTITY TYPES (exactly these 16): person · organization · project · role · tool · technology · skill · preference · constraint · location · event · topic · media · health · concept · goal
 "valence" is optional; omit when neutral. Pets/animals → "concept".
 Use "role" for job titles and occupations ("software engineer", "CEO", "designer").
 Use "technology" for languages, frameworks, platforms ("Python", "React", "Kubernetes").
+Use "skill" for abilities and competencies in any domain ("public speaking", "cooking", "piano").
 Use "topic" for subject domains and disciplines ("machine learning", "DevOps", "healthcare").
+Use "media" for books, shows, podcasts, courses, films, articles ("Atomic Habits", "Breaking Bad").
+Use "health" for medical conditions, symptoms, medications, wellness practices ("insomnia", "therapy").
 
 ━━━ RULES — follow all; top rules are highest priority ━━━
 
@@ -169,6 +172,21 @@ OUT:
   {"subject":"Marco","predicate":"has_fear_of","object":"escalators","valence":-0.7}
 ]}
 
+IN: "I'm Yuki. I've had chronic back pain for a year — my physio recommended yoga. I've also been reading The Body Keeps the Score, it really changed how I think about the mind-body connection."
+OUT:
+{"entities":[
+  {"name":"Yuki","type":"person","aliases":["I","my","me"]},
+  {"name":"chronic back pain","type":"health","aliases":[]},
+  {"name":"yoga","type":"skill","aliases":[]},
+  {"name":"The Body Keeps the Score","type":"media","aliases":["it"]},
+  {"name":"mind-body connection","type":"topic","aliases":[]}
+],"claims":[
+  {"subject":"Yuki","predicate":"has_condition","object":"chronic back pain","valence":-0.7},
+  {"subject":"Yuki","predicate":"is_practicing","object":"yoga"},
+  {"subject":"Yuki","predicate":"is_reading","object":"The Body Keeps the Score"},
+  {"subject":"The Body Keeps the Score","predicate":"covers","object":"mind-body connection"}
+]}
+
 IN: "Hi! I'm Elara, a systems strategist focused on organizational design."
 OUT:
 {"entities":[
@@ -187,11 +205,14 @@ ENTITY_TYPES = [
     "role",
     "tool",
     "technology",
+    "skill",
     "preference",
     "constraint",
     "location",
     "event",
     "topic",
+    "media",
+    "health",
     "concept",
     "goal",
 ]
@@ -253,7 +274,7 @@ FORMAT:
      "role" (job title/occupation), "technology" (language/framework/platform),
      "topic" (subject domain/discipline), or "concept" (anything else).
      Only emit when the entity directly appears as a claim object.
-Only these types are allowed for new entities: "goal", "preference", "constraint", "role", "technology", "topic", "concept".
+Only these types are allowed for new entities: "goal", "preference", "constraint", "role", "technology", "skill", "topic", "media", "health", "concept".
 
 PRE-EXTRACTED ENTITIES:
 {entities_block}
@@ -350,4 +371,17 @@ OUT:
   {"subject":"Priya","predicate":"is","object":"data scientist"},
   {"subject":"Priya","predicate":"works_for","object":"Meridian Labs"},
   {"subject":"Meridian Labs","predicate":"is_based_in","object":"Berlin"}
+]}
+
+Entities: Carlos (person)
+Text: "I've been dealing with insomnia for months. I started reading Why We Sleep and it really changed how I think about rest. I'm also trying to get better at watercolor painting."
+OUT:
+{"entities":[
+  {"name":"insomnia","type":"health"},
+  {"name":"Why We Sleep","type":"media"},
+  {"name":"watercolor painting","type":"skill"}
+],"claims":[
+  {"subject":"Carlos","predicate":"has_condition","object":"insomnia","valence":-0.6},
+  {"subject":"Carlos","predicate":"is_reading","object":"Why We Sleep"},
+  {"subject":"Carlos","predicate":"is_learning","object":"watercolor painting"}
 ]}"""

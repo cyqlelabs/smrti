@@ -1,5 +1,11 @@
 # smrti
 
+[![PyPI version](https://img.shields.io/pypi/v/smrti)](https://pypi.org/project/smrti/)
+[![Python](https://img.shields.io/pypi/pyversions/smrti)](https://pypi.org/project/smrti/)
+[![License](https://img.shields.io/github/license/cyqlelabs/smrti)](LICENSE)
+[![CI](https://img.shields.io/github/actions/workflow/status/cyqlelabs/smrti/publish.yml?label=CI)](https://github.com/cyqlelabs/smrti/actions/workflows/publish.yml)
+[![Coverage](https://img.shields.io/codecov/c/github/cyqlelabs/smrti)](https://codecov.io/gh/cyqlelabs/smrti)
+
 <a href="https://wiki.opencog.org/w/AtomSpace" target="_blank">AtomSpace</a>-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing. No extra infra to maintain. Just Plug & Play.
 
 ## How It Works

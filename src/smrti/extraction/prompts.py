@@ -243,7 +243,9 @@ FORMAT:
   2. Reclassify a listed concept into "preference" or "constraint" — use the SAME name
      as the existing concept so the resolver merges them. Do this when the text makes
      clear the speaker believes in / values / avoids something (not just mentions it).
-Only these three types are allowed for new entities: "goal", "preference", "constraint".
+  3. Add a claim target that the NER missed (type "concept") — only when it directly
+     appears as a claim object and is not already in the pre-extracted entity list.
+Only these four types are allowed for new entities: "goal", "preference", "constraint", "concept".
 
 PRE-EXTRACTED ENTITIES:
 {entities_block}

@@ -235,18 +235,22 @@ OUT: {"entities":[],"claims":[]}"""
 CLAIMS_ONLY_PROMPT = """Extract relationship claims between pre-extracted entities. You MAY also emit NEW goal entities that the NER missed. Return ONLY valid JSON — no prose, no fences.
 
 FORMAT:
-{"entities":[{"name":string,"type":"goal"}],
+{"entities":[{"name":string,"type":string}],
  "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}]}
 
-"entities" is OPTIONAL — include it ONLY when you detect a durable objective not already
-listed below. The only allowed type for new entities is "goal".
+"entities" is OPTIONAL — include it ONLY to:
+  1. Add a durable objective not already listed (type "goal")
+  2. Reclassify a listed concept into "preference" or "constraint" — use the SAME name
+     as the existing concept so the resolver merges them. Do this when the text makes
+     clear the speaker believes in / values / avoids something (not just mentions it).
+Only these three types are allowed for new entities: "goal", "preference", "constraint".
 
 PRE-EXTRACTED ENTITIES:
 {entities_block}
 
 RULES:
 - subject and object in claims MUST be character-identical to a pre-extracted entity name
-  OR a new goal entity you emitted in "entities"
+  OR a new entity you emitted in "entities"
 - One fact per claim triplet (atomic)
 - "valence" is optional; omit when neutral
   negative (−0.5 to −1.0): errors, fears, avoidance, displeasure
@@ -257,6 +261,12 @@ RULES:
 - PERSON ANCHORING — when a person entity is listed, they must be the subject of claims
   that describe their goals, intentions, preferences, or actions. Never leave the person
   entity disconnected if the text describes something they intend, want, or are doing.
+- BELIEF/VALUE RECLASSIFICATION — when a listed concept is something the speaker explicitly
+  believes in, values, or endorses ("I believe in X", "I value X", "X is important to me",
+  "I'm a firm believer in X"), emit a new entity with the SAME name but type "preference".
+  When it is something the speaker avoids or rejects ("I hate X", "never do X", "X is harmful"),
+  emit it with type "constraint". The resolver will merge them with the existing concept atom.
+  Only "concept" atoms qualify — do not reclassify goal/tool/person atoms.
 - GOAL EXTRACTION — when the text expresses a durable objective (goal, aim, plan, intention,
   ambition, mission, aspiration) and no goal entity is already listed above:
   1. Emit a NEW entity with type "goal" whose name captures the objective as an action phrase
@@ -304,4 +314,17 @@ OUT:
   {"subject":"Alice","predicate":"has_goal","object":"ship mobile app by Q3","valence":0.8},
   {"subject":"ship mobile app by Q3","predicate":"targets","object":"mobile app","valence":0.7},
   {"subject":"Alice","predicate":"prefers","object":"dark mode","valence":0.7}
+]}
+
+Entities: empathy (concept), intellectual honesty (concept), grit (concept)
+Text: "At my core, I believe in radical empathy and the power of individual agency. I value intellectual honesty and I think grit is what separates people who succeed."
+OUT:
+{"entities":[
+  {"name":"empathy","type":"preference"},
+  {"name":"intellectual honesty","type":"preference"},
+  {"name":"grit","type":"preference"}
+],"claims":[
+  {"subject":"empathy","predicate":"is_valued_as","object":"empathy","valence":0.7},
+  {"subject":"intellectual honesty","predicate":"is_valued_as","object":"intellectual honesty","valence":0.6},
+  {"subject":"grit","predicate":"is_valued_as","object":"grit","valence":0.6}
 ]}"""

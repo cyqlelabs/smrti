@@ -27,17 +27,23 @@ def propagate_valence(
     keep = max(0.0, min(1.0, mood_inertia))
     absorb = 1.0 - keep
 
-    forward = db.fetchall(
-        "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ?",
-        (atom_id, tenant_id),
-    )
-    backward = db.fetchall(
-        "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND tenant_id = ?",
-        (atom_id, tenant_id),
-    )
-
-    neighbor_ids = [r["target_id"] for r in forward if r["target_id"]]
-    neighbor_ids += [r["source_id"] for r in backward if r["source_id"]]
+    # Relation atoms store their endpoints in source_id/target_id columns rather
+    # than as further relation edges, so the standard forward/backward query
+    # finds nothing for them.  Use the endpoints directly instead.
+    row = db.fetchone("SELECT type, source_id, target_id FROM atoms WHERE id = ?", (atom_id,))
+    if row and row["type"] == "relation":
+        neighbor_ids = [x for x in (row["source_id"], row["target_id"]) if x]
+    else:
+        forward = db.fetchall(
+            "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ?",
+            (atom_id, tenant_id),
+        )
+        backward = db.fetchall(
+            "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND tenant_id = ?",
+            (atom_id, tenant_id),
+        )
+        neighbor_ids = [r["target_id"] for r in forward if r["target_id"]]
+        neighbor_ids += [r["source_id"] for r in backward if r["source_id"]]
 
     for nid in neighbor_ids:
         db.execute(

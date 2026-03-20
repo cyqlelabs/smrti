@@ -245,9 +245,10 @@ def _resolve_ner_entities(
     return entity_ids
 
 
-def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti") -> None:
+def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti", episode_id: str = "") -> None:
     """Create relation edges from claim triplets."""
     _resolver = None
+    min_valence = 0.0
     for claim in claims:
         subj_raw = claim.get("subject", "")
         obj_raw = claim.get("object", "")
@@ -269,9 +270,27 @@ def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti") -
                 mem.tenant_id, mem.write_space,
                 valence=claim_valence,
             )
+            # Propagate negative claim valence to the target atom immediately.
+            # Epoch propagation can't do this because relation atoms have no
+            # neighbors of their own — propagate_valence finds nothing.
+            if claim_valence < -0.3:
+                mem.db.execute(
+                    "UPDATE atoms SET valence = MIN(valence, ?), intensity = MAX(intensity, ?) WHERE id = ?",
+                    (claim_valence, abs(claim_valence), obj_id),
+                )
+                if claim_valence < min_valence:
+                    min_valence = claim_valence
             # Safety net: promote target atom to goal type on has_goal claims
             if predicate == "has_goal":
                 _promote_to_goal(obj_id, mem)
+
+    # Propagate the strongest negative claim valence to the source episode so it
+    # classifies as critical_warning without relying on sentiment estimation.
+    if episode_id and min_valence < -0.3:
+        mem.db.execute(
+            "UPDATE atoms SET valence = MIN(valence, ?), intensity = MAX(intensity, ?) WHERE id = ?",
+            (min_valence, abs(min_valence), episode_id),
+        )
 
 
 def _promote_to_goal(atom_id: str, mem: "Smrti") -> None:
@@ -310,7 +329,7 @@ async def extract_and_link(
 
     def _sync_work() -> None:
         entity_ids = _resolve_ner_entities(extracted.get("entities", []), episode_id, mem)
-        _link_claims(extracted.get("claims", []), entity_ids, mem)
+        _link_claims(extracted.get("claims", []), entity_ids, mem, episode_id)
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _sync_work)
@@ -525,7 +544,7 @@ async def extract_and_link_hybrid(
                     )
                 elif etype not in ("goal", "preference", "constraint"):
                     mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
-        _link_claims(claims_result.get("claims", []), entity_ids, mem)
+        _link_claims(claims_result.get("claims", []), entity_ids, mem, episode_id)
 
     await loop.run_in_executor(None, _sync_resolve_and_link)
 

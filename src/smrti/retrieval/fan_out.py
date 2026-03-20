@@ -97,7 +97,7 @@ def retrieve(
               AND tenant_id = ?
               AND space IN ({spaces_ph})
               AND type IN ('concept', 'belief', 'episode', 'goal')
-              AND confidence >= ?""",
+              AND (confidence >= ? OR (valence < -0.5 AND intensity > 0.5))""",
         (*exp_list, tenant_id, *read_spaces, min_confidence),
     )
 

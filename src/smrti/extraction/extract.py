@@ -118,7 +118,7 @@ async def extract_knowledge(
         _log(entry)
 
 
-_COREF_TYPES = {"person", "organization", "project", "role", "tool", "technology", "location", "event", "goal", "preference", "constraint"}
+_COREF_TYPES = {"person", "organization", "project", "role", "tool", "technology", "skill", "location", "event", "topic", "media", "health", "goal", "preference", "constraint"}
 
 
 def _get_salient_person(mem: "Smrti") -> tuple[str, str] | None:
@@ -497,7 +497,7 @@ async def extract_and_link_hybrid(
         # Resolve new entities the LLM emitted: goals (new atoms) and
         # preference/constraint reclassifications (resolve to existing atom,
         # updating its entity_type so it becomes a belief atom).
-        _ALLOWED_NEW_TYPES = {"goal", "preference", "constraint", "role", "technology", "topic", "concept"}
+        _ALLOWED_NEW_TYPES = {"goal", "preference", "constraint", "role", "technology", "skill", "topic", "media", "health", "concept"}
         new_entities = claims_result.get("entities", [])
         if new_entities:
             from .resolve import EntityResolver

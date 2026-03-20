@@ -94,11 +94,14 @@ _DEFAULT_LABELS = [
     "role",          # job titles and occupations ("software engineer", "CEO")
     "tool",
     "technology",    # languages, frameworks, platforms ("Python", "Kubernetes")
+    "skill",         # abilities and competencies ("public speaking", "cooking", "piano")
     "preference",
     "constraint",
     "location",
     "event",
     "topic",         # subject domains and disciplines ("machine learning", "DevOps")
+    "media",         # books, shows, podcasts, courses, articles ("Atomic Habits", "Lex Fridman")
+    "health",        # conditions, symptoms, treatments, wellness ("insomnia", "therapy")
     "concept",
     "goal",
     "pronoun",

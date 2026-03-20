@@ -107,9 +107,9 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         )
         for row in active:
             if propagation_factor > 0 and row["sti"] > 0.3:
-                propagate_sti(row["id"], row["sti"], propagation_factor, db, tenant_id)
+                propagate_sti(row["id"], row["sti"], propagation_factor, db, tenant_id, space)
             if valence_prop_factor > 0 and abs(row["valence"]) > 0.3 and row["intensity"] > 0.3:
-                propagate_valence(row["id"], row["valence"], row["intensity"], valence_prop_factor, db, tenant_id, mood_inertia=mood_inertia)
+                propagate_valence(row["id"], row["valence"], row["intensity"], valence_prop_factor, db, tenant_id, space, mood_inertia=mood_inertia)
 
     # 2c. Heal orphaned episodes (link to most salient person)
     orphans_healed = heal_orphaned_episodes(tenant_id, space, db)

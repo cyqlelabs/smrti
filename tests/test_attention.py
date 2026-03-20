@@ -68,14 +68,14 @@ def _mock_db(forward_ids=None, backward_ids=None):
 
 def test_propagate_sti_updates_neighbors():
     db = _mock_db(forward_ids=["n1", "n2"])
-    propagate_sti("atom1", boost=1.0, propagation_factor=0.2, db=db, tenant_id="t")
+    propagate_sti("atom1", boost=1.0, propagation_factor=0.2, db=db, tenant_id="t", space="s")
     # Should update both neighbors
     assert db.execute.call_count == 2
 
 
 def test_propagate_sti_no_op_when_spread_too_small():
     db = _mock_db(forward_ids=["n1"])
-    propagate_sti("atom1", boost=0.04, propagation_factor=0.2, db=db, tenant_id="t")
+    propagate_sti("atom1", boost=0.04, propagation_factor=0.2, db=db, tenant_id="t", space="s")
     # spread = 0.04 * 0.2 = 0.008 < 0.01
     db.execute.assert_not_called()
 
@@ -83,14 +83,14 @@ def test_propagate_sti_no_op_when_spread_too_small():
 def test_propagate_sti_spread_exactly_at_boundary():
     # spread = 0.1 * 0.1 = 0.01 — borderline (< 0.01 is skipped, so 0.01 propagates)
     db = _mock_db(forward_ids=["n1"])
-    propagate_sti("atom1", boost=0.1, propagation_factor=0.1, db=db, tenant_id="t")
+    propagate_sti("atom1", boost=0.1, propagation_factor=0.1, db=db, tenant_id="t", space="s")
     # 0.01 is NOT < 0.01, so it should propagate
     assert db.execute.call_count == 1
 
 
 def test_propagate_sti_no_neighbors():
     db = _mock_db()
-    propagate_sti("atom1", boost=1.0, propagation_factor=0.5, db=db, tenant_id="t")
+    propagate_sti("atom1", boost=1.0, propagation_factor=0.5, db=db, tenant_id="t", space="s")
     db.execute.assert_not_called()
 
 
@@ -100,6 +100,6 @@ def test_propagate_sti_none_ids_filtered():
         [{"target_id": None}, {"target_id": "n1"}],
         [{"source_id": None}],
     ]
-    propagate_sti("atom1", boost=1.0, propagation_factor=0.2, db=db, tenant_id="t")
+    propagate_sti("atom1", boost=1.0, propagation_factor=0.2, db=db, tenant_id="t", space="s")
     # Only "n1" is a valid neighbor
     assert db.execute.call_count == 1

@@ -15,9 +15,9 @@ def promote_lti(sti: float, lti: float, threshold: float) -> float:
 
 
 def propagate_sti(
-    atom_id: str, boost: float, propagation_factor: float, db, tenant_id: str
+    atom_id: str, boost: float, propagation_factor: float, db, tenant_id: str, space: str
 ) -> None:
-    """Spread a fraction of STI to 1-hop neighbors.
+    """Spread a fraction of STI to 1-hop neighbors within the same space.
 
     Single-hop only — no recursion, no oscillation risk.
     """
@@ -32,18 +32,18 @@ def propagate_sti(
         neighbor_ids = [x for x in (row["source_id"], row["target_id"]) if x]
     else:
         forward = db.fetchall(
-            "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ?",
-            (atom_id, tenant_id),
+            "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ? AND space = ?",
+            (atom_id, tenant_id, space),
         )
         backward = db.fetchall(
-            "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND tenant_id = ?",
-            (atom_id, tenant_id),
+            "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND tenant_id = ? AND space = ?",
+            (atom_id, tenant_id, space),
         )
         neighbor_ids = [r["target_id"] for r in forward if r["target_id"]]
         neighbor_ids += [r["source_id"] for r in backward if r["source_id"]]
 
     for nid in neighbor_ids:
         db.execute(
-            "UPDATE atoms SET sti = MIN(sti + ?, 3.0) WHERE id = ?",
-            (spread, nid),
+            "UPDATE atoms SET sti = MIN(sti + ?, 3.0) WHERE id = ? AND tenant_id = ? AND space = ?",
+            (spread, nid, tenant_id, space),
         )

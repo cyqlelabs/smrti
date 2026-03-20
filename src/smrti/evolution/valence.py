@@ -9,9 +9,10 @@ def propagate_valence(
     propagation_factor: float,
     db,
     tenant_id: str,
+    space: str,
     mood_inertia: float = 0.8,
 ) -> None:
-    """Propagate emotional valence to 1-hop connected atoms, attenuated by factor.
+    """Propagate emotional valence to 1-hop connected atoms within the same space.
 
     Uses a weighted blend controlled by ``mood_inertia`` (0–1): existing valence
     contributes ``mood_inertia`` fraction, incoming signal contributes the rest,
@@ -35,12 +36,12 @@ def propagate_valence(
         neighbor_ids = [x for x in (row["source_id"], row["target_id"]) if x]
     else:
         forward = db.fetchall(
-            "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ?",
-            (atom_id, tenant_id),
+            "SELECT target_id FROM atoms WHERE source_id = ? AND type = 'relation' AND tenant_id = ? AND space = ?",
+            (atom_id, tenant_id, space),
         )
         backward = db.fetchall(
-            "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND tenant_id = ?",
-            (atom_id, tenant_id),
+            "SELECT source_id FROM atoms WHERE target_id = ? AND type = 'relation' AND tenant_id = ? AND space = ?",
+            (atom_id, tenant_id, space),
         )
         neighbor_ids = [r["target_id"] for r in forward if r["target_id"]]
         neighbor_ids += [r["source_id"] for r in backward if r["source_id"]]
@@ -50,6 +51,6 @@ def propagate_valence(
             """UPDATE atoms SET
                    valence   = (valence   * ? + ? * ?),
                    intensity = MIN(intensity * ? + ? * ?, 1.0)
-               WHERE id = ?""",
-            (keep, spread_v, absorb, keep, spread_i, absorb, nid),
+               WHERE id = ? AND tenant_id = ? AND space = ?""",
+            (keep, spread_v, absorb, keep, spread_i, absorb, nid, tenant_id, space),
         )

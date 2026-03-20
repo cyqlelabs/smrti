@@ -4,8 +4,11 @@ FORMAT:
 {"entities":[{"name":string,"type":string,"aliases":[string]}],
  "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}]}
 
-ENTITY TYPES (exactly these 10): person · organization · project · tool · preference · constraint · location · event · concept · goal
+ENTITY TYPES (exactly these 13): person · organization · project · role · tool · technology · preference · constraint · location · event · topic · concept · goal
 "valence" is optional; omit when neutral. Pets/animals → "concept".
+Use "role" for job titles and occupations ("software engineer", "CEO", "designer").
+Use "technology" for languages, frameworks, platforms ("Python", "React", "Kubernetes").
+Use "topic" for subject domains and disciplines ("machine learning", "DevOps", "healthcare").
 
 ━━━ RULES — follow all; top rules are highest priority ━━━
 
@@ -102,8 +105,8 @@ I'm a senior programmer, I've been working for around 20 years and I really enjo
 OUT:
 {"entities":[
   {"name":"Nico","type":"person","aliases":["I","me"]},
-  {"name":"senior programmer","type":"concept","aliases":[]},
-  {"name":"AI coding assistance","type":"tool","aliases":[]}
+  {"name":"senior programmer","type":"role","aliases":[]},
+  {"name":"AI coding assistance","type":"technology","aliases":[]}
 ],"claims":[
   {"subject":"Nico","predicate":"is","object":"senior programmer"},
   {"subject":"Nico","predicate":"uses","object":"AI coding assistance"}
@@ -170,8 +173,8 @@ IN: "Hi! I'm Elara, a systems strategist focused on organizational design."
 OUT:
 {"entities":[
   {"name":"Elara","type":"person","aliases":["I","I'm"]},
-  {"name":"systems strategist","type":"concept","aliases":[]},
-  {"name":"organizational design","type":"concept","aliases":[]}
+  {"name":"systems strategist","type":"role","aliases":[]},
+  {"name":"organizational design","type":"topic","aliases":[]}
 ],"claims":[
   {"subject":"Elara","predicate":"is","object":"systems strategist"},
   {"subject":"Elara","predicate":"focuses_on","object":"organizational design"}
@@ -181,11 +184,14 @@ ENTITY_TYPES = [
     "person",
     "organization",
     "project",
+    "role",
     "tool",
+    "technology",
     "preference",
     "constraint",
     "location",
     "event",
+    "topic",
     "concept",
     "goal",
 ]
@@ -232,7 +238,7 @@ IN: "I'd be happy to help you with your project. Here's what I can do:
 OUT: {"entities":[],"claims":[]}"""
 
 
-CLAIMS_ONLY_PROMPT = """Extract relationship claims between pre-extracted entities. You MAY also emit NEW goal entities that the NER missed. Return ONLY valid JSON — no prose, no fences.
+CLAIMS_ONLY_PROMPT = """Extract relationship claims between pre-extracted entities. You MAY also emit NEW entities that the NER missed. Return ONLY valid JSON — no prose, no fences.
 
 FORMAT:
 {"entities":[{"name":string,"type":string}],
@@ -243,9 +249,11 @@ FORMAT:
   2. Reclassify a listed concept into "preference" or "constraint" — use the SAME name
      as the existing concept so the resolver merges them. Do this when the text makes
      clear the speaker believes in / values / avoids something (not just mentions it).
-  3. Add a claim target that the NER missed (type "concept") — only when it directly
-     appears as a claim object and is not already in the pre-extracted entity list.
-Only these four types are allowed for new entities: "goal", "preference", "constraint", "concept".
+  3. Add a claim target that the NER missed — use the most specific applicable type:
+     "role" (job title/occupation), "technology" (language/framework/platform),
+     "topic" (subject domain/discipline), or "concept" (anything else).
+     Only emit when the entity directly appears as a claim object.
+Only these types are allowed for new entities: "goal", "preference", "constraint", "role", "technology", "topic", "concept".
 
 PRE-EXTRACTED ENTITIES:
 {entities_block}
@@ -261,8 +269,10 @@ RULES:
 - No metaphor — figurative language ≠ literal fact
 - If no clear relationships exist, return {"claims":[]}
 - PERSON ANCHORING — when a person entity is listed, they must be the subject of claims
-  that describe their goals, intentions, preferences, or actions. Never leave the person
-  entity disconnected if the text describes something they intend, want, or are doing.
+  that describe their role, title, goals, intentions, preferences, or actions. When the
+  text states a role or title ("I'm a X", "I work as X", "I'm a senior X"), emit a new
+  "role" entity and link it with an `is` claim (person→is→role). Never leave the person
+  entity disconnected if the text describes something they are, intend, want, or are doing.
 - BELIEF/VALUE RECLASSIFICATION — when a listed concept is something the speaker explicitly
   believes in, values, or endorses ("I believe in X", "I value X", "X is important to me",
   "I'm a firm believer in X"), emit a new entity with the SAME name but type "preference".
@@ -329,4 +339,15 @@ OUT:
   {"subject":"empathy","predicate":"is_valued_as","object":"empathy","valence":0.7},
   {"subject":"intellectual honesty","predicate":"is_valued_as","object":"intellectual honesty","valence":0.6},
   {"subject":"grit","predicate":"is_valued_as","object":"grit","valence":0.6}
+]}
+
+Entities: Priya (person), Meridian Labs (organization), Berlin (location)
+Text: "I'm Priya, a data scientist at Meridian Labs. We're headquartered in Berlin."
+OUT:
+{"entities":[
+  {"name":"data scientist","type":"role"}
+],"claims":[
+  {"subject":"Priya","predicate":"is","object":"data scientist"},
+  {"subject":"Priya","predicate":"works_for","object":"Meridian Labs"},
+  {"subject":"Meridian Labs","predicate":"is_based_in","object":"Berlin"}
 ]}"""

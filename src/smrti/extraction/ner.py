@@ -91,11 +91,14 @@ _DEFAULT_LABELS = [
     "person",
     "organization",
     "project",
+    "role",          # job titles and occupations ("software engineer", "CEO")
     "tool",
+    "technology",    # languages, frameworks, platforms ("Python", "Kubernetes")
     "preference",
     "constraint",
     "location",
     "event",
+    "topic",         # subject domains and disciplines ("machine learning", "DevOps")
     "concept",
     "goal",
     "pronoun",

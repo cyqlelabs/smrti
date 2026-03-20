@@ -11,3 +11,4 @@ venv/
 .env
 src/smrti/_version.py
 .coverage
+coverage.json

@@ -29,7 +29,7 @@
 - **Three server modes** — MCP (stdio), REST API, and OpenAI-compatible proxy
 - **Automatic entity extraction** — all server modes build concept nodes and relation edges from stored episodes automatically; cross-session coreference resolution grounds pronouns against the live memory graph (on by default; set `SMRTI_EXTRACT_MODEL` and optionally `SMRTI_EXTRACT_URL` to configure)
 - **Entity resolution** — 4-tier cascade: exact match, alias lookup, fuzzy (RapidFuzz), embedding similarity
-- **Memory visualizer** — Built-in graph explorer (`smrti serve viz`) to inspect atoms, relations, and attention weights in the browser
+- **Memory visualizer** — Built-in graph explorer (`smrti serve viz`) to inspect atoms, relations, and attention weights in the browser; includes an **LLM Calls** debug tab showing every extraction request with full request/response, timing, and recalled memories
 
 [![Smrti Visualizer](docs/visualizer.png)](docs/visualizer.png)
 - **Zero external services** — Single SQLite file with sqlite-vec for KNN search, ONNX embeddings on CPU
@@ -190,6 +190,9 @@ export SMRTI_EXTRACT=1                # enable entity/claim extraction (default:
 export SMRTI_EXTRACT_MODE=hybrid      # hybrid (default), llm (LLM-only), local (no LLM)
 export SMRTI_EXTRACT_URL=             # LLM endpoint for extraction (defaults to SMRTI_UPSTREAM_URL)
 export SMRTI_EXTRACT_MODEL=           # model for extraction calls (proxy defaults to request model)
+export SMRTI_EXTRACT_THINKING=auto    # auto (default), disabled, enabled — controls chain-of-thought
+                                      # for extraction calls; set to "disabled" for Qwen3/DeepSeek-R1
+                                      # via llama.cpp or vLLM to prevent token-budget exhaustion
 export SMRTI_NER_MODEL=               # GLiNER2 model for local NER (default: fastino/gliner2-multi-v1)
 ```
 

@@ -1433,20 +1433,37 @@ function renderProxyDetail(c) {
     html += cdSection('Injected Context', injectHtml, false);
   }
 
-  // Original messages (collapsed)
-  const origMsgs = c.original_messages || [];
-  if (origMsgs.length) {
-    html += cdSection(`Original Messages (${origMsgs.length})`, renderMsgs(origMsgs), true);
+  // Sent to model (post-injection messages + upstream headers)
+  const injMsgs = c.injected_messages || [];
+  if (injMsgs.length) {
+    const upHdrs = c.upstream_headers || {};
+    const upHdrEntries = Object.entries(upHdrs);
+    let sentHtml = '';
+    if (upHdrEntries.length) {
+      sentHtml += '<div style="font-size:11px;color:var(--muted);margin-bottom:5px">Upstream headers</div>';
+      sentHtml += '<table class="hdr-tbl" style="margin-bottom:10px">' +
+        upHdrEntries.map(([k,v]) => `<tr><td>${escHtml(k)}</td><td>${escHtml(v)}</td></tr>`).join('') +
+        '</table>';
+      sentHtml += '<div style="font-size:11px;color:var(--muted);margin-bottom:5px">Messages</div>';
+    }
+    sentHtml += renderMsgs(injMsgs);
+    html += cdSection(`Sent to Model (${injMsgs.length} messages)`, sentHtml, false);
   }
 
-  // Request headers (collapsed)
+  // Original client messages (collapsed)
+  const origMsgs = c.original_messages || [];
+  if (origMsgs.length) {
+    html += cdSection(`Client Messages (${origMsgs.length}, pre-injection)`, renderMsgs(origMsgs), true);
+  }
+
+  // Incoming request headers (collapsed)
   const hdrs = c.request_headers || {};
   const hdrEntries = Object.entries(hdrs);
   if (hdrEntries.length) {
     const tblHtml = '<table class="hdr-tbl">' +
       hdrEntries.map(([k,v]) => `<tr><td>${escHtml(k)}</td><td>${escHtml(v)}</td></tr>`).join('') +
       '</table>';
-    html += cdSection(`Request Headers (${hdrEntries.length})`, tblHtml, true);
+    html += cdSection(`Incoming Headers (${hdrEntries.length})`, tblHtml, true);
   }
 
   // Response

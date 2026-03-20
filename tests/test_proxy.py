@@ -68,26 +68,29 @@ def _starlette_request(headers: dict = None):
 def test_inject_no_messages_returns_body_unchanged():
     body = {"model": "gpt-4o", "messages": []}
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=[])):
-        assert run(_inject_context(body, "t1", "s1", ["s1"])) == body
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1"]))
+        assert result == body
 
 
 def test_inject_no_user_message_returns_body_unchanged():
     body = {"messages": [{"role": "system", "content": "Be helpful."}]}
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=[])):
-        assert run(_inject_context(body, "t1", "s1", ["s1"])) == body
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1"]))
+        assert result == body
 
 
 def test_inject_no_memories_returns_body_unchanged():
     body = {"messages": [{"role": "user", "content": "Hello"}]}
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=[])):
-        assert run(_inject_context(body, "t1", "s1", ["s1"])) == body
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1"]))
+        assert result == body
 
 
 def test_inject_creates_system_message_when_none_exists():
     body = {"messages": [{"role": "user", "content": "Tell me about Python"}]}
     memories = [_mem_recall_result("User prefers Python", 0.9)]
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
-        result = run(_inject_context(body, "t1", "s1", ["s1"]))
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1"]))
 
     msgs = result["messages"]
     assert msgs[0]["role"] == "system"
@@ -105,7 +108,7 @@ def test_inject_appends_to_existing_system_message():
     }
     memories = [_mem_recall_result("User works on ML", 0.85)]
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
-        result = run(_inject_context(body, "t1", "s1", ["s1"]))
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1"]))
 
     content = result["messages"][0]["content"]
     assert original in content
@@ -119,7 +122,7 @@ def test_inject_all_memories_appear_in_block():
         _mem_recall_result("User dislikes Java", 0.7),
     ]
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
-        result = run(_inject_context(body, "t1", "s1", ["s1", "global"]))
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1", "global"]))
 
     content = result["messages"][0]["content"]
     assert "User likes Python" in content
@@ -159,7 +162,7 @@ def test_inject_skips_multimodal_content():
         pytest.fail("_recall must not be called for non-string content")
 
     with patch("smrti.servers.proxy._recall", should_not_be_called):
-        result = run(_inject_context(body, "t1", "s1", ["s1"]))
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1"]))
 
     assert result == body
 
@@ -532,7 +535,7 @@ def test_inject_adds_warning_preamble_for_critical():
     body = {"messages": [{"role": "user", "content": "Hello"}]}
     memories = [_mem_recall_result("Bad deploy broke prod", valence=-0.9, intensity=0.9, confidence=0.8)]
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
-        result = run(_inject_context(body, "t1", "s1", ["s1"]))
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1"]))
     content = result["messages"][0]["content"]
     assert "behavioral constraints" in content
     assert "YOU MUST NOT" in content
@@ -542,7 +545,7 @@ def test_inject_no_preamble_for_context_only():
     body = {"messages": [{"role": "user", "content": "Hello"}]}
     memories = [_mem_recall_result("User likes Python", confidence=0.9)]
     with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
-        result = run(_inject_context(body, "t1", "s1", ["s1"]))
+        result, _, _ = run(_inject_context(body, "t1", "s1", ["s1"]))
     content = result["messages"][0]["content"]
     assert "behavioral constraints" not in content
     assert "Note:" in content

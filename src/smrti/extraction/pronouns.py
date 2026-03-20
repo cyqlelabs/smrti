@@ -155,20 +155,20 @@ def merge_pronoun_into_named(
     row = db.fetchone("SELECT label FROM atoms WHERE id = ?", (pronoun_atom_id,))
     pronoun_label = row["label"] if row else None
 
-    # Reassign relation edges (source_id and target_id)
+    # Reassign relation edges (source_id and target_id) within write_space only
     db.execute(
-        "UPDATE atoms SET source_id = ? WHERE source_id = ? AND tenant_id = ?",
-        (named_atom_id, pronoun_atom_id, tenant_id),
+        "UPDATE atoms SET source_id = ? WHERE source_id = ? AND tenant_id = ? AND space = ?",
+        (named_atom_id, pronoun_atom_id, tenant_id, write_space),
     )
     db.execute(
-        "UPDATE atoms SET target_id = ? WHERE target_id = ? AND tenant_id = ?",
-        (named_atom_id, pronoun_atom_id, tenant_id),
+        "UPDATE atoms SET target_id = ? WHERE target_id = ? AND tenant_id = ? AND space = ?",
+        (named_atom_id, pronoun_atom_id, tenant_id, write_space),
     )
 
-    # Transfer aliases
+    # Transfer aliases within write_space only
     db.execute(
-        "UPDATE aliases SET atom_id = ? WHERE atom_id = ? AND tenant_id = ?",
-        (named_atom_id, pronoun_atom_id, tenant_id),
+        "UPDATE aliases SET atom_id = ? WHERE atom_id = ? AND tenant_id = ? AND space = ?",
+        (named_atom_id, pronoun_atom_id, tenant_id, write_space),
     )
 
     # Register pronoun label as alias of named entity
@@ -180,8 +180,8 @@ def merge_pronoun_into_named(
 
     # Delete self-referencing edges (e.g. "I→is→I" became "Elara→is→Elara")
     db.execute(
-        "DELETE FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ? AND tenant_id = ?",
-        (named_atom_id, named_atom_id, tenant_id),
+        "DELETE FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ? AND tenant_id = ? AND space = ?",
+        (named_atom_id, named_atom_id, tenant_id, write_space),
     )
 
     # Delete duplicate relation edges (same source, target, relation triple)
@@ -192,12 +192,14 @@ def merge_pronoun_into_named(
                 AND a1.target_id = a2.target_id
                 AND a1.relation = a2.relation
                 AND a1.tenant_id = a2.tenant_id
+                AND a1.space = a2.space
                 AND a1.id < a2.id
             WHERE a1.type = 'relation' AND a2.type = 'relation'
                 AND a1.tenant_id = ?
+                AND a1.space = ?
                 AND a1.source_id = ?
         )""",
-        (tenant_id, named_atom_id),
+        (tenant_id, write_space, named_atom_id),
     )
 
     # Delete pronoun atom and its vector entry
@@ -218,10 +220,10 @@ def find_and_merge_pronoun_atoms(
     rows = db.fetchall(
         """SELECT DISTINCT a.id, a.label FROM atoms a
            JOIN atoms m ON m.type = 'relation' AND m.relation = 'mentions'
-               AND m.source_id = ? AND m.target_id = a.id AND m.tenant_id = ?
-           WHERE a.entity_type = 'person' AND a.tenant_id = ?
+               AND m.source_id = ? AND m.target_id = a.id AND m.tenant_id = ? AND m.space = ?
+           WHERE a.entity_type = 'person' AND a.tenant_id = ? AND a.space = ?
                AND a.id != ?""",
-        (episode_id, tenant_id, tenant_id, named_atom_id),
+        (episode_id, tenant_id, write_space, tenant_id, write_space, named_atom_id),
     )
     for row in rows:
         if ner.classify_pronoun(row["label"]):

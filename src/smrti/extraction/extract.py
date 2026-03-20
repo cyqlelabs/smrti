@@ -411,7 +411,10 @@ async def extract_and_link_hybrid(
         return
 
     def _sync_resolve_and_link() -> None:
-        # Resolve any new goal entities the LLM emitted
+        # Resolve new entities the LLM emitted: goals (new atoms) and
+        # preference/constraint reclassifications (resolve to existing atom,
+        # updating its entity_type so it becomes a belief atom).
+        _ALLOWED_NEW_TYPES = {"goal", "preference", "constraint"}
         new_entities = claims_result.get("entities", [])
         if new_entities:
             from .resolve import EntityResolver
@@ -419,14 +422,19 @@ async def extract_and_link_hybrid(
             for ent in new_entities:
                 name = (ent.get("name") or "").strip()
                 etype = ent.get("type", "")
-                if not name or etype != "goal":
+                if not name or etype not in _ALLOWED_NEW_TYPES:
                     continue
-                if name in entity_ids or name.lower() in entity_ids:
-                    continue
-                atom_id = resolver.resolve(name, "goal", mem.tenant_id, mem.write_space, [mem.write_space])
+                atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
                 entity_ids[name] = atom_id
                 entity_ids.setdefault(name.lower(), atom_id)
-                mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
+                if etype in ("preference", "constraint"):
+                    # Reclassify the atom: concept → belief, update entity_type
+                    mem.db.execute(
+                        "UPDATE atoms SET type = 'belief', entity_type = ? WHERE id = ? AND type = 'concept'",
+                        (etype, atom_id),
+                    )
+                elif name not in entity_ids and name.lower() not in entity_ids:
+                    mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
         _link_claims(claims_result.get("claims", []), entity_ids, mem)
 
     await loop.run_in_executor(None, _sync_resolve_and_link)

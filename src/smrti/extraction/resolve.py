@@ -58,6 +58,20 @@ class EntityResolver:
             self._boost_sti(row["id"])
             return row["id"]
 
+        # Tier 0b: cross-type exact label match — prevents duplicate atoms when
+        # the same span is classified under different entity_types (e.g. GLiNER
+        # tagging "technology" as both "tool" and "concept"). Only matches atoms
+        # that share the same underlying atom type so that goal/belief atoms are
+        # never merged into concept atoms.
+        atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
+        row = self.db.fetchone(
+            f"SELECT id FROM atoms WHERE LOWER(label) = LOWER(?) AND type = ? AND tenant_id = ? AND space IN ({spaces_ph})",
+            (name, atom_type, tenant_id, *read_spaces),
+        )
+        if row:
+            self._boost_sti(row["id"])
+            return row["id"]
+
         # Tier 1: alias table across read_spaces
         atom_id = self.aliases.lookup(name, tenant_id, read_spaces)
         if atom_id:

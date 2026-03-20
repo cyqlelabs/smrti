@@ -48,12 +48,16 @@ class NERProvider:
         raw = model.extract_entities(text, labels)
         # GLiNER2 returns {"entities": {type: [names]}}
         entities_dict = raw.get("entities", {}) if isinstance(raw, dict) else {}
-        # Deduplicate: keep one entry per (name_lower, type)
-        best: dict[tuple[str, str], dict] = {}
+        # Deduplicate: keep one entry per name_lower, preferring the
+        # highest-priority (most specific) entity type when a span matches
+        # multiple labels.
+        best: dict[str, dict] = {}
         for etype, names in entities_dict.items():
             for name in names:
-                key = (name.lower(), etype)
-                if key not in best:
+                key = name.lower()
+                priority = _TYPE_PRIORITY.get(etype, len(_DEFAULT_LABELS))
+                existing = best.get(key)
+                if existing is None or priority < _TYPE_PRIORITY.get(existing["type"], len(_DEFAULT_LABELS)):
                     best[key] = {
                         "name": name,
                         "type": etype,
@@ -96,6 +100,10 @@ _DEFAULT_LABELS = [
     "goal",
     "pronoun",
 ]
+
+# When GLiNER tags the same span under multiple labels, keep the most specific.
+# Lower index = higher priority.
+_TYPE_PRIORITY: dict[str, int] = {t: i for i, t in enumerate(_DEFAULT_LABELS)}
 
 _instance: Optional[NERProvider] = None
 _instance_lock = threading.Lock()

@@ -190,9 +190,10 @@ export SMRTI_EXTRACT=1                # enable entity/claim extraction (default:
 export SMRTI_EXTRACT_MODE=hybrid      # hybrid (default), llm (LLM-only), local (no LLM)
 export SMRTI_EXTRACT_URL=             # LLM endpoint for extraction (defaults to SMRTI_UPSTREAM_URL)
 export SMRTI_EXTRACT_MODEL=           # model for extraction calls (proxy defaults to request model)
-export SMRTI_EXTRACT_THINKING=auto    # auto (default), disabled, enabled — controls chain-of-thought
-                                      # for extraction calls; set to "disabled" for Qwen3/DeepSeek-R1
-                                      # via llama.cpp or vLLM to prevent token-budget exhaustion
+export SMRTI_EXTRACT_THINKING=disabled # disabled (default), auto, enabled — extraction works better
+                                      # with thinking off (faster, avoids token-budget exhaustion on
+                                      # Qwen3/DeepSeek-R1); set to "auto" to let the model decide
+export SMRTI_EXTRACT_TIMEOUT=60       # LLM extraction request timeout in seconds (default: 60)
 export SMRTI_NER_MODEL=               # GLiNER2 model for local NER (default: fastino/gliner2-multi-v1)
 ```
 

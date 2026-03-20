@@ -48,6 +48,14 @@ class NERProvider:
         raw = model.extract_entities(text, labels)
         # GLiNER2 returns {"entities": {type: [names]}}
         entities_dict = raw.get("entities", {}) if isinstance(raw, dict) else {}
+        # Track every span GLiNER tagged as "pronoun" before priority deduplication
+        # discards that label. Used to restore the pronoun type afterwards so that
+        # multilingual pronouns ("je", "ich", "yo", …) are not silently promoted to
+        # person atoms by the priority system (person > pronoun).
+        pronoun_tagged: set[str] = {
+            name.lower()
+            for name in entities_dict.get("pronoun", [])
+        }
         # Deduplicate: keep one entry per name_lower, preferring the
         # highest-priority (most specific) entity type when a span matches
         # multiple labels.
@@ -63,7 +71,13 @@ class NERProvider:
                         "type": etype,
                         "score": 1.0,
                     }
-        return list(best.values())
+        # Restore pronoun type for any span GLiNER labelled as pronoun, regardless
+        # of what the priority system selected as the winning type.
+        result = list(best.values())
+        for ent in result:
+            if ent["name"].lower() in pronoun_tagged:
+                ent["type"] = "pronoun"
+        return result
 
     def classify_pronoun(self, name: str) -> bool:
         """Return True if `name` is a pronoun rather than a proper name.

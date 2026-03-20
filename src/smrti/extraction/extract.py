@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from typing import TYPE_CHECKING, Optional
 
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
 _http: Optional[httpx.AsyncClient] = None
 
 _VALID_TYPES = set(ENTITY_TYPES)
+
+_EXTRACT_TIMEOUT: float = float(os.environ.get("SMRTI_EXTRACT_TIMEOUT", "60.0"))
 
 # Per-session locks to serialize extractions within the same (tenant_id, write_space)
 _session_locks: dict[str, asyncio.Lock] = {}
@@ -97,7 +100,7 @@ async def extract_knowledge(
             f"{upstream}/v1/chat/completions",
             headers={"Content-Type": "application/json", "Authorization": auth},
             json=request_body,
-            timeout=60.0,
+            timeout=_EXTRACT_TIMEOUT,
         )
         entry["status"] = resp.status_code
         data = resp.json()
@@ -376,7 +379,7 @@ async def extract_claims_only(
             f"{upstream}/v1/chat/completions",
             headers={"Content-Type": "application/json", "Authorization": auth},
             json=request_body,
-            timeout=60.0,
+            timeout=_EXTRACT_TIMEOUT,
         )
         entry["status"] = resp.status_code
         data = resp.json()

@@ -121,6 +121,13 @@ async def _remember(content: str, tenant_id: str, write_space: str) -> str:
     mem = get_mem(tenant_id, write_space)
     if mem.is_ignored(content):
         return ""
+    # Dedup: skip if an identical episode already exists for this tenant/space
+    existing = mem.db.fetchone(
+        "SELECT id FROM atoms WHERE content = ? AND type = 'episode' AND tenant_id = ? AND space = ?",
+        (content, tenant_id, write_space),
+    )
+    if existing:
+        return ""
     valence = estimate_valence(content, mem.embed)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(

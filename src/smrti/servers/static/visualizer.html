@@ -1148,7 +1148,7 @@ function copyAtomId() {
 // ─── Helpers ──────────────────────────────────────────────────────────
 function nR(d) {
   if (!d || typeof d !== 'object') return 7;
-  return Math.max(5, Math.min(22, 7 + (d.lti||0)*14));
+  return Math.max(5, Math.min(22, 6 + ((d.sti||0) + (d.lti||0)) * 7));
 }
 function classify(d) {
   if ((d.valence||0)<-0.5 && (d.intensity||0)>0.5) return 'critical_warning';

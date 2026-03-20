@@ -445,6 +445,10 @@ async def extract_and_link_hybrid(
         return
 
     if not ner_entities:
+        # NER found nothing — fall through to full LLM extraction so standalone
+        # directives/constraints that NER can't parse still get extracted.
+        if mode == "hybrid":
+            await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
         return
 
     # Resolve entities and create mentions edges

@@ -76,6 +76,15 @@ def retrieve(
     expanded_ids.update(r["source_id"] for r in backward if r["source_id"])
     expanded_ids.discard(None)
 
+    # Always include person atoms — they anchor the knowledge graph and provide
+    # essential context ("who are these memories about?") regardless of query
+    # similarity.  Person atoms are rare (typically 1-3 per space) so this is cheap.
+    person_rows = db.fetchall(
+        f"SELECT id FROM atoms WHERE entity_type = 'person' AND tenant_id = ? AND space IN ({spaces_ph}) AND type IN ('concept', 'belief', 'goal')",
+        (tenant_id, *read_spaces),
+    )
+    expanded_ids.update(r["id"] for r in person_rows)
+
     if not expanded_ids:
         return []
 

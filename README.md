@@ -211,22 +211,22 @@ Patterns are matched with `re.search` (anchors optional). The variable applies t
 
 ## Multi-Tenant / Space Model
 
-Smrti uses a two-level isolation model:
-
-- **Tenant** — Hard boundary. Different tenants never share atoms. Maps to a user or organization.
-- **Space** — Soft boundary within a tenant. Memories are written to one space but can be read from multiple.
+**Tenants** are hard walls: atoms, embeddings, and attention weights never cross them. **Spaces** are permeable layers within a tenant. You write to one, read from many, each with its own personality and consolidation cycle. `read_spaces` is the social graph.
 
 ```python
-# Read from multiple spaces, write to one
-mem = Smrti(
-    tenant_id="user_123",
-    write_space="work",
-    read_spaces=["work", "personal", "shared"]
-)
-
-# Each space can have its own personality
-mem.set_personality("analytical")
+researcher = Smrti(tenant_id="team", write_space="researcher",
+                   read_spaces=["researcher", "shared"], personality="curious")
+deployer   = Smrti(tenant_id="team", write_space="deployer",
+                   read_spaces=["deployer", "shared"], personality="deterministic")
+coordinator = Smrti(tenant_id="team", write_space="coordinator",
+                    read_spaces=["coordinator", "shared", "researcher", "deployer"],
+                    personality="analytical")
+shared = Smrti(tenant_id="team", write_space="shared")
 ```
+
+Each space consolidates independently. The researcher forgets fast. The deployer holds onto critical failures. The coordinator sees everything but filters through its own lens. Over time, each agent develops a different understanding of the same shared history: beliefs decay at different rates, emotional weights diverge, and what surfaces during recall depends on personality.
+
+Some things people build with this: agent teams with private working memory and shared project context. Multi-agent simulations where each agent remembers the same event differently. Role-based perspectives for the same user across different contexts.
 
 ## Personality System
 

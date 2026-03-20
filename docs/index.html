@@ -534,6 +534,121 @@
       text-align: right;
     }
 
+    /* --- Agent Ecosystems --- */
+    .spaces-section {
+      border-top: 1px solid var(--border-subtle);
+    }
+    .spaces-kicker {
+      font-size: clamp(0.925rem, 1.5vw, 1.05rem);
+      color: var(--text);
+      max-width: 54ch;
+      line-height: 1.75;
+      margin-top: 0.5rem;
+    }
+    .spaces-kicker code {
+      font-family: var(--font-mono);
+      font-size: 0.95em;
+      color: var(--accent-warm);
+    }
+    .agent-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      margin-top: 2.5rem;
+      border: 1px solid var(--border);
+    }
+    .agent-card {
+      background: var(--bg-surface);
+      padding: 1.5rem;
+      opacity: 0;
+      transform: translateY(14px);
+      transition: opacity 500ms var(--ease-out-expo), transform 500ms var(--ease-out-expo);
+    }
+    .agent-grid.visible .agent-card { opacity: 1; transform: translateY(0); }
+    .agent-grid.visible .agent-card:nth-child(2) { transition-delay: 80ms; }
+    .agent-grid.visible .agent-card:nth-child(3) { transition-delay: 160ms; }
+    .agent-card-name {
+      font-family: var(--font-mono);
+      font-size: 0.94rem;
+      font-weight: 500;
+    }
+    .agent-card-preset {
+      font-family: var(--font-mono);
+      font-size: 0.77rem;
+      color: var(--text-dim);
+      margin-top: 0.15rem;
+    }
+    .agent-card-desc {
+      font-size: 0.88rem;
+      color: var(--text-dim);
+      margin-top: 0.75rem;
+      line-height: 1.55;
+    }
+    .agent-reads {
+      margin-top: 1rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.45rem;
+    }
+    .agent-read {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      font-family: var(--font-mono);
+      font-size: 0.77rem;
+      color: var(--text-dim);
+    }
+    .agent-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .agent-grid.visible .agent-dot {
+      animation: agent-pulse 2.8s ease-in-out infinite;
+    }
+    @keyframes agent-pulse {
+      0%, 100% { box-shadow: 0 0 0 0 transparent; }
+      50% { box-shadow: 0 0 7px 2px currentColor; }
+    }
+    .agent-read-cross {
+      color: var(--text);
+    }
+    .agent-read-label {
+      font-family: var(--font-mono);
+      font-size: 0.66rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--text-dim);
+      margin-bottom: 0.25rem;
+      opacity: 0.6;
+    }
+    .usecase-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 1px;
+      background: var(--border);
+      margin-top: 2rem;
+      border: 1px solid var(--border);
+    }
+    .usecase-card {
+      background: var(--bg);
+      padding: 1.5rem;
+    }
+    .usecase-title {
+      font-family: var(--font-mono);
+      font-size: 0.88rem;
+      font-weight: 500;
+      color: var(--accent);
+      margin-bottom: 0.5rem;
+    }
+    .usecase-desc {
+      font-size: 0.91rem;
+      color: var(--text-dim);
+      line-height: 1.6;
+    }
+
     /* --- Serve --- */
     .serve-section {
       border-top: 1px solid var(--border-subtle);
@@ -710,7 +825,7 @@
     <div class="wrap">
       <h1 class="hero-title">smrti</h1>
       <p class="hero-sub">Memory engine for AI agents.</p>
-      <p class="hero-prop">Bayesian beliefs. Emotional valence. Attention-weighted salience. A single SQLite file.</p>
+      <p class="hero-prop">Bayesian beliefs. Emotional valence. Attention-weighted salience. Spaces that evolve apart. A single SQLite file.</p>
       <div class="hero-actions">
         <code class="install-cmd"><span class="dollar">$ </span>pip install smrti</code>
         <a class="gh-link" href="https://github.com/cyqlelabs/smrti" target="_blank" rel="noopener">
@@ -984,6 +1099,67 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
       </div>
     </section>
 
+    <!-- Agent Ecosystems -->
+    <section class="spaces-section">
+      <div class="wrap">
+        <p class="section-label">Agent Ecosystems</p>
+        <h2 class="section-title">Spaces as social graphs</h2>
+        <p class="spaces-kicker"><code>read_spaces</code> decides who can see whom. Give each agent its own space and personality, then wire them together. Each space consolidates independently, so the same event decays differently for every agent.</p>
+
+        <div class="agent-grid" id="agentGrid">
+          <div class="agent-card">
+            <div class="agent-card-name" style="color:var(--accent-sage)">researcher</div>
+            <div class="agent-card-preset">personality: curious</div>
+            <div class="agent-card-desc">Fast learning, aggressive exploration. Forgets quickly. Keeps only what excites.</div>
+            <div class="agent-reads">
+              <div class="agent-read-label">reads</div>
+              <div class="agent-read"><span class="agent-dot" style="background:var(--accent-sage);color:var(--accent-sage)"></span> researcher</div>
+              <div class="agent-read"><span class="agent-dot" style="background:var(--text-dim);color:var(--text-dim)"></span> shared</div>
+            </div>
+          </div>
+
+          <div class="agent-card">
+            <div class="agent-card-name" style="color:var(--accent-warm)">deployer</div>
+            <div class="agent-card-preset">personality: deterministic</div>
+            <div class="agent-card-desc">Fast learning, slow decay. Holds onto critical failures. Never forgets an outage.</div>
+            <div class="agent-reads">
+              <div class="agent-read-label">reads</div>
+              <div class="agent-read"><span class="agent-dot" style="background:var(--accent-warm);color:var(--accent-warm)"></span> deployer</div>
+              <div class="agent-read"><span class="agent-dot" style="background:var(--text-dim);color:var(--text-dim)"></span> shared</div>
+            </div>
+          </div>
+
+          <div class="agent-card">
+            <div class="agent-card-name" style="color:var(--accent)">coordinator</div>
+            <div class="agent-card-preset">personality: analytical</div>
+            <div class="agent-card-desc">Reads every space. Filters through its own analytical lens. Sees the whole picture.</div>
+            <div class="agent-reads">
+              <div class="agent-read-label">reads</div>
+              <div class="agent-read"><span class="agent-dot" style="background:var(--accent);color:var(--accent)"></span> coordinator</div>
+              <div class="agent-read"><span class="agent-dot" style="background:var(--text-dim);color:var(--text-dim)"></span> shared</div>
+              <div class="agent-read agent-read-cross"><span class="agent-dot" style="background:var(--accent-sage);color:var(--accent-sage)"></span> researcher</div>
+              <div class="agent-read agent-read-cross"><span class="agent-dot" style="background:var(--accent-warm);color:var(--accent-warm)"></span> deployer</div>
+            </div>
+          </div>
+        </div>
+
+        <div class="usecase-grid">
+          <div class="usecase-card">
+            <div class="usecase-title">agent teams</div>
+            <div class="usecase-desc">Private working memory per agent, shared project context. Personality shapes what each one considers important.</div>
+          </div>
+          <div class="usecase-card">
+            <div class="usecase-title">simulations</div>
+            <div class="usecase-desc">Private beliefs and a shared commons. Each agent remembers the same event differently over time.</div>
+          </div>
+          <div class="usecase-card">
+            <div class="usecase-title">role-based perspectives</div>
+            <div class="usecase-desc">Different contexts for the same user. An analytical work space and an empathetic personal space, cross-readable when needed.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <!-- Personality -->
     <section class="personality-section">
       <div class="wrap">
@@ -1167,6 +1343,20 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
 
     const presetGrid = document.getElementById('presetGrid');
     if (presetGrid) barObs.observe(presetGrid);
+
+    // Scroll-triggered agent grid
+    const agentGrid = document.getElementById('agentGrid');
+    if (agentGrid) {
+      const agentObs = new IntersectionObserver((entries) => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('visible');
+            agentObs.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.15 });
+      agentObs.observe(agentGrid);
+    }
 
     // ── Pipeline step viewer ─────────────────────────────────────
     (function () {

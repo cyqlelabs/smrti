@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smrti Town</title>
+
+<!-- Fonts: Fredoka (display) + Nunito (body) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;600;700&display=swap" rel="stylesheet">
+
+<!-- Styles -->
+<link rel="stylesheet" href="css/main.css">
+</head>
+<body>
+
+<!-- Top Bar -->
+<div id="top-bar">
+  <div class="logo">Smrti Town</div>
+  <div class="sep"></div>
+  <div class="clock-group">
+    <span id="sim-time">&#9728;&#65039; 06:00</span>
+    <span id="sim-day" style="color:rgba(255,248,240,0.55)">Day 1</span>
+    <span id="sim-season" style="color:#5C9E5C">Spring</span>
+    <span id="sim-year" style="color:rgba(255,248,240,0.55)">Year 1</span>
+  </div>
+  <div class="sep"></div>
+  <span id="director-badge" class="badge badge-routine">Routine</span>
+  <span id="tick-counter" class="tick-counter">Tick 0</span>
+  <div class="spacer"></div>
+  <div class="ws-status">
+    <div id="ws-dot" class="ws-dot ws-connecting"></div>
+    <span id="ws-label">Connecting</span>
+  </div>
+</div>
+
+<!-- Sidebar Toggle -->
+<button id="sidebar-toggle" title="Toggle sidebar">&#8250;</button>
+
+<!-- Right Sidebar -->
+<div id="sidebar">
+  <div id="sb-content">
+    <div class="sb-empty">Click an agent or building to inspect</div>
+  </div>
+</div>
+
+<!-- Event Log -->
+<div id="event-log"></div>
+
+<!-- Bottom Controls -->
+<div id="bottom-bar">
+  <button id="btn-play" class="active">&#9208; Pause</button>
+  <div class="sep-bar"></div>
+  <div class="speed-group">
+    <label>Speed</label>
+    <button class="speed-btn speed-active">1x</button>
+    <button class="speed-btn">2x</button>
+    <button class="speed-btn">5x</button>
+    <button class="speed-btn">10x</button>
+  </div>
+  <div class="sep-bar"></div>
+  <button id="btn-skip-morning" title="Skip to next morning">&#9728; Morning</button>
+  <button id="btn-skip-week" title="Skip one week">&#9193; Week</button>
+</div>
+
+<!-- Tooltip (for hover) -->
+<div id="tooltip"></div>
+
+<!-- Game Container (Phaser renders here) -->
+<div id="game-container"></div>
+
+<!-- Phaser 3 CDN -->
+<script src="https://cdn.jsdelivr.net/npm/phaser@3.87.0/dist/phaser.min.js"></script>
+
+<!-- Load order: constants -> state -> rendering -> ui -> tick -> ws -> scenes -> demo -> app -->
+<script src="js/constants.js"></script>
+<script src="js/state.js"></script>
+<script src="js/rendering/buildings.js"></script>
+<script src="js/rendering/agents.js"></script>
+<script src="js/rendering/speech.js"></script>
+<script src="js/rendering/particles.js"></script>
+<script src="js/rendering/daynight.js"></script>
+<script src="js/ui/topbar.js"></script>
+<script src="js/ui/sidebar.js"></script>
+<script src="js/ui/eventlog.js"></script>
+<script src="js/ui/controls.js"></script>
+<script src="js/tick/processor.js"></script>
+<script src="js/ws.js"></script>
+<script src="js/scenes/TownScene.js"></script>
+<script src="js/demo/demo.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

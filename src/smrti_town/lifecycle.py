@@ -373,37 +373,7 @@ def _extract_profile(agent: Agent) -> PersonalityProfile:
 
 def _apply_profile_to_agent(agent: Agent, profile: PersonalityProfile) -> None:
     """Write a custom personality profile to the agent's smrti space."""
-    agent.smrti.db.execute(
-        """
-        UPDATE personality SET
-            confidence_decay_rate=?, confidence_update_lr=?, min_confidence_to_surface=?,
-            sti_decay_rate=?, sti_boost_on_access=?, sti_propagation_factor=?,
-            lti_promotion_threshold=?, valence_weight=?, valence_propagation=?,
-            mood_inertia=?, w_similarity=?, w_sti=?, w_confidence=?, w_lti=?, w_valence=?,
-            preset_name=?
-        WHERE tenant_id=? AND space=?
-        """,
-        (
-            profile.confidence_decay_rate,
-            profile.confidence_update_lr,
-            profile.min_confidence_to_surface,
-            profile.sti_decay_rate,
-            profile.sti_boost_on_access,
-            profile.sti_propagation_factor,
-            profile.lti_promotion_threshold,
-            profile.valence_weight,
-            profile.valence_propagation,
-            profile.mood_inertia,
-            profile.w_similarity,
-            profile.w_sti,
-            profile.w_confidence,
-            profile.w_lti,
-            profile.w_valence,
-            "inherited",
-            agent.smrti.tenant_id,
-            agent.smrti.write_space,
-        ),
-    )
+    agent.smrti.set_personality_profile(profile, preset_name="inherited")
 
 
 # ── Relationship gates ───────────────────────────────────────────────

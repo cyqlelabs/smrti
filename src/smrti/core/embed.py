@@ -3,6 +3,18 @@ from __future__ import annotations
 import threading
 import warnings
 
+_singleton: "EmbeddingProvider | None" = None
+_singleton_lock = threading.Lock()
+
+
+def get_embedding_provider() -> "EmbeddingProvider":
+    """Return the process-wide EmbeddingProvider singleton."""
+    global _singleton
+    with _singleton_lock:
+        if _singleton is None:
+            _singleton = EmbeddingProvider()
+    return _singleton
+
 
 class EmbeddingProvider:
     """Wraps FastEmbed with lazy initialization. Thread-safe singleton per model name."""

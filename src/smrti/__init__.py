@@ -10,8 +10,8 @@ try:
 except ModuleNotFoundError:
     __version__ = "0.0.0.dev0"
 
-from smrti.core.db import Database
-from smrti.core.embed import EmbeddingProvider
+from smrti.core.db import Database, get_database
+from smrti.core.embed import EmbeddingProvider, get_embedding_provider
 from smrti.core.atomspace import AtomSpace
 from smrti.core.models import (
     Atom,
@@ -54,9 +54,8 @@ class Smrti:
         parent = os.path.dirname(db_path)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        self.db = Database(db_path)
-        self.db.initialize()
-        self.embed = EmbeddingProvider()
+        self.db = get_database(db_path)
+        self.embed = get_embedding_provider()
         self.atomspace = AtomSpace(self.db, self.embed)
         self.tenant_id = tenant_id
         self.write_space = write_space
@@ -323,4 +322,4 @@ class Smrti:
         return [r["space"] for r in rows]
 
     def close(self) -> None:
-        self.db.close()
+        pass  # db is registry-owned; lifetime is process-scoped

@@ -33,6 +33,7 @@
 
 [![Smrti Visualizer](docs/visualizer.png)](docs/visualizer.png)
 - **Zero external services** — Single SQLite file with sqlite-vec for KNN search, ONNX embeddings on CPU
+- **Town simulation** — [smrti-town](src/smrti_town/README.md): agents with persistent memory live, talk, form relationships, and die in a Phaser 3 canvas (`smrti serve town`)
 
 ## Install
 
@@ -82,6 +83,7 @@ smrti serve mcp           # MCP stdio server (for Claude, etc.)
 smrti serve rest           # FastAPI on :8420
 smrti serve viz            # FastAPI on :8420 + opens memory visualizer in browser (see screenshot above)
 smrti serve proxy          # OpenAI-compatible proxy on :8421
+smrti serve town           # town simulation + Phaser frontend on :8430
 ```
 
 ## Server Modes

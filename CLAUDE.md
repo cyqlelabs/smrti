@@ -56,7 +56,7 @@ Town life simulation built on the Smrti memory engine. Lives in `src/smrti_town/
 
 ```bash
 # Start the town simulation server (port 8430)
-smrti serve_town
+smrti serve town
 
 # Or directly
 python -m uvicorn smrti_town.server:app --port 8430

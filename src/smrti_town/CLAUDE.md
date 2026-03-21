@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Start the town server (port 8430)
-smrti serve_town
+smrti serve town
 # Or directly:
 python -m uvicorn smrti_town.server:app --port 8430
 

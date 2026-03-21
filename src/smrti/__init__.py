@@ -117,6 +117,7 @@ class Smrti:
         type: str = "episode",
         probability: float = 0.8,
         valence: float = 0.0,
+        metadata: dict | None = None,
     ) -> str:
         if self.is_ignored(content):
             return ""
@@ -128,6 +129,7 @@ class Smrti:
             valence=Valence(valence=valence, intensity=abs(valence)),
             tenant_id=self.tenant_id,
             space=self.write_space,
+            metadata=metadata or {},
         )
         return self.atomspace.add_atom(atom)
 

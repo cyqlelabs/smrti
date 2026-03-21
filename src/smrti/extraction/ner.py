@@ -77,6 +77,14 @@ class NERProvider:
         for ent in result:
             if ent["name"].lower() in pronoun_tagged:
                 ent["type"] = "pronoun"
+        # Filter out verb phrases misidentified as preference/constraint entities.
+        # Uses classify_text (multilingual) to distinguish noun phrases from
+        # imperative clauses like "Avoid at all costs" / "Niemals löschen".
+        if self._has_classify:
+            result = [
+                ent for ent in result
+                if not _is_verb_phrase(ent, self._get_model())
+            ]
         return result
 
     def classify_pronoun(self, name: str) -> bool:
@@ -101,13 +109,32 @@ class NERProvider:
             return False
 
 
+def _is_verb_phrase(ent: dict, model) -> bool:
+    """Return True if an entity span is a verb/imperative phrase rather than a noun phrase.
+
+    Only checks preference/constraint entities with 3+ words — these are the types
+    most prone to matching imperative clauses ("Avoid X", "Niemals Y").
+    Language-agnostic: delegates to GLiNER2's classify_text.
+    """
+    etype = ent.get("type", "")
+    name = ent.get("name", "")
+    if etype not in ("preference", "constraint") or len(name.split()) < 3:
+        return False
+    try:
+        result = model.classify_text(name, {"type": ["noun_phrase", "verb_phrase"]})
+        if isinstance(result, dict):
+            return result.get("type") == "verb_phrase"
+    except Exception:
+        pass
+    return False
+
+
 _DEFAULT_LABELS = [
     "person",
     "organization",
     "project",
     "role",          # job titles and occupations ("software engineer", "CEO")
-    "tool",
-    "technology",    # languages, frameworks, platforms ("Python", "Kubernetes")
+    "technology",    # languages, frameworks, platforms, tools ("Python", "Docker", "Kubernetes")
     "skill",         # abilities and competencies ("public speaking", "cooking", "piano")
     "preference",
     "constraint",
@@ -120,6 +147,7 @@ _DEFAULT_LABELS = [
     "goal",
     "pronoun",
 ]
+
 
 # When GLiNER tags the same span under multiple labels, keep the most specific.
 # Lower index = higher priority.

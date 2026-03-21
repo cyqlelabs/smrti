@@ -17,7 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from smrti import Smrti
-from smrti.core.models import RecallResult
+from smrti.core.models import AtomType, RecallResult
 from smrti.extraction.sentiment import estimate_valence
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
@@ -117,7 +117,7 @@ async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: lis
     )
 
 
-async def _remember(content: str, tenant_id: str, write_space: str) -> str:
+async def _remember(content: str, tenant_id: str, write_space: str, source: str = "user") -> str:
     mem = get_mem(tenant_id, write_space)
     if mem.is_ignored(content):
         return ""
@@ -129,10 +129,11 @@ async def _remember(content: str, tenant_id: str, write_space: str) -> str:
     if existing:
         return ""
     valence = estimate_valence(content, mem.embed)
+    meta = {"source": source} if source != "user" else {}
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: mem.remember(content, type="episode", probability=0.75, valence=valence),
+        lambda: mem.remember(content, type="episode", probability=0.75, valence=valence, metadata=meta),
     )
 
 
@@ -192,13 +193,12 @@ def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, st
     """Format a recall result as a plain imperative instruction plus its severity."""
     severity = classify_memory(r)
     text = content if content is not None else (r.atom.content or r.atom.label)
-    conf = r.atom.truth.confidence
     if severity == "critical_warning":
-        line = f"- YOU MUST NOT: {text} (confirmed mistake; confidence {conf:.2f})"
+        line = f"- YOU MUST NOT: {text}"
     elif severity == "known_antipattern":
-        line = f"- AVOID: {text} (disproven approach; confidence {conf:.2f})"
+        line = f"- AVOID: {text}"
     else:
-        line = f"- Note: {text} (confidence {conf:.2f})"
+        line = f"- Note: {text}"
     return line, severity
 
 
@@ -240,6 +240,15 @@ async def _inject_context(
         return body, "", []
 
     memories = await _recall(query, tenant_id, write_space, read_spaces)
+    if not memories:
+        return body, "", []
+
+    # Filter out agent-sourced episodes — they are stored for extraction purposes
+    # but should not be injected back as context (they are the LLM's own output).
+    memories = [
+        r for r in memories
+        if not (r.atom.type == AtomType.EPISODE and r.atom.metadata.get("source") == "agent")
+    ]
     if not memories:
         return body, "", []
 
@@ -325,7 +334,7 @@ async def _store_exchange(
     if not to_store:
         return
 
-    episode_ids = await asyncio.gather(*[_remember(c, tenant_id, write_space) for c, _ in to_store])
+    episode_ids = await asyncio.gather(*[_remember(c, tenant_id, write_space, source=s) for c, s in to_store])
 
     if cfg.EXTRACT:
         for eid, (content, source) in zip(episode_ids, to_store):

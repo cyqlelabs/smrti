@@ -169,7 +169,7 @@ def test_inject_skips_multimodal_content():
 
 # ── _store_exchange ───────────────────────────────────────────────────────────
 
-async def _noop_remember(content, tenant_id, write_space):
+async def _noop_remember(content, tenant_id, write_space, source="user"):
     return "atom-id"
 
 
@@ -180,7 +180,7 @@ def test_store_saves_user_messages_and_assistant_reply():
     ]
     stored = []
 
-    async def capturing_remember(content, tenant_id, write_space):
+    async def capturing_remember(content, tenant_id, write_space, source="user"):
         stored.append(content)
         return "atom-id"
 
@@ -201,7 +201,7 @@ def test_store_only_saves_last_user_message():
     ]
     stored = []
 
-    async def capturing_remember(content, tenant_id, write_space):
+    async def capturing_remember(content, tenant_id, write_space, source="user"):
         stored.append(content)
         return "atom-id"
 
@@ -217,7 +217,7 @@ def test_store_skips_empty_assistant_text():
     messages = [{"role": "user", "content": "Hello"}]
     stored = []
 
-    async def capturing_remember(content, tenant_id, write_space):
+    async def capturing_remember(content, tenant_id, write_space, source="user"):
         stored.append(content)
         return "atom-id"
 
@@ -230,7 +230,7 @@ def test_store_skips_empty_assistant_text():
 def test_store_nothing_when_empty():
     stored = []
 
-    async def capturing_remember(content, tenant_id, write_space):
+    async def capturing_remember(content, tenant_id, write_space, source="user"):
         stored.append(content)
         return "atom-id"
 
@@ -244,7 +244,7 @@ def test_store_passes_tenant_and_space():
     messages = [{"role": "user", "content": "Hi"}]
     calls = []
 
-    async def capturing_remember(content, tenant_id, write_space):
+    async def capturing_remember(content, tenant_id, write_space, source="user"):
         calls.append((tenant_id, write_space))
         return "atom-id"
 
@@ -259,7 +259,7 @@ def test_store_extracts_entities_when_enabled():
     messages = [{"role": "user", "content": "My name is Nico"}]
     extract_calls = []
 
-    async def capturing_remember(content, tenant_id, write_space):
+    async def capturing_remember(content, tenant_id, write_space, source="user"):
         return "episode-abc"
 
     async def capturing_extract(episode_id, content, tenant_id, write_space, auth, model, source="user"):
@@ -513,7 +513,6 @@ def test_format_critical_warning():
     assert severity == "critical_warning"
     assert "YOU MUST NOT" in line
     assert "Never use eval()" in line
-    assert "confirmed mistake" in line
 
 
 def test_format_known_antipattern():

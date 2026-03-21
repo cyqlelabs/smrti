@@ -11,10 +11,14 @@ if TYPE_CHECKING:
 _NEGATIVE_ANCHORS = [
     "This is a terrible, awful, and completely negative experience.",
     "I hate this, it is horrible, bad, and very frustrating.",
+    "Never do this, it is extremely dangerous and must be avoided at all costs.",
+    "This is a critical mistake that caused serious damage and must not happen again.",
 ]
 _POSITIVE_ANCHORS = [
     "This is an excellent, wonderful, and completely positive experience.",
     "I love this, it is great, fantastic, and very enjoyable.",
+    "This is safe, reliable, and exactly the right approach to take.",
+    "I trust this completely, it works perfectly and I highly recommend it.",
 ]
 
 _lock = threading.Lock()

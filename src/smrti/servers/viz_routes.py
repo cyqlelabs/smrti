@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import os
+from pathlib import Path
 from typing import Callable
 
 from fastapi import APIRouter, HTTPException, Query
@@ -15,6 +16,25 @@ _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
 # Type alias: callable that returns (or lazily creates) a Smrti instance.
 GetMemFn = Callable[[str, str], Smrti]
+
+# Cache of Smrti instances keyed by resolved absolute DB path.
+_db_cache: dict[str, Smrti] = {}
+_DB_CACHE_MAX = 20
+
+
+def _db_mem(db_path: str) -> Smrti:
+    """Return a cached Smrti instance connected to *db_path* (any tenant/space)."""
+    expanded = str(Path(db_path).expanduser().resolve())
+    if expanded not in _db_cache:
+        if len(_db_cache) >= _DB_CACHE_MAX:
+            _db_cache.pop(next(iter(_db_cache)))
+        _db_cache[expanded] = Smrti(
+            db_path=expanded,
+            personality="balanced",
+            tenant_id="default",
+            write_space="default",
+        )
+    return _db_cache[expanded]
 
 
 def create_viz_router(get_mem: GetMemFn) -> APIRouter:
@@ -32,14 +52,14 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         return FileResponse(path, media_type="text/html")
 
     @router.get("/tenants")
-    async def list_tenants():
-        mem = get_mem("default", "default")
+    async def list_tenants(db: str | None = Query(None)):
+        mem = _db_mem(db) if db else get_mem("default", "default")
         rows = mem.db.fetchall("SELECT DISTINCT tenant_id FROM atoms ORDER BY tenant_id")
         return [r["tenant_id"] for r in rows]
 
     @router.get("/spaces")
-    async def list_spaces(tenant_id: str = Query("default")):
-        mem = get_mem(tenant_id, "default")
+    async def list_spaces(tenant_id: str = Query("default"), db: str | None = Query(None)):
+        mem = _db_mem(db) if db else get_mem(tenant_id, "default")
         rows = mem.db.fetchall(
             "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? ORDER BY space",
             (tenant_id,),
@@ -53,12 +73,13 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         limit: int = Query(200),
         min_confidence: float = Query(0.0),
         types: str = Query("concept,belief,episode,goal"),
+        db: str | None = Query(None),
     ):
         type_list = [t.strip() for t in types.split(",") if t.strip()] or [
             "concept", "belief", "episode", "goal"
         ]
         ph = ",".join("?" * len(type_list))
-        mem = get_mem(tenant_id, space)
+        mem = _db_mem(db) if db else get_mem(tenant_id, space)
         rows = mem.db.fetchall(
             f"""SELECT * FROM atoms
                 WHERE tenant_id=? AND space=? AND type IN ({ph})
@@ -90,8 +111,9 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         return {"nodes": nodes, "edges": edges}
 
     @router.get("/status")
-    async def status():
-        return get_mem("default", "default").status()
+    async def status(db: str | None = Query(None)):
+        mem = _db_mem(db) if db else get_mem("default", "default")
+        return mem.status()
 
     @router.get("/atoms/{atom_id}")
     async def get_atom(atom_id: str):

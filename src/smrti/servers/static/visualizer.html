@@ -419,6 +419,9 @@ select.slim { width: 70px; }
   <div class="vsep"></div>
   <input id="search" type="text" placeholder="Search atoms…" autocomplete="off">
   <div class="hfill"></div>
+  <span class="lbl">DB</span>
+  <input id="db-path" type="text" placeholder="~/.smrti/memory.db" title="SQLite DB path (leave blank for server default)" style="width:210px;font-size:13px">
+  <div class="vsep"></div>
   <span class="lbl">API</span>
   <input id="api-base" type="text" placeholder="http://localhost:8420" title="API base URL">
 </div>
@@ -720,6 +723,8 @@ let svg, g, el, nl, linkSel, nodeSel;
 // ─── DOM helpers ──────────────────────────────────────────────────────
 const $  = id => document.getElementById(id);
 const apiBase = () => { const v = $('api-base').value.trim(); return v || window.location.origin; };
+const dbParam = () => { const d = $('db-path').value.trim(); return d ? '&db=' + encodeURIComponent(d) : ''; };
+const dbParamFirst = () => { const d = $('db-path').value.trim(); return d ? '?db=' + encodeURIComponent(d) : ''; };
 
 // ─── API ──────────────────────────────────────────────────────────────
 async function api(path) {
@@ -731,7 +736,7 @@ async function api(path) {
 // ─── Data loading ─────────────────────────────────────────────────────
 async function loadTenants() {
   try {
-    const ts = await api('/tenants');
+    const ts = await api('/tenants' + dbParamFirst());
     const sel = $('s-tenant'), cur = sel.value;
     sel.innerHTML = ts.map(t => `<option${t===cur?' selected':''}>${t}</option>`).join('');
   } catch { /* default */ }
@@ -740,7 +745,7 @@ async function loadTenants() {
 async function loadSpaces() {
   try {
     const t = $('s-tenant').value;
-    const ss = await api('/spaces?tenant_id=' + encodeURIComponent(t));
+    const ss = await api('/spaces?tenant_id=' + encodeURIComponent(t) + dbParam());
     const sel = $('s-space'), cur = sel.value;
     sel.innerHTML = ss.map(s => `<option${s===cur?' selected':''}>${s}</option>`).join('');
   } catch { /* default */ }
@@ -756,6 +761,8 @@ async function loadGraph() {
       min_confidence: S.minConf,
       types: [...S.types].join(','),
     });
+    const dbStr = $('db-path').value.trim();
+    if (dbStr) p.set('db', dbStr);
     const data = await api('/graph?' + p);
     S.data = data;
     S.extra.clear();
@@ -771,7 +778,7 @@ async function loadGraph() {
 
 async function loadStatus() {
   try {
-    const s = await api('/status');
+    const s = await api('/status' + dbParamFirst());
     const p = s.personality || {};
     $('s-pers').textContent  = p.preset_name || '—';
     $('s-epoch').textContent = p.epoch_count ?? '—';
@@ -1122,6 +1129,8 @@ async function expandNeighbors() {
       tenant_id: t, space: sp, limit: S.limit * 2,
       min_confidence: 0, types: 'concept,belief,episode,goal',
     });
+    const dbStr = $('db-path').value.trim();
+    if (dbStr) p.set('db', dbStr);
     const data = await api('/graph?' + p);
     S.data = data;
     renderGraph();
@@ -1185,6 +1194,10 @@ function bindControls() {
   $('s-tenant').addEventListener('change', async () => { await loadSpaces(); loadGraph(); });
   $('s-space').addEventListener('change', () => loadGraph());
   $('api-base').addEventListener('change', async () => { await loadTenants(); await loadSpaces(); loadGraph(); loadStatus(); });
+  $('db-path').addEventListener('change', async () => {
+    localStorage.setItem('viz-db', $('db-path').value.trim());
+    await loadTenants(); await loadSpaces(); loadGraph(); loadStatus();
+  });
   $('btn-refresh').addEventListener('click', async () => { await loadTenants(); await loadSpaces(); loadGraph(); loadStatus(); });
 
   let st;
@@ -1593,6 +1606,9 @@ function bindTabsAndCalls() {
 
 // ─── Init ─────────────────────────────────────────────────────────────
 async function init() {
+  const savedDb = localStorage.getItem('viz-db');
+  if (savedDb) $('db-path').value = savedDb;
+
   if (window.location.protocol !== 'file:') {
     $('api-base').value = window.location.origin;
     $('api-base').placeholder = window.location.origin;

@@ -12,7 +12,7 @@ When calling this tool, you MUST:
 - Include emotional valence when sentiment is expressed (-1.0 to 1.0)
 - Use negative valence (-0.5 to -1.0) for errors, failures, and things to avoid
 
-The system extracts entities, assigns truth values, and links to existing knowledge.""",
+Use type=belief with an evidence string to assert a probabilistic fact (starts with lower initial confidence, builds through evidence). The system extracts entities, assigns truth values, and links to existing knowledge.""",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -20,6 +20,7 @@ The system extracts entities, assigns truth values, and links to existing knowle
                 "type": {"type": "string", "enum": ["belief", "episode", "goal"], "default": "episode"},
                 "probability": {"type": "number", "description": "How true is this (0-1)", "default": 0.8},
                 "valence": {"type": "number", "description": "Emotional tone (-1 to 1)", "default": 0.0},
+                "evidence": {"type": "string", "description": "Why you believe this (only used when type=belief)"},
             },
             "required": ["content"],
         },
@@ -41,19 +42,6 @@ The system extracts entities, assigns truth values, and links to existing knowle
         "name": "smrti_reflect",
         "description": "Trigger a consolidation pass. Updates beliefs based on evidence, decays attention, discovers new connections. Returns a summary of changes.",
         "inputSchema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "smrti_believe",
-        "description": "Assert or update a specific belief with a truth value. If the belief contradicts existing knowledge, creates a contradiction link.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "statement": {"type": "string"},
-                "probability": {"type": "number"},
-                "evidence": {"type": "string", "description": "Why you believe this"},
-            },
-            "required": ["statement", "probability"],
-        },
     },
     {
         "name": "smrti_forget",
@@ -82,43 +70,20 @@ The system extracts entities, assigns truth values, and links to existing knowle
     },
     {
         "name": "smrti_status",
-        "description": "Get memory statistics: total atoms, active beliefs, emotional state, attention distribution.",
+        "description": "Get memory statistics: total atoms, active beliefs, emotional state, attention distribution, and list of all spaces for this tenant.",
         "inputSchema": {"type": "object", "properties": {}},
     },
     {
-        "name": "smrti_space_overlap",
-        "description": "Compute the overlap between the current space and another space. Returns Jaccard similarity and matched atom pairs. Use this to discover shared concepts across memory compartments.",
+        "name": "smrti_space_query",
+        "description": "Query the relationship between two memory spaces. op=overlap returns Jaccard similarity and matched atom pairs; op=intersection returns atoms present in both spaces; op=diff returns atoms unique to the current space.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "op": {"type": "string", "enum": ["overlap", "intersection", "diff"]},
                 "other_space": {"type": "string", "description": "The space to compare with"},
-                "threshold": {"type": "number", "description": "Embedding similarity threshold (0-1)", "default": 0.85},
+                "threshold": {"type": "number", "description": "Contextual similarity threshold (0-1)", "default": 0.85},
             },
-            "required": ["other_space"],
-        },
-    },
-    {
-        "name": "smrti_space_intersection",
-        "description": "Return atoms that exist in both the current space and another space (by semantic similarity). Useful for finding shared knowledge.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "other_space": {"type": "string", "description": "The space to intersect with"},
-                "threshold": {"type": "number", "default": 0.85},
-            },
-            "required": ["other_space"],
-        },
-    },
-    {
-        "name": "smrti_space_diff",
-        "description": "Return atoms unique to the current space (not found in the other space). Useful for understanding what knowledge is exclusive to one context.",
-        "inputSchema": {
-            "type": "object",
-            "properties": {
-                "other_space": {"type": "string", "description": "The space to diff against"},
-                "threshold": {"type": "number", "default": 0.85},
-            },
-            "required": ["other_space"],
+            "required": ["op", "other_space"],
         },
     },
     {
@@ -133,10 +98,5 @@ The system extracts entities, assigns truth values, and links to existing knowle
             },
             "required": ["other_space"],
         },
-    },
-    {
-        "name": "smrti_list_spaces",
-        "description": "List all memory spaces for the current tenant, including any bridge spaces that have emerged from overlaps.",
-        "inputSchema": {"type": "object", "properties": {}},
     },
 ]

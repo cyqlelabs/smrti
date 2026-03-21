@@ -35,12 +35,20 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         valence = args.get("valence")
         if valence is None or valence == 0.0:
             valence = estimate_valence(content, mem.embed)
-        atom_id = mem.remember(
-            content=content,
-            type=args.get("type", "episode"),
-            probability=args.get("probability", 0.8),
-            valence=valence,
-        )
+        atom_type = args.get("type", "episode")
+        if atom_type == "belief":
+            atom_id = mem.believe(
+                statement=content,
+                probability=args.get("probability", 0.8),
+                evidence=args.get("evidence"),
+            )
+        else:
+            atom_id = mem.remember(
+                content=content,
+                type=atom_type,
+                probability=args.get("probability", 0.8),
+                valence=valence,
+            )
         return {"status": "ok", "atom_id": atom_id}
 
     elif name == "smrti_recall":
@@ -101,7 +109,60 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             return {"status": "ok", "preset": preset}
 
     elif name == "smrti_status":
-        return mem.status()
+        result = mem.status()
+        result["spaces"] = mem.list_spaces()
+        return result
+
+    elif name == "smrti_space_query":
+        op = args["op"]
+        other_space = args["other_space"]
+        threshold = args.get("threshold", 0.85)
+        if op == "overlap":
+            result = mem.space_overlap(other_space=other_space, threshold=threshold)
+            return {
+                "space_a": result.space_a,
+                "space_b": result.space_b,
+                "jaccard": result.jaccard,
+                "matched_pairs": [
+                    {
+                        "atom_a": {"id": p.atom_a.id, "label": p.atom_a.label, "space": p.atom_a.space},
+                        "atom_b": {"id": p.atom_b.id, "label": p.atom_b.label, "space": p.atom_b.space},
+                        "similarity": p.similarity,
+                    }
+                    for p in result.pairs
+                ],
+            }
+        elif op == "intersection":
+            result = mem.space_intersection(other_space=other_space, threshold=threshold)
+            return {
+                "operation": result.operation,
+                "spaces": result.spaces,
+                "atoms": [
+                    {"id": a.id, "label": a.label, "type": a.type.value, "space": a.space}
+                    for a in result.atoms
+                ],
+                "jaccard": result.overlap.jaccard if result.overlap else 0.0,
+            }
+        elif op == "diff":
+            result = mem.space_difference(other_space=other_space, threshold=threshold)
+            return {
+                "operation": result.operation,
+                "spaces": result.spaces,
+                "atoms": [
+                    {"id": a.id, "label": a.label, "type": a.type.value, "space": a.space}
+                    for a in result.atoms
+                ],
+            }
+        return {"error": f"Unknown op: {op}"}
+
+    # Legacy handlers retained for backward compatibility (REST routes, direct callers)
+    elif name == "smrti_believe":
+        atom_id = mem.believe(
+            statement=args["statement"],
+            probability=args["probability"],
+            evidence=args.get("evidence"),
+        )
+        return {"status": "ok", "atom_id": atom_id}
 
     elif name == "smrti_space_overlap":
         result = mem.space_overlap(

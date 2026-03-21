@@ -1157,6 +1157,8 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
             <div class="usecase-desc">Different contexts for the same user. An analytical work space and an empathetic personal space, cross-readable when needed.</div>
           </div>
         </div>
+
+        <p class="section-text" style="margin-top:2.5rem">Spaces also support <strong>set theory operations</strong>: <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_overlap</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_intersection</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_difference</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_union</code>. Matching uses a three-signal contextual score (embedding + entity-type + graph neighborhood) that correctly separates homonyms like "Java" the language from "Java" the island. When two spaces overlap significantly, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_merge()</code> materialises a <em>bridge space</em> — new atoms with PLN-merged truth values and blended valence, linked back to both parents. Bridge discovery runs automatically every 10th consolidation epoch.</p>
       </div>
     </section>
 
@@ -1247,7 +1249,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
         <div class="serve-grid" style="margin-top:2rem">
           <div class="serve-mode">
             <div class="serve-mode-name">MCP</div>
-            <div class="serve-mode-desc">Stdio server for Claude, Cursor, and any MCP-compatible client. Tool-based interface: remember, recall, believe, reflect, forget, status.</div>
+            <div class="serve-mode-desc">Stdio server for Claude, Cursor, and any MCP-compatible client. 8 tools: remember, recall, reflect, forget, status, personality, space_query, space_merge.</div>
             <div class="serve-mode-cmd">smrti serve mcp</div>
           </div>
           <div class="serve-mode">
@@ -1377,7 +1379,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           accent: '#38bdf8', bg: '#1e3a5f', text: '#bae6fd',
           desc: 'Named entities are extracted, resolved, and linked to existing graph nodes. Pronouns are disambiguated. Claims, goals, and constraints are pulled from the text.',
           nodes: [
-            { name: 'NER',               tip: '17 entity types: person, org, project, role, tool, technology, skill, topic, media, health, and more' },
+            { name: 'NER',               tip: '16 entity types: person, org, project, role, technology, skill, topic, media, health, and more' },
             { name: 'Entity Resolution', tip: 'Links mentions to known graph nodes or creates new ones' },
             { name: 'Pronoun Disambig.', tip: '\u2018she\u2019 \u2192 Alice, \u2018we\u2019 \u2192 Acme' },
             { name: 'Claim Extraction',  tip: 'Pulls relations, beliefs, goals, constraints from text' },

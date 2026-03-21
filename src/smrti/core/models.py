@@ -101,6 +101,36 @@ class EpochResult(BaseModel):
     new_connections: int
     contradictions_resolved: int
     orphans_healed: int = 0
+    bridges_created: int = 0
+
+
+class AtomPair(BaseModel):
+    """A matched pair of atoms across two spaces with their similarity score."""
+    atom_a: Atom
+    atom_b: Atom
+    similarity: float
+
+
+class SpaceOverlap(BaseModel):
+    """Result of computing overlap between two spaces."""
+    space_a: str
+    space_b: str
+    jaccard: float = 0.0
+    pairs: list[AtomPair] = Field(default_factory=list)
+
+    @property
+    def bridge_space_name(self) -> str:
+        """Canonical bridge space name (sorted so A∩B == B∩A)."""
+        a, b = sorted([self.space_a, self.space_b])
+        return f"{a}_x_{b}"
+
+
+class SpaceSetResult(BaseModel):
+    """Result of a set operation on spaces."""
+    operation: str
+    spaces: list[str]
+    atoms: list[Atom] = Field(default_factory=list)
+    overlap: Optional[SpaceOverlap] = None
 
 
 def _safe_entity_type(value: str | None) -> EntityType | None:

@@ -103,6 +103,69 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     elif name == "smrti_status":
         return mem.status()
 
+    elif name == "smrti_space_overlap":
+        result = mem.space_overlap(
+            other_space=args["other_space"],
+            threshold=args.get("threshold", 0.85),
+        )
+        return {
+            "space_a": result.space_a,
+            "space_b": result.space_b,
+            "jaccard": result.jaccard,
+            "matched_pairs": [
+                {
+                    "atom_a": {"id": p.atom_a.id, "label": p.atom_a.label, "space": p.atom_a.space},
+                    "atom_b": {"id": p.atom_b.id, "label": p.atom_b.label, "space": p.atom_b.space},
+                    "similarity": p.similarity,
+                }
+                for p in result.pairs
+            ],
+        }
+
+    elif name == "smrti_space_intersection":
+        result = mem.space_intersection(
+            other_space=args["other_space"],
+            threshold=args.get("threshold", 0.85),
+        )
+        return {
+            "operation": result.operation,
+            "spaces": result.spaces,
+            "atoms": [
+                {"id": a.id, "label": a.label, "type": a.type.value, "space": a.space}
+                for a in result.atoms
+            ],
+            "jaccard": result.overlap.jaccard if result.overlap else 0.0,
+        }
+
+    elif name == "smrti_space_diff":
+        result = mem.space_difference(
+            other_space=args["other_space"],
+            threshold=args.get("threshold", 0.85),
+        )
+        return {
+            "operation": result.operation,
+            "spaces": result.spaces,
+            "atoms": [
+                {"id": a.id, "label": a.label, "type": a.type.value, "space": a.space}
+                for a in result.atoms
+            ],
+        }
+
+    elif name == "smrti_space_merge":
+        count = mem.materialize_bridge(
+            other_space=args["other_space"],
+            threshold=args.get("threshold", 0.85),
+            min_jaccard=args.get("min_jaccard", 0.1),
+        )
+        return {
+            "status": "ok",
+            "bridges_created": count,
+            "bridge_space": f"{'_x_'.join(sorted([mem.write_space, args['other_space']]))}",
+        }
+
+    elif name == "smrti_list_spaces":
+        return {"spaces": mem.list_spaces()}
+
     return {"error": f"Unknown tool: {name}"}
 
 

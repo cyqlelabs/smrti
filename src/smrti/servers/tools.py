@@ -85,4 +85,58 @@ The system extracts entities, assigns truth values, and links to existing knowle
         "description": "Get memory statistics: total atoms, active beliefs, emotional state, attention distribution.",
         "inputSchema": {"type": "object", "properties": {}},
     },
+    {
+        "name": "smrti_space_overlap",
+        "description": "Compute the overlap between the current space and another space. Returns Jaccard similarity and matched atom pairs. Use this to discover shared concepts across memory compartments.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "other_space": {"type": "string", "description": "The space to compare with"},
+                "threshold": {"type": "number", "description": "Embedding similarity threshold (0-1)", "default": 0.85},
+            },
+            "required": ["other_space"],
+        },
+    },
+    {
+        "name": "smrti_space_intersection",
+        "description": "Return atoms that exist in both the current space and another space (by semantic similarity). Useful for finding shared knowledge.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "other_space": {"type": "string", "description": "The space to intersect with"},
+                "threshold": {"type": "number", "default": 0.85},
+            },
+            "required": ["other_space"],
+        },
+    },
+    {
+        "name": "smrti_space_diff",
+        "description": "Return atoms unique to the current space (not found in the other space). Useful for understanding what knowledge is exclusive to one context.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "other_space": {"type": "string", "description": "The space to diff against"},
+                "threshold": {"type": "number", "default": 0.85},
+            },
+            "required": ["other_space"],
+        },
+    },
+    {
+        "name": "smrti_space_merge",
+        "description": "Materialize a bridge space from the overlap between the current space and another. Creates new atoms that represent shared concepts with merged truth values, attention, and valence. The bridge space can evolve independently and accumulate its own memories.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "other_space": {"type": "string", "description": "The space to merge with"},
+                "threshold": {"type": "number", "default": 0.85},
+                "min_jaccard": {"type": "number", "description": "Minimum overlap score to trigger materialization", "default": 0.1},
+            },
+            "required": ["other_space"],
+        },
+    },
+    {
+        "name": "smrti_list_spaces",
+        "description": "List all memory spaces for the current tenant, including any bridge spaces that have emerged from overlaps.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
 ]

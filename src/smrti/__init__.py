@@ -29,6 +29,14 @@ from smrti.extraction.resolve import EntityResolver
 from smrti.retrieval.fan_out import retrieve
 from smrti.evolution.epoch import run_epoch
 from smrti.personality.params import PersonalityProfile, load_preset
+from smrti.spaces.set_ops import (
+    space_overlap as _space_overlap,
+    space_intersection as _space_intersection,
+    space_difference as _space_difference,
+    space_union as _space_union,
+    space_symmetric_difference as _space_symmetric_difference,
+)
+from smrti.spaces.emergence import materialize_bridge as _materialize_bridge
 
 
 class Smrti:
@@ -275,6 +283,44 @@ class Smrti:
             (self.tenant_id, self.write_space),
         )
         return count
+
+    # ── Space set theory ──────────────────────────────────────────────
+
+    def space_overlap(self, other_space: str, threshold: float = 0.85):
+        """Compute overlap (Jaccard + matched pairs) between write_space and another space."""
+        return _space_overlap(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
+
+    def space_intersection(self, other_space: str, threshold: float = 0.85):
+        """Return atoms that exist in both write_space and other_space."""
+        return _space_intersection(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
+
+    def space_difference(self, other_space: str, threshold: float = 0.85):
+        """Return atoms in write_space that have no match in other_space."""
+        return _space_difference(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
+
+    def space_union(self, other_space: str, threshold: float = 0.85):
+        """Return deduplicated union of atoms from write_space and other_space."""
+        return _space_union(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
+
+    def space_symmetric_difference(self, other_space: str, threshold: float = 0.85):
+        """Return atoms that are in one space but not the other."""
+        return _space_symmetric_difference(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
+
+    def materialize_bridge(self, other_space: str, threshold: float = 0.85, min_jaccard: float = 0.1) -> int:
+        """Compute overlap and materialize a bridge space if Jaccard >= min_jaccard.
+
+        Returns the number of bridge atoms created.
+        """
+        overlap = _space_overlap(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
+        return _materialize_bridge(overlap, self.tenant_id, self.db, self.embed, self.atomspace, min_jaccard)
+
+    def list_spaces(self) -> list[str]:
+        """Return all spaces for this tenant."""
+        rows = self.db.fetchall(
+            "SELECT DISTINCT space FROM atoms WHERE tenant_id = ?",
+            (self.tenant_id,),
+        )
+        return [r["space"] for r in rows]
 
     def close(self) -> None:
         self.db.close()

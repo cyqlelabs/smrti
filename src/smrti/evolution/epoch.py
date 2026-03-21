@@ -7,6 +7,8 @@ from smrti.evolution.connections import discover_connections
 from smrti.evolution.healing import heal_orphaned_episodes
 from smrti.evolution.truth import update_truth
 from smrti.evolution.valence import propagate_valence
+from smrti.spaces.set_ops import space_overlap
+from smrti.spaces.emergence import materialize_bridge
 
 
 def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
@@ -164,6 +166,11 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     if epoch_count % 10 == 0:
         new_connections = discover_connections(tenant_id, space, db, embed_engine)
 
+    # 5b. Cross-space bridge emergence (every 10th epoch)
+    bridges_created = 0
+    if epoch_count % 10 == 0:
+        bridges_created = _discover_bridges(tenant_id, space, db, embed_engine)
+
     # 6. Prune atoms below both confidence and LTI floors.
     # Episodes, beliefs, and relations are exempt from direct pruning.
     # Relations are cascade-deleted when their endpoint atoms are pruned (see loop below).
@@ -195,4 +202,32 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         new_connections=new_connections,
         contradictions_resolved=contradictions_resolved,
         orphans_healed=orphans_healed,
+        bridges_created=bridges_created,
     )
+
+
+def _discover_bridges(tenant_id: str, space: str, db, embed_engine) -> int:
+    """Find other spaces in this tenant and materialize bridges where overlap is significant."""
+    from smrti.core.atomspace import AtomSpace
+
+    all_spaces_rows = db.fetchall(
+        "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? AND space != ?",
+        (tenant_id, space),
+    )
+    if not all_spaces_rows:
+        return 0
+
+    atomspace = AtomSpace(db, embed_engine)
+    total = 0
+
+    for row in all_spaces_rows:
+        other = row["space"]
+        # Skip already-materialized bridge spaces to avoid recursion
+        if "_x_" in other:
+            continue
+        overlap = space_overlap(tenant_id, space, other, db, threshold=0.85)
+        total += materialize_bridge(
+            overlap, tenant_id, db, embed_engine, atomspace, min_jaccard=0.1,
+        )
+
+    return total

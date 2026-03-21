@@ -88,17 +88,18 @@ smrti serve proxy          # OpenAI-compatible proxy on :8421
 
 ### MCP Server
 
-Exposes 7 tools over stdio for direct LLM integration (Claude, etc.):
+Exposes 8 tools over stdio for direct LLM integration (Claude, etc.):
 
-| Tool          | Description                           |
-| ------------- | ------------------------------------- |
-| `remember`    | Store an observation or episode       |
-| `recall`      | Semantic search with salience scoring |
-| `believe`     | Assert a belief with truth value      |
-| `reflect`     | Run a consolidation epoch             |
-| `forget`      | Lower confidence on a memory          |
-| `status`      | Get memory statistics                 |
-| `personality` | Get or set personality preset         |
+| Tool            | Description                                                            |
+| --------------- | ---------------------------------------------------------------------- |
+| `remember`      | Store an episode, goal, or belief (use `type=belief` + `evidence` to assert a probabilistic fact) |
+| `recall`        | Semantic search with salience scoring                                  |
+| `reflect`       | Run a consolidation epoch                                              |
+| `forget`        | Lower confidence on a memory                                           |
+| `status`        | Get memory statistics and list of all spaces for the tenant            |
+| `personality`   | Get or set personality preset                                          |
+| `space_query`   | Query two spaces: `op=overlap` (Jaccard), `op=intersection`, `op=diff` |
+| `space_merge`   | Materialize a bridge space from the overlap between two spaces         |
 
 ```bash
 smrti serve mcp
@@ -314,6 +315,11 @@ graph TD
         HEA["healing"]
     end
 
+    subgraph Spaces
+        SOP["set_ops"]
+        EMG["emergence"]
+    end
+
     subgraph Extraction
         EXT["extract"]
         RES["resolve"]
@@ -325,8 +331,8 @@ graph TD
     end
 
     MCP & REST & PROXY --> S
-    S --> Core & Retrieval & Evolution & Extraction
-    Core & Retrieval & Evolution & Extraction --> SQL
+    S --> Core & Retrieval & Evolution & Extraction & Spaces
+    Core & Retrieval & Evolution & Extraction & Spaces --> SQL
 ```
 
 **Retrieval pipeline:** Embed query → KNN over tenant partition → filter to read spaces → 1-hop graph expansion → salience scoring → top-k
@@ -348,7 +354,8 @@ When valence < -0.5, weight shifts dynamically from w_sti to w_val so critical e
 5. Promote high-STI atoms to LTI
 6. Resolve contradictions (weaken less confident belief)
 7. Discover cross-domain connections (every 10th epoch)
-8. Prune atoms below confidence/LTI floors
+8. Materialize cross-space bridge atoms (every 10th epoch)
+9. Prune atoms below confidence/LTI floors
 
 ## Data Model
 

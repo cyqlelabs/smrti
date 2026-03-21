@@ -203,6 +203,10 @@ class Smrti:
 
     def set_personality(self, preset_name: str) -> None:
         profile = load_preset(preset_name)
+        self.set_personality_profile(profile, preset_name)
+
+    def set_personality_profile(self, profile: PersonalityProfile, preset_name: str = "custom") -> None:
+        """Apply an arbitrary PersonalityProfile to this space's personality row."""
         self.db.execute(
             """
             UPDATE personality SET

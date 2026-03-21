@@ -236,13 +236,14 @@ class SimEngine:
         # ── Phase 3: Decision ────────────────────────────────────────
         agent_actions: dict[str, Action] = {}
         available_places = self.topology.all_place_names()
+        place_types = {n: p.place_type for n, p in self.topology.places.items()}
 
         for agent in alive_agents:
             if agent.name not in agent_contexts:
                 agent_actions[agent.name] = Action(type=ACTION_WAIT)
                 continue
             ctx = agent_contexts[agent.name]
-            action = agent.decide(ctx, available_places, place_agents)
+            action = agent.decide(ctx, available_places, place_agents, place_types)
             agent_actions[agent.name] = action
 
         # ── Phase 3.5: LLM dialogue enrichment (fire-and-forget) ─────
@@ -387,10 +388,15 @@ class SimEngine:
             self._run_epoch()
             self._last_epoch_hours = self.calendar.total_hours
 
-            # Relationship gate checks
+            # Relationship gate checks (deduplicate pairs)
+            seen_pairs: set[tuple[str, str]] = set()
             for agent in alive_agents:
                 transitions = check_relationship_gates(agent, self.agents)
                 for t in transitions:
+                    pair = tuple(sorted([t.agent_name, t.target_name]))
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
                     narratives = apply_relationship_transition(t, self._agents_by_name)
                     relationship_changes.extend(narratives)
                     events.append({
@@ -447,6 +453,8 @@ class SimEngine:
 
         elif action.type == ACTION_TALK:
             agent.drives.reduce_social()
+            if agent.drives.romance >= 40:
+                agent.drives.reduce_romance()
             if action.target:
                 target_agent = self._agents_by_name.get(action.target)
                 if target_agent:
@@ -502,7 +510,7 @@ class SimEngine:
         """Run epoch consolidation on all active spaces."""
         self._epoch_count += 1
 
-        # Run reflect on alive agent spaces
+        # Run reflect on alive agent spaces + persist interaction counts
         for agent in self.agents:
             if not agent.alive:
                 continue
@@ -510,6 +518,7 @@ class SimEngine:
                 agent.smrti.reflect()
             except Exception:
                 pass
+            agent.persist_interactions()
 
         # Run reflect on occupied place spaces
         for place_name, place_smrti in self._place_smrtis.items():

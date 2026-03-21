@@ -9,6 +9,7 @@ from smrti import Smrti
 
 from smrti_town.agent import Agent
 from smrti_town.calendar import SimCalendar
+from smrti_town.config import PRESET_TRAITS
 from smrti_town.engine import SimEngine
 from smrti_town.spatial import Place, TownTopology
 
@@ -74,15 +75,19 @@ def _build_engine(
 def _build_topology(places_data: list[dict]) -> TownTopology:
     topo = TownTopology()
 
+    _valid_types = {"home", "public", "outdoor", "street"}
     for p in places_data:
         name = _norm_name(p.get("name", ""))
         if not name:
             continue
+        raw_type = str(p.get("type", "public")).strip().lower()
+        place_type = raw_type if raw_type in _valid_types else "public"
         place = Place(
             name=name,
             personality=_valid_personality(p.get("personality")),
             is_outdoor=bool(p.get("is_outdoor", False)),
             has_space=bool(p.get("has_space", True)),
+            place_type=place_type,
         )
         topo.add_place(place)
 
@@ -159,6 +164,10 @@ def _build_agents(
         agents.append(agent)
         if start_loc in topology.places:
             topology.places[start_loc].add_occupant(name)
+
+    # Restore any persisted interaction counts from a previous run
+    for agent in agents:
+        agent.restore_interactions()
 
     # Second pass: seed relationships (all agents now exist)
     agents_by_name = {a.name: a for a in agents}

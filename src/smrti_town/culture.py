@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from smrti import Smrti
-from smrti.core.models import atom_from_row
 
 from smrti_town.config import BRIDGE_THRESHOLD, CULTURE_CONFIDENCE_MIN
 
@@ -20,6 +19,9 @@ def promote_bridges_to_culture(
 ) -> int:
     """Scan bridge spaces and promote high-confidence atoms to Space_Culture.
 
+    Uses the Smrti recall API to read bridge space atoms and the culture
+    space for deduplication — no direct DB queries.
+
     Returns the number of atoms promoted.
     """
     culture_smrti = Smrti(
@@ -30,31 +32,42 @@ def promote_bridges_to_culture(
         read_spaces=["Space_Culture"],
     )
 
+    # Pre-fetch existing culture labels for dedup
+    existing_labels: set[tuple[str, str]] = set()
+    try:
+        culture_results = culture_smrti.recall(query="*", top_k=200)
+        for r in culture_results:
+            existing_labels.add((r.atom.label, r.atom.type.value))
+    except Exception:
+        pass
+
     promoted = 0
     bridge_spaces = [s for s in all_spaces if "_x_" in s]
 
     for bridge_space in bridge_spaces:
-        rows = culture_smrti.db.fetchall(
-            """
-            SELECT * FROM atoms
-            WHERE tenant_id = ? AND space = ?
-            AND confidence >= ?
-            AND type IN ('belief', 'concept')
-            """,
-            (tenant_id, bridge_space, CULTURE_CONFIDENCE_MIN),
+        # Read bridge space atoms via a dedicated Smrti reader
+        bridge_reader = Smrti(
+            db_path=db_path,
+            personality="balanced",
+            tenant_id=tenant_id,
+            write_space=bridge_space,
+            read_spaces=[bridge_space],
         )
-        for row in rows:
-            atom = atom_from_row(row)
-            # Check if already in culture
-            existing = culture_smrti.db.fetchone(
-                """
-                SELECT id FROM atoms
-                WHERE tenant_id = ? AND space = 'Space_Culture'
-                AND label = ? AND type = ?
-                """,
-                (tenant_id, atom.label, atom.type.value),
-            )
-            if existing:
+        try:
+            results = bridge_reader.recall(query="*", top_k=100)
+        except Exception:
+            bridge_reader.close()
+            continue
+
+        for r in results:
+            atom = r.atom
+            # Filter: only beliefs/concepts with sufficient confidence
+            if atom.type.value not in ("belief", "concept"):
+                continue
+            if atom.truth.confidence < CULTURE_CONFIDENCE_MIN:
+                continue
+            # Dedup: skip if already in culture
+            if (atom.label, atom.type.value) in existing_labels:
                 continue
 
             culture_smrti.remember(
@@ -64,7 +77,10 @@ def promote_bridges_to_culture(
                 valence=atom.valence.valence if atom.valence else 0.0,
                 metadata={"promoted_from": bridge_space},
             )
+            existing_labels.add((atom.label, atom.type.value))
             promoted += 1
+
+        bridge_reader.close()
 
     culture_smrti.close()
     return promoted

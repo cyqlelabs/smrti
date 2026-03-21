@@ -860,10 +860,22 @@
             <circle class="logo-node" cx="82" cy="50" r="3"   fill="#2A6F97"/>
             <circle class="logo-node" cx="50" cy="82" r="3.5" fill="#2A6F97"/>
             <circle class="logo-node" cx="18" cy="50" r="3"   fill="#2A6F97"/>
+            <!-- Neon glow filter -->
+            <defs>
+              <filter id="neon-glow" x="-50%" y="-50%" width="200%" height="200%">
+                <feGaussianBlur in="SourceGraphic" stdDeviation="2" result="blur1"/>
+                <feGaussianBlur in="SourceGraphic" stdDeviation="4" result="blur2"/>
+                <feMerge>
+                  <feMergeNode in="blur2"/>
+                  <feMergeNode in="blur1"/>
+                  <feMergeNode in="SourceGraphic"/>
+                </feMerge>
+              </filter>
+            </defs>
             <!-- Center node — the memory engine core -->
-            <circle class="logo-core" cx="50" cy="50" r="6" fill="#00B4D8"/>
+            <circle class="logo-core" cx="50" cy="50" r="6" fill="#00B4D8" filter="url(#neon-glow)"/>
             <!-- Inner pulse ring -->
-            <circle class="logo-pulse" cx="50" cy="50" r="9" fill="none" stroke="#00B4D8" stroke-width="0.8" opacity="0.35"/>
+            <circle class="logo-pulse" cx="50" cy="50" r="9" fill="none" stroke="#00B4D8" stroke-width="0.8" opacity="0.35" filter="url(#neon-glow)"/>
           </svg>
         </div>
         <h1 class="hero-title">smrti</h1>
@@ -1719,6 +1731,37 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           easing: 'easeInOutSine',
           direction: 'alternate',
           loop: true
+        });
+
+        // Core node neon breathe — scale and opacity pulse
+        anime({
+          targets: '.logo-core',
+          r: [6, 7],
+          opacity: [1, 0.8],
+          duration: 1800,
+          easing: 'easeInOutSine',
+          direction: 'alternate',
+          loop: true
+        });
+
+        // Neon glow intensity breathe via filter stdDeviation
+        var glowFilter = document.getElementById('neon-glow');
+        var blurs = glowFilter.querySelectorAll('feGaussianBlur');
+        anime({
+          targets: {inner: 2, outer: 4},
+          inner: [2, 3.5],
+          outer: [4, 7],
+          duration: 1800,
+          easing: 'easeInOutSine',
+          direction: 'alternate',
+          loop: true,
+          update: function(anim) {
+            var obj = anim.animations;
+            var innerVal = obj[0].currentValue;
+            var outerVal = obj[1].currentValue;
+            blurs[0].setAttribute('stdDeviation', innerVal);
+            blurs[1].setAttribute('stdDeviation', outerVal);
+          }
         });
 
       }, 800);

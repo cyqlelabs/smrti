@@ -50,6 +50,47 @@ Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as
 
 **Servers (`servers/`):** `config.py` centralises all shared env-var defaults (`SMRTI_DB`, `SMRTI_PERSONALITY`, `SMRTI_TENANT_ID`, `SMRTI_SPACE`, `SMRTI_READ_SPACES`, `SMRTI_EXTRACT`, `SMRTI_EXTRACT_MODE`, `SMRTI_EXTRACT_URL`, `SMRTI_EXTRACT_MODEL`, `SMRTI_EXTRACT_THINKING`, `SMRTI_IGNORE_PATTERNS`) read by all server modes. `SMRTI_EXTRACT_TIMEOUT` is read directly by `extraction/extract.py` (not via `config.py`). `SMRTI_NER_MODEL` is read directly by `extraction/ner.py` (not via `config.py`). `mcp.py` wraps Smrti as MCP stdio tools; `handle_tool()` recall response includes `severity` and `intensity` fields. All three modes (MCP, REST, proxy) auto-estimate valence via `extraction/sentiment.py` when callers don't supply an explicit value, activating the error-avoidance memory path for negative content. All three modes call `extraction/extract.py` (via `extract_and_link_serialized`) after every `remember` operation to extract entities/claims and build concept nodes + relation edges (enabled by default via `SMRTI_EXTRACT`; proxy uses request auth, proxy and REST forward the request `Authorization` header; MCP passes no auth — works as-is with local LLMs). The proxy's `_store_exchange` awaits user extraction before assistant extraction sequentially so the user's entities are visible when extracting the assistant's response. `rest.py` is a FastAPI REST server. `viz_routes.py` is the shared visualizer router (graph explorer, atom CRUD, LLM call log endpoints) mounted by both REST and proxy. `proxy.py` is an OpenAI-compatible proxy with content-based episode deduplication (skips storing identical episodes for the same tenant/space) and severity-aware memory injection: recalled memories are split into two sections — behavioral constraints (`YOU MUST NOT`, `AVOID` for `critical_warning`/`known_antipattern`) and background context (`Note:` for `context`), each with its own preamble — and contextual query reformulation (configurable via `SMRTI_QUERY_MODE`, `SMRTI_QUERY_CONTEXT_MSGS`, `SMRTI_QUERY_MAX_CHARS`). All severity levels include a `confidence` qualifier. `call_log.py` is a shared in-process ring buffer (200 entries) that captures every LLM call across all serve modes — full request/response, timing, status, error, and tenant_id; both REST and proxy expose `GET /llm-calls` and `DELETE /llm-calls` endpoints, and the visualizer shows them in an "LLM Calls" debug tab. `reflect_loop.py` runs periodic background consolidation across all server modes (interval controlled by `SMRTI_REFLECT_INTERVAL`, default 60s, 0 to disable). `tools.py` defines the 8 advertised MCP tool schemas (remember, recall, reflect, forget, status, personality, space_query, space_merge). `believe`, `space_overlap`, `space_intersection`, `space_diff`, and `list_spaces` are retained as legacy handlers in `handle_tool()` for REST backward-compatibility and direct callers, but are not advertised to MCP clients. `remember` subsumes `believe` (use `type=belief` + `evidence`); `status` includes the spaces list; `space_query` covers overlap/intersection/diff via an `op` parameter.
 
+## smrti-town
+
+Town life simulation built on the Smrti memory engine. Lives in `src/smrti_town/` alongside `src/smrti/` but is **not** included in the `pyproject.toml` wheel — import it by running from the repo root with `pip install -e .` and ensuring `src/` is on `PYTHONPATH`.
+
+```bash
+# Start the town simulation server (port 8430)
+smrti serve_town
+
+# Or directly
+python -m uvicorn smrti_town.server:app --port 8430
+
+# Env vars
+SMRTI_TOWN_DB=~/.smrti/town.db   # default
+SMRTI_TOWN_TENANT=millbrook      # default
+SMRTI_TOWN_STATIC=<path>         # override static frontend dir
+```
+
+**LLM integration (OpenAI-compatible endpoint):**
+
+The simulation uses an LLM for two things: generating the world at startup and generating in-character dialogue every tick.
+
+- `llm.py` — `LLMSettings` (dataclass, serialisable) + `LLMClient` (async httpx wrapper). `generate_world()` sends a structured JSON prompt with a full few-shot schema example; falls back to Millbrook on failure. `generate_dialogue()` is called concurrently for all TALK actions per tick; falls back to template strings.
+- `worldgen.py` — `create_engine_from_llm()` calls `generate_world()`, validates the JSON, builds `TownTopology` + `Agent` list + Smrti spaces, then returns a `SimEngine`. Validates and clamps all LLM-supplied values (personalities, place names, ages, etc.).
+- Default endpoint: `http://0.0.0.0:8421/v1` — the `smrti serve proxy` address. Model: `Qwen3.5-9B-Q8_0.gguf`. All settings configurable via `GET/POST /settings`.
+- `POST /regenerate` — stops the current engine, generates a new world via LLM, broadcasts `{"type":"reset"}` to WebSocket clients to clear their state, then starts the new engine.
+
+**Architecture:**
+
+- `engine.py` — `SimEngine`: owns the async 8-phase tick loop (perceive → decide → resolve → remember → converse → sporadic → epoch). Each tick returns a `TickResult` broadcast to WebSocket clients.
+- `agent.py` — `Agent`: drives (Python state) + `Smrti` instance (memory). Rule-based `decide()` — **no LLM calls**. Each agent writes to `Agent_Space_{name}` and reads from their space + `World_Space` + `Space_Culture` + current place space.
+- `director.py` — `Director`: adaptive tick pacing — scene mode (0.25h, ≥2 agents together), routine (2h), montage (8h, all sleeping), skip (168h on demand). `Chronos` fires milestone and birthday events.
+- `spatial.py` — `TownTopology` + `Place`: adjacency graph with BFS path distance. Each socially significant place has a `Place_Space_{name}` Smrti instance.
+- `lifecycle.py` — relationship gating, death, reproduction, personality inheritance with stress-boosted mutation variance.
+- `culture.py` — `run_bridge_discovery` + `promote_bridges_to_culture`: every 10th epoch, bridge spaces (`{a}_x_{b}`) are scanned; high-confidence atoms flow up to `Space_Culture`.
+- `scenarios/millbrook.py` — `create_millbrook()`: canonical starting scenario (6 agents, full topology, pre-seeded World_Space and Space_Culture facts).
+- `server.py` — FastAPI app: WebSocket `/ws` for real-time tick stream, REST endpoints (`/start`, `/pause`, `/resume`, `/skip`, `/state`, `/agents`, `/agents/{name}/memories`), static frontend served from `static/`.
+
+**Space hierarchy:** `World_Space` (topology facts, written once at startup) → `Agent_Space_{name}` (private per-agent) → `Place_Space_{name}` (per socially-active place) → `Space_Culture` (promoted shared beliefs from bridge spaces). Bridge spaces are ephemeral intersection products named `{sorted_a}_x_{sorted_b}`.
+
+**Key design decision:** Personality hyperparameters are inherited biologically — child gets a blend of both parents' personality params with stress-boosted Gaussian mutation, bounded by `PARAM_BOUNDS` in `config.py`.
+
 ## Rules
 
 - **No hardcoded English.** Smrti is multilingual (50+ languages). Never use English word lists, prefixes, or patterns for filtering or logic. Use language-agnostic approaches: GLiNER `classify_text`, embedding similarity, span-length ratios, or word-count heuristics.

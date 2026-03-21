@@ -5,7 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from smrti_town.llm import LLMClient
 
 from smrti import Smrti
 
@@ -87,12 +90,15 @@ class SimEngine:
         calendar: SimCalendar | None = None,
         db_path: str = "~/.smrti/town.db",
         tenant_id: str = "millbrook",
+        llm_client: "LLMClient | None" = None,
     ) -> None:
         self.agents = agents
         self.topology = topology
         self.calendar = calendar or SimCalendar()
         self.db_path = db_path
         self.tenant_id = tenant_id
+
+        self.llm_client = llm_client
 
         self.director = Director()
         self.chronos = Chronos()
@@ -106,6 +112,10 @@ class SimEngine:
 
         # WebSocket broadcast callback
         self._broadcast: Callable[[dict], Any] | None = None
+
+        # Strong references to fire-and-forget background tasks so GC cannot
+        # cancel them mid-execution (asyncio only holds weak references).
+        self._bg_tasks: set[asyncio.Task] = set()
 
         # Place smrti instances for socially significant places
         self._place_smrtis: dict[str, Smrti] = {}
@@ -233,6 +243,13 @@ class SimEngine:
             ctx = agent_contexts[agent.name]
             action = agent.decide(ctx, available_places, place_agents)
             agent_actions[agent.name] = action
+
+        # ── Phase 3.5: LLM dialogue enrichment (fire-and-forget) ─────
+        # Tasks run in the background; the tick is never blocked by LLM latency.
+        if self.llm_client and self.llm_client.settings.enabled:
+            await self._enrich_dialogue_llm(
+                alive_agents, agent_actions, agent_contexts, self.tick_number
+            )
 
         # ── Phase 4: Engine resolution ───────────────────────────────
         for agent in alive_agents:
@@ -542,6 +559,83 @@ class SimEngine:
             ACTION_REPRODUCE: 0.7,
         }
         return valence_map.get(action.type, 0.0)
+
+    # ── LLM dialogue enrichment ──────────────────────────────────────
+
+    async def _enrich_dialogue_llm(
+        self,
+        alive_agents: list[Agent],
+        agent_actions: dict[str, Action],
+        agent_contexts: dict[str, Any],
+        tick_number: int,
+    ) -> None:
+        """Fire-and-forget LLM dialogue generation for all TALK actions.
+
+        The tick is NOT blocked — each agent gets a background asyncio.Task.
+        When the model responds (which may take many seconds on slow local
+        models), a ``dialogue_patch`` message is broadcast to connected clients
+        so the event log updates live.  Template dialogue in the tick result is
+        always shown immediately as a fallback.
+        """
+        for agent in alive_agents:
+            action = agent_actions.get(agent.name)
+            if (
+                not action
+                or action.type != ACTION_TALK
+                or not action.target
+                or agent.name not in agent_contexts
+            ):
+                continue
+            ctx = agent_contexts[agent.name]
+            # Capture loop variables before launching task
+            task = asyncio.create_task(
+                self._generate_and_broadcast_dialogue(
+                    agent=agent,
+                    target=action.target,
+                    fallback=action.dialogue,
+                    ctx=ctx,
+                    tick_number=tick_number,
+                )
+            )
+            self._bg_tasks.add(task)
+            task.add_done_callback(self._bg_tasks.discard)
+
+    async def _generate_and_broadcast_dialogue(
+        self,
+        agent: Agent,
+        target: str,
+        fallback: str,
+        ctx: Any,
+        tick_number: int,
+    ) -> None:
+        """Background task: call LLM, then broadcast patch to clients."""
+        if not self.llm_client:
+            return
+        enriched = await self.llm_client.generate_dialogue(
+            speaker=agent.name,
+            target=target,
+            location=agent.location,
+            time_of_day=ctx.time_of_day,
+            season=ctx.season,
+            personality=agent.personality_preset,
+            urgent_drive=ctx.urgent_drive,
+            memories=ctx.memories,
+            fallback=fallback,
+        )
+        if enriched == fallback:
+            return  # LLM failed or returned same text — nothing to patch
+
+        if self._broadcast:
+            try:
+                await self._broadcast({
+                    "type": "dialogue_patch",
+                    "tick": tick_number,
+                    "speaker": agent.name,
+                    "target": target,
+                    "content": enriched,
+                })
+            except Exception as exc:
+                logger.debug("Broadcast dialogue_patch failed: %s", exc)
 
     # ── Control ──────────────────────────────────────────────────────
 

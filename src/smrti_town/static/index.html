@@ -33,6 +33,99 @@
     <div id="ws-dot" class="ws-dot ws-connecting"></div>
     <span id="ws-label">Connecting</span>
   </div>
+  <button id="btn-settings" title="LLM Settings">&#9881;</button>
+</div>
+
+<!-- Settings Modal -->
+<div id="settings-overlay" class="settings-overlay hidden">
+  <div class="settings-modal">
+    <div class="settings-header">
+      <span class="settings-title">&#9881; LLM Settings</span>
+      <button id="settings-close" class="settings-close">&times;</button>
+    </div>
+
+    <div class="settings-body">
+      <div class="settings-row settings-toggle-row">
+        <label class="settings-label" for="set-enabled">Enable LLM</label>
+        <label class="toggle-switch">
+          <input type="checkbox" id="set-enabled" checked>
+          <span class="toggle-slider"></span>
+        </label>
+      </div>
+
+      <div class="settings-group-label">Connection</div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-base-url">Endpoint URL</label>
+        <input class="settings-input" id="set-base-url" type="text"
+               placeholder="http://0.0.0.0:8421/v1">
+      </div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-model">Model</label>
+        <input class="settings-input" id="set-model" type="text"
+               placeholder="Qwen3.5-9B-Q8_0.gguf">
+      </div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-dialogue-timeout">Dialogue timeout (s)</label>
+        <input class="settings-input settings-input-sm" id="set-dialogue-timeout"
+               type="number" min="0" max="300" step="5"
+               title="Seconds to wait for dialogue response. 0 = no timeout.">
+      </div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-worldgen-timeout">World gen timeout (s)</label>
+        <input class="settings-input settings-input-sm" id="set-worldgen-timeout"
+               type="number" min="0" max="3600" step="30"
+               title="Seconds to wait for world generation. 0 = no timeout (recommended for slow local models).">
+      </div>
+
+      <div class="settings-group-label">Generation</div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-temperature">Temperature</label>
+        <input class="settings-input settings-input-sm" id="set-temperature"
+               type="number" min="0" max="2" step="0.05">
+      </div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-top-p">Top P</label>
+        <input class="settings-input settings-input-sm" id="set-top-p"
+               type="number" min="0" max="1" step="0.05">
+      </div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-max-tokens">Dialogue tokens</label>
+        <input class="settings-input settings-input-sm" id="set-max-tokens"
+               type="number" min="20" max="300" step="10">
+      </div>
+
+      <div class="settings-group-label">World Generation</div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-theme">World theme</label>
+        <input class="settings-input" id="set-theme" type="text"
+               placeholder="e.g. coastal fishing village, 1950s">
+      </div>
+
+      <div class="settings-row">
+        <label class="settings-label" for="set-worldgen-tokens">World gen tokens</label>
+        <input class="settings-input settings-input-sm" id="set-worldgen-tokens"
+               type="number" min="512" max="8192" step="256">
+      </div>
+    </div>
+
+    <div class="settings-footer">
+      <button id="btn-settings-regenerate" class="settings-btn settings-btn-regen">
+        &#9851; Regenerate World
+      </button>
+      <div class="settings-footer-right">
+        <button id="btn-settings-cancel" class="settings-btn settings-btn-cancel">Cancel</button>
+        <button id="btn-settings-save" class="settings-btn settings-btn-save">Save</button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- Sidebar Toggle -->
@@ -67,6 +160,15 @@
 <!-- Tooltip (for hover) -->
 <div id="tooltip"></div>
 
+<!-- Generating overlay (shown while LLM builds the world) -->
+<div id="generating-overlay" class="generating-overlay hidden">
+  <div class="generating-card">
+    <div class="generating-spinner"></div>
+    <div id="gen-message" class="generating-message">Generating world…</div>
+    <div id="gen-hint" class="generating-hint"></div>
+  </div>
+</div>
+
 <!-- Game Container (Phaser renders here) -->
 <div id="game-container"></div>
 
@@ -85,6 +187,7 @@
 <script src="js/ui/sidebar.js"></script>
 <script src="js/ui/eventlog.js"></script>
 <script src="js/ui/controls.js"></script>
+<script src="js/ui/settings.js"></script>
 <script src="js/tick/processor.js"></script>
 <script src="js/ws.js"></script>
 <script src="js/scenes/TownScene.js"></script>

@@ -5,9 +5,27 @@ window.TOWN = window.TOWN || {};
 
 TOWN.processTick = function(scene, data) {
   if (data.type === 'state' || data.type === 'init') {
+    TOWN._hideGenerating();
     TOWN.processInit(scene, data);
     return Promise.resolve();
   }
+
+  if (data.type === 'generating') {
+    TOWN._showGenerating(data.message || 'Generating world…', data.hint || '');
+    return Promise.resolve();
+  }
+
+  if (data.type === 'dialogue_patch') {
+    TOWN._applyDialoguePatch(scene, data);
+    return Promise.resolve();
+  }
+
+  if (data.type === 'error') {
+    TOWN._hideGenerating();
+    TOWN.addLogEntry('system', '\u26A0\uFE0F ' + (data.message || 'Server error'));
+    return Promise.resolve();
+  }
+
   if (data.type !== 'tick') return Promise.resolve();
 
   /* ── Calendar ────────────────────────────────────────────────── */
@@ -166,4 +184,40 @@ TOWN.processInit = function(scene, data) {
   }
 
   TOWN.addLogEntry('system', 'Connected to Smrti Town simulation');
+};
+
+/* ── Generating overlay ──────────────────────────────────────────── */
+
+TOWN._showGenerating = function(msg, hint) {
+  var el = document.getElementById('generating-overlay');
+  if (!el) return;
+  var msgEl = document.getElementById('gen-message');
+  var hintEl = document.getElementById('gen-hint');
+  if (msgEl) msgEl.textContent = msg;
+  if (hintEl) hintEl.textContent = hint;
+  el.classList.remove('hidden');
+};
+
+TOWN._hideGenerating = function() {
+  var el = document.getElementById('generating-overlay');
+  if (el) el.classList.add('hidden');
+};
+
+/* ── Dialogue patch ──────────────────────────────────────────────── */
+
+TOWN._applyDialoguePatch = function(scene, data) {
+  /* Update speech bubble if agent is still visible */
+  var speaker = data.speaker;
+  var content = data.content;
+  if (!speaker || !content) return;
+
+  /* Show updated speech bubble */
+  if (scene) TOWN.showSpeechBubble(scene, speaker, content);
+
+  /* Append enriched line to event log with a visual marker */
+  var target = data.target || '';
+  var label = target
+    ? speaker + ' \u2192 ' + target + ': \u201C' + content + '\u201D'
+    : speaker + ': \u201C' + content + '\u201D';
+  TOWN.addLogEntry('talk', '\u2728 ' + label);
 };

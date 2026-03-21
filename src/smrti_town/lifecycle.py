@@ -16,11 +16,14 @@ from smrti_town.config import (
     MAX_POPULATION,
     PARAM_BOUNDS,
     PERSONALITY_PARAMS,
+    PRESET_TRAITS,
     RELATIONSHIP_GATES,
     REPRODUCTION_GATE,
     STARVATION_HOURS,
     STRESS_VARIANCE_BASE,
     STRESS_VARIANCE_MAX_MULT,
+    TRAIT_BOUNDS,
+    TRAIT_NAMES,
 )
 
 if TYPE_CHECKING:
@@ -197,6 +200,31 @@ def inherit_personality(
     return child
 
 
+def inherit_traits(
+    parent_a_traits: dict[str, float],
+    parent_b_traits: dict[str, float],
+    stress_level: float = 0.0,
+) -> dict[str, float]:
+    """Create child behavioural traits from parent trait distributions.
+
+    Same Gaussian blend as personality inheritance: mean of parents,
+    variance proportional to parental divergence and stress.
+    """
+    stress = max(0.0, min(1.0, stress_level))
+    variance_mult = STRESS_VARIANCE_BASE + stress * (STRESS_VARIANCE_MAX_MULT - STRESS_VARIANCE_BASE)
+
+    child_traits: dict[str, float] = {}
+    for trait in TRAIT_NAMES:
+        val_a = parent_a_traits.get(trait, 0.5)
+        val_b = parent_b_traits.get(trait, 0.5)
+        mean = (val_a + val_b) / 2.0
+        variance = abs(val_a - val_b) * 0.3 * variance_mult
+        child_val = random.gauss(mean, max(variance, 0.01))
+        lo, hi = TRAIT_BOUNDS.get(trait, (0.0, 1.0))
+        child_traits[trait] = round(max(lo, min(hi, child_val)), 4)
+    return child_traits
+
+
 def spawn_child(
     parent_a: Agent,
     parent_b: Agent,
@@ -228,10 +256,13 @@ def spawn_child(
     stress_b = _get_avg_valence(parent_b)
     stress = max(0.0, -(stress_a + stress_b) / 2.0)
 
-    # Inherit personality
+    # Inherit personality hyperparameters (smrti engine tuning)
     pa_profile = load_preset(parent_a.personality_preset) if parent_a.personality_preset != "inherited" else _extract_profile(parent_a)
     pb_profile = load_preset(parent_b.personality_preset) if parent_b.personality_preset != "inherited" else _extract_profile(parent_b)
     child_profile = inherit_personality(pa_profile, pb_profile, stress)
+
+    # Inherit behavioural traits
+    child_traits = inherit_traits(parent_a.traits, parent_b.traits, stress)
 
     child = AgentClass(
         name=child_name,
@@ -241,6 +272,7 @@ def spawn_child(
         db_path=db_path,
         tenant_id=tenant_id,
         parents=(parent_a.name, parent_b.name),
+        traits=child_traits,
     )
     child.personality_preset = "inherited"
     # Apply inherited personality to smrti
@@ -341,37 +373,7 @@ def _extract_profile(agent: Agent) -> PersonalityProfile:
 
 def _apply_profile_to_agent(agent: Agent, profile: PersonalityProfile) -> None:
     """Write a custom personality profile to the agent's smrti space."""
-    agent.smrti.db.execute(
-        """
-        UPDATE personality SET
-            confidence_decay_rate=?, confidence_update_lr=?, min_confidence_to_surface=?,
-            sti_decay_rate=?, sti_boost_on_access=?, sti_propagation_factor=?,
-            lti_promotion_threshold=?, valence_weight=?, valence_propagation=?,
-            mood_inertia=?, w_similarity=?, w_sti=?, w_confidence=?, w_lti=?, w_valence=?,
-            preset_name=?
-        WHERE tenant_id=? AND space=?
-        """,
-        (
-            profile.confidence_decay_rate,
-            profile.confidence_update_lr,
-            profile.min_confidence_to_surface,
-            profile.sti_decay_rate,
-            profile.sti_boost_on_access,
-            profile.sti_propagation_factor,
-            profile.lti_promotion_threshold,
-            profile.valence_weight,
-            profile.valence_propagation,
-            profile.mood_inertia,
-            profile.w_similarity,
-            profile.w_sti,
-            profile.w_confidence,
-            profile.w_lti,
-            profile.w_valence,
-            "inherited",
-            agent.smrti.tenant_id,
-            agent.smrti.write_space,
-        ),
-    )
+    agent.smrti.set_personality_profile(profile, preset_name="inherited")
 
 
 # ── Relationship gates ───────────────────────────────────────────────

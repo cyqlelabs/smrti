@@ -15,7 +15,7 @@ Point it at a local LLM and it generates a new world from scratch. Watch it run 
 pip install -e .
 
 # Start the simulation server (port 8430)
-smrti serve_town
+smrti serve town
 
 # Or directly
 PYTHONPATH=src python -m uvicorn smrti_town.server:app --port 8430

@@ -121,5 +121,47 @@ def serve_proxy(
     run_proxy_server(host=host, port=port)
 
 
+@serve_app.command("town")
+def serve_town(
+    host: str = typer.Option("127.0.0.1", help="Host"),
+    port: int = typer.Option(8430, help="Port"),
+    db: str = typer.Option("~/.smrti/town.db", help="Path to town SQLite database"),
+    tenant_id: str = typer.Option("millbrook", help="Tenant ID for the town"),
+    no_browser: bool = typer.Option(False, "--no-browser", help="Don't open browser automatically"),
+) -> None:
+    """Start the smrti-town simulation engine and open the game in a browser.
+
+    Launches the Millbrook town simulation with 6 agents, a full topology,
+    sporadic events, and the Phaser game frontend. The simulation auto-starts
+    when the browser connects via WebSocket.
+
+    Smrti (proxy/rest/mcp) should already be running separately if you need
+    LLM-backed extraction — the town engine uses its own Smrti instances
+    with the given DB path.
+    """
+    import threading
+    import time
+    import webbrowser
+
+    os.environ["SMRTI_TOWN_DB"] = db
+    os.environ["SMRTI_TOWN_TENANT"] = tenant_id
+
+    from smrti_town.server import serve
+
+    url = f"http://{host}:{port}"
+    typer.echo(f"Starting smrti-town simulation on {url}")
+    typer.echo(f"DB: {os.path.expanduser(db)} | Tenant: {tenant_id}")
+    typer.echo(f"Simulation auto-starts when browser connects.")
+
+    if not no_browser:
+        def _open():
+            time.sleep(1.5)
+            webbrowser.open(url)
+
+        threading.Thread(target=_open, daemon=True).start()
+
+    serve(host=host, port=port)
+
+
 if __name__ == "__main__":
     app()

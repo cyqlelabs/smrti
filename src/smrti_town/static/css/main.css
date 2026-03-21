@@ -1,0 +1,349 @@
+/* ================================================================
+   Smrti Town — Storybook Diorama Stylesheet
+   ================================================================ */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%; height: 100%; overflow: hidden;
+  font-family: 'Nunito', 'Segoe UI', system-ui, sans-serif;
+  background: #F5E6D0;
+  color: #3D2B1F;
+}
+
+#game-container {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+}
+
+/* ── Top Bar ───────────────────────────────────────────────────── */
+#top-bar {
+  position: fixed; top: 0; left: 0; right: 0; height: 52px; z-index: 100;
+  background: #5D3A1A;
+  border-bottom: 3px solid #3D2209;
+  display: flex; align-items: center; padding: 0 20px; gap: 20px;
+  font-size: 15px; font-weight: 600;
+  color: #FFF8F0;
+  box-shadow: 0 3px 12px rgba(93,58,26,0.4);
+}
+
+#top-bar .logo {
+  font-family: 'Fredoka', sans-serif;
+  font-size: 22px; font-weight: 700;
+  color: #FFD93D;
+  text-shadow: 1px 1px 0 rgba(0,0,0,0.3);
+  letter-spacing: -0.3px;
+}
+
+#top-bar .sep {
+  width: 2px; height: 28px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 1px;
+}
+
+#top-bar .clock-group {
+  display: flex; gap: 10px; align-items: center;
+  font-family: 'Fredoka', sans-serif;
+}
+
+#top-bar .clock-group .time-icon { font-size: 18px; }
+
+#top-bar .badge {
+  padding: 4px 12px; border-radius: 20px;
+  font-family: 'Fredoka', sans-serif;
+  font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: 0.8px;
+}
+
+.badge-scene    { background: #E8734A; color: #fff; }
+.badge-routine  { background: #D4A03C; color: #fff; }
+.badge-montage  { background: #8B4C8B; color: #fff; }
+.badge-skip     { background: #2A7B7F; color: #fff; }
+
+#top-bar .tick-counter {
+  color: rgba(255,248,240,0.5);
+  font-size: 13px;
+  font-family: 'Nunito', sans-serif;
+}
+
+#top-bar .spacer { flex: 1; }
+
+#top-bar .ws-status {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 13px;
+  font-family: 'Nunito', sans-serif;
+}
+
+#top-bar .ws-dot {
+  width: 10px; height: 10px; border-radius: 50%;
+}
+
+.ws-connected    { background: #6BCB77; box-shadow: 0 0 8px #6BCB77; }
+.ws-disconnected { background: #FF6B6B; box-shadow: 0 0 8px #FF6B6B; }
+.ws-connecting   { background: #FFD93D; box-shadow: 0 0 8px #FFD93D; animation: wsPulse 1s infinite; }
+
+@keyframes wsPulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.3; }
+}
+
+/* ── Bottom Bar ────────────────────────────────────────────────── */
+#bottom-bar {
+  position: fixed; bottom: 0; left: 0; right: 0; height: 56px; z-index: 100;
+  background: #5D3A1A;
+  border-top: 3px solid #3D2209;
+  display: flex; align-items: center; justify-content: center; gap: 12px;
+  padding: 0 20px;
+  box-shadow: 0 -3px 12px rgba(93,58,26,0.4);
+}
+
+#bottom-bar button {
+  background: rgba(255,248,240,0.12);
+  border: 2px solid rgba(255,248,240,0.2);
+  color: #FFF8F0;
+  padding: 8px 18px; border-radius: 10px;
+  cursor: pointer;
+  font-family: 'Fredoka', sans-serif;
+  font-size: 15px; font-weight: 600;
+  transition: all 0.15s ease;
+}
+
+#bottom-bar button:hover {
+  background: rgba(255,248,240,0.22);
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+}
+
+#bottom-bar button.active {
+  background: #FF6F61;
+  border-color: #FF6F61;
+  box-shadow: 0 2px 12px rgba(255,111,97,0.4);
+}
+
+#bottom-bar .sep-bar {
+  width: 2px; height: 28px;
+  background: rgba(255,255,255,0.15);
+  border-radius: 1px;
+}
+
+#bottom-bar .speed-group {
+  display: flex; align-items: center; gap: 6px;
+}
+
+#bottom-bar .speed-group label {
+  font-size: 13px;
+  color: rgba(255,248,240,0.6);
+  font-family: 'Fredoka', sans-serif;
+  margin-right: 4px;
+}
+
+#bottom-bar .speed-btn {
+  padding: 6px 12px;
+  font-size: 13px;
+  min-width: 40px;
+  text-align: center;
+}
+
+#bottom-bar .speed-btn.speed-active {
+  background: #D4A03C;
+  border-color: #D4A03C;
+  color: #3D2B1F;
+}
+
+/* ── Right Sidebar ─────────────────────────────────────────────── */
+#sidebar {
+  position: fixed; top: 52px; right: 0; width: 320px; bottom: 56px; z-index: 90;
+  background: #FFF8F0;
+  border-left: 3px solid #D4A03C;
+  overflow-y: auto;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  padding: 16px;
+  font-size: 14px;
+  box-shadow: -4px 0 16px rgba(93,58,26,0.15);
+}
+
+#sidebar.collapsed { transform: translateX(320px); }
+
+#sidebar::-webkit-scrollbar { width: 6px; }
+#sidebar::-webkit-scrollbar-thumb {
+  background: #D4A03C; border-radius: 3px;
+}
+#sidebar::-webkit-scrollbar-track { background: transparent; }
+
+#sidebar-toggle {
+  position: fixed; top: 62px; z-index: 95;
+  width: 30px; height: 30px;
+  background: #5D3A1A;
+  border: 2px solid #D4A03C;
+  border-radius: 8px;
+  color: #FFD93D;
+  cursor: pointer;
+  font-size: 16px; font-weight: 700;
+  display: flex; align-items: center; justify-content: center;
+  transition: right 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  right: 324px;
+  font-family: 'Fredoka', sans-serif;
+}
+
+#sidebar-toggle:hover {
+  background: #7B4F2A;
+}
+
+#sidebar-toggle.collapsed-pos { right: 6px; }
+
+.sb-section { margin-bottom: 16px; }
+
+.sb-section h3 {
+  font-family: 'Fredoka', sans-serif;
+  font-size: 13px; text-transform: uppercase;
+  letter-spacing: 1.2px;
+  color: #A0896E;
+  margin-bottom: 8px;
+  border-bottom: 1px solid #E8DCC8;
+  padding-bottom: 4px;
+}
+
+.sb-agent-name {
+  font-family: 'Fredoka', sans-serif;
+  font-size: 24px; font-weight: 700;
+  margin-bottom: 4px;
+}
+
+.sb-agent-info {
+  font-size: 13px;
+  color: #7A6B5A;
+  margin-bottom: 3px;
+}
+
+.sb-drive-row {
+  display: flex; align-items: center; gap: 8px;
+  margin-bottom: 6px;
+}
+
+.sb-drive-label {
+  width: 72px; font-size: 12px;
+  color: #7A6B5A;
+  text-transform: capitalize;
+  font-weight: 600;
+}
+
+.sb-drive-bar-bg {
+  flex: 1; height: 8px;
+  background: #E8DCC8;
+  border-radius: 4px;
+  overflow: hidden;
+}
+
+.sb-drive-bar {
+  height: 100%;
+  border-radius: 4px;
+  transition: width 0.5s ease;
+}
+
+.sb-drive-val {
+  width: 32px; font-size: 12px;
+  text-align: right;
+  color: #7A6B5A;
+  font-weight: 700;
+}
+
+.sb-rel-item {
+  display: flex; align-items: center; gap: 8px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+
+.sb-rel-dot {
+  width: 10px; height: 10px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  border: 1px solid rgba(0,0,0,0.1);
+}
+
+.sb-rel-name {
+  font-weight: 700;
+  color: #3D2B1F;
+}
+
+.sb-rel-state {
+  color: #A0896E;
+  font-size: 12px;
+  font-style: italic;
+}
+
+.sb-memory-item {
+  padding: 6px 0;
+  border-bottom: 1px solid #E8DCC8;
+  font-size: 13px;
+  color: #5A4A3A;
+  font-style: italic;
+}
+
+.sb-empty {
+  font-family: 'Fredoka', sans-serif;
+  font-size: 16px;
+  color: #B8A88A;
+  text-align: center;
+  padding: 50px 20px;
+  line-height: 1.5;
+}
+
+/* ── Event Log ─────────────────────────────────────────────────── */
+#event-log {
+  position: fixed; bottom: 56px; left: 0;
+  width: 380px; max-height: 260px; z-index: 90;
+  background: linear-gradient(180deg, rgba(245,230,208,0.0), rgba(245,230,208,0.92) 25%);
+  padding: 24px 14px 8px 14px;
+  overflow-y: auto;
+  pointer-events: none;
+}
+
+#event-log::-webkit-scrollbar { width: 4px; }
+#event-log::-webkit-scrollbar-thumb {
+  background: rgba(180,150,110,0.3);
+  border-radius: 2px;
+}
+
+.log-entry {
+  padding: 3px 0;
+  font-size: 13px; line-height: 1.5;
+  animation: logFadeIn 0.4s ease;
+  pointer-events: auto;
+  font-family: 'Nunito', sans-serif;
+}
+
+@keyframes logFadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.log-talk  { color: #2A7B7F; }
+.log-move  { color: #D4A03C; }
+.log-event { color: #FF6F61; }
+.log-birth { color: #E8734A; }
+.log-death { color: #8B8B8B; }
+.log-system { color: #B8A88A; }
+
+.log-time {
+  color: #B8A88A;
+  font-size: 11px;
+  margin-right: 6px;
+  font-weight: 600;
+}
+
+/* ── Tooltip (for hover) ───────────────────────────────────────── */
+#tooltip {
+  position: fixed; z-index: 200;
+  background: #FFF8F0;
+  border: 2px solid #D4A03C;
+  border-radius: 8px;
+  padding: 6px 12px;
+  font-family: 'Fredoka', sans-serif;
+  font-size: 14px; font-weight: 600;
+  color: #3D2B1F;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  box-shadow: 0 2px 8px rgba(93,58,26,0.2);
+}
+
+#tooltip.visible { opacity: 1; }

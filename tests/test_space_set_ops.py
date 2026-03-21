@@ -128,7 +128,9 @@ def test_overlap_identical_content(db, embed, atomspace):
     result = space_overlap("test", "alpha", "beta", db)
     assert result.jaccard > 0.0
     assert len(result.pairs) == 1
-    assert result.pairs[0].similarity > 0.95
+    # Contextual similarity: 0.8*emb(~1.0) + 0.2*entity_type(0.5) = ~0.9
+    # (no embed_engine → neighborhood weight redistributed to embedding)
+    assert result.pairs[0].similarity > 0.85
 
 
 def test_overlap_semantic_match(populated_spaces):
@@ -348,6 +350,110 @@ def test_bridge_atom_valence_blend(db, embed, atomspace):
     assert len(bridge_atoms) == 1
     # Blended valence should be negative (weighted toward higher-intensity source)
     assert bridge_atoms[0]["valence"] < -0.3
+
+
+# ── Contextual disambiguation tests ──────────────────────────────────
+
+
+def test_entity_type_prevents_homonym_match(db, embed, atomspace):
+    """Atoms with same label but different entity types should NOT match.
+
+    'Java' (location) and 'Java' (technology) look identical in embedding
+    space but entity_type disagreement should push contextual similarity
+    below the threshold.
+    """
+    atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Java",
+        content="Java",
+        entity_type=EntityType.LOCATION,
+        tenant_id="test", space="geography",
+    ))
+    atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Java",
+        content="Java",
+        entity_type=EntityType.CONCEPT,  # technology
+        tenant_id="test", space="programming",
+    ))
+
+    # With a standard threshold, entity-type clash should prevent the match
+    overlap = space_overlap("test", "geography", "programming", db, threshold=0.85)
+    assert len(overlap.pairs) == 0, (
+        "Homonyms with different entity_types should not match"
+    )
+
+
+def test_same_entity_type_still_matches(db, embed, atomspace):
+    """Atoms with same label AND same entity type should match."""
+    atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Python programming language",
+        content="Python programming language",
+        entity_type=EntityType.CONCEPT,
+        tenant_id="test", space="sp_a",
+    ))
+    atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Python programming language",
+        content="Python programming language",
+        entity_type=EntityType.CONCEPT,
+        tenant_id="test", space="sp_b",
+    ))
+
+    overlap = space_overlap("test", "sp_a", "sp_b", db, threshold=0.85)
+    assert len(overlap.pairs) == 1
+
+
+def test_neighborhood_disambiguates_with_embed_engine(db, embed, atomspace):
+    """When embed_engine is provided, neighborhood context should influence matching.
+
+    Two 'Java' atoms with different neighborhoods (Indonesia vs JVM) should
+    be penalized by the neighborhood signal even when entity_type is missing.
+    """
+    # Space A: Java connected to Indonesia, Bali
+    java_geo_id = atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Java",
+        content="Java",
+        tenant_id="test", space="geo",
+    ))
+    indo_id = atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Indonesia archipelago",
+        content="Indonesia archipelago",
+        tenant_id="test", space="geo",
+    ))
+    bali_id = atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Bali tropical island",
+        content="Bali tropical island",
+        tenant_id="test", space="geo",
+    ))
+    atomspace.link_atoms(java_geo_id, indo_id, "part_of", "test", "geo")
+    atomspace.link_atoms(java_geo_id, bali_id, "associated", "test", "geo")
+
+    # Space B: Java connected to JVM, Spring Framework
+    java_tech_id = atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Java",
+        content="Java",
+        tenant_id="test", space="tech",
+    ))
+    jvm_id = atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="JVM virtual machine runtime",
+        content="JVM virtual machine runtime",
+        tenant_id="test", space="tech",
+    ))
+    spring_id = atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label="Spring Framework enterprise software",
+        content="Spring Framework enterprise software",
+        tenant_id="test", space="tech",
+    ))
+    atomspace.link_atoms(java_tech_id, jvm_id, "runs_on", "test", "tech")
+    atomspace.link_atoms(java_tech_id, spring_id, "associated", "test", "tech")
+
+    # With embed_engine, neighborhood divergence should prevent the match
+    overlap = space_overlap(
+        "test", "geo", "tech", db, threshold=0.85, embed_engine=embed,
+    )
+    # "Java" should NOT match "Java" because neighborhoods diverge
+    java_pairs = [p for p in overlap.pairs if p.atom_a.label == "Java"]
+    assert len(java_pairs) == 0, (
+        "Homonyms with divergent neighborhoods should not match"
+    )
 
 
 # ── Smrti facade tests ───────────────────────────────────────────────

@@ -288,30 +288,30 @@ class Smrti:
 
     def space_overlap(self, other_space: str, threshold: float = 0.85):
         """Compute overlap (Jaccard + matched pairs) between write_space and another space."""
-        return _space_overlap(self.tenant_id, self.write_space, other_space, self.db, threshold)
+        return _space_overlap(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
 
     def space_intersection(self, other_space: str, threshold: float = 0.85):
         """Return atoms that exist in both write_space and other_space."""
-        return _space_intersection(self.tenant_id, self.write_space, other_space, self.db, threshold)
+        return _space_intersection(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
 
     def space_difference(self, other_space: str, threshold: float = 0.85):
         """Return atoms in write_space that have no match in other_space."""
-        return _space_difference(self.tenant_id, self.write_space, other_space, self.db, threshold)
+        return _space_difference(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
 
     def space_union(self, other_space: str, threshold: float = 0.85):
         """Return deduplicated union of atoms from write_space and other_space."""
-        return _space_union(self.tenant_id, self.write_space, other_space, self.db, threshold)
+        return _space_union(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
 
     def space_symmetric_difference(self, other_space: str, threshold: float = 0.85):
         """Return atoms that are in one space but not the other."""
-        return _space_symmetric_difference(self.tenant_id, self.write_space, other_space, self.db, threshold)
+        return _space_symmetric_difference(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
 
     def materialize_bridge(self, other_space: str, threshold: float = 0.85, min_jaccard: float = 0.1) -> int:
         """Compute overlap and materialize a bridge space if Jaccard >= min_jaccard.
 
         Returns the number of bridge atoms created.
         """
-        overlap = _space_overlap(self.tenant_id, self.write_space, other_space, self.db, threshold)
+        overlap = _space_overlap(self.tenant_id, self.write_space, other_space, self.db, threshold, self.embed)
         return _materialize_bridge(overlap, self.tenant_id, self.db, self.embed, self.atomspace, min_jaccard)
 
     def list_spaces(self) -> list[str]:

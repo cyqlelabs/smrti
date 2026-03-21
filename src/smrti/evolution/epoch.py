@@ -225,7 +225,7 @@ def _discover_bridges(tenant_id: str, space: str, db, embed_engine) -> int:
         # Skip already-materialized bridge spaces to avoid recursion
         if "_x_" in other:
             continue
-        overlap = space_overlap(tenant_id, space, other, db, threshold=0.85)
+        overlap = space_overlap(tenant_id, space, other, db, threshold=0.85, embed_engine=embed_engine)
         total += materialize_bridge(
             overlap, tenant_id, db, embed_engine, atomspace, min_jaccard=0.1,
         )

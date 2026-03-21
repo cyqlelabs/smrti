@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import queue
 import sqlite3
 import threading
@@ -7,6 +8,20 @@ from contextlib import contextmanager
 from typing import Any
 
 import sqlite_vec
+
+_registry: dict[str, "Database"] = {}
+_registry_lock = threading.Lock()
+
+
+def get_database(db_path: str) -> "Database":
+    """Return a shared Database for db_path, creating it on first call."""
+    resolved = os.path.expanduser(db_path)
+    with _registry_lock:
+        if resolved not in _registry:
+            db = Database(resolved)
+            db.initialize()
+            _registry[resolved] = db
+        return _registry[resolved]
 
 
 _SCHEMA_SQL = """

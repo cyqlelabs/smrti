@@ -145,9 +145,13 @@ def generate_sporadic_events(
 def apply_sporadic_effects(
     event: SporadicEvent,
     agents_by_name: dict[str, Agent],
-) -> None:
-    """Apply mechanical effects of a sporadic event to agents."""
+) -> dict[str, str]:
+    """Apply mechanical effects of a sporadic event to agents.
+
+    Returns a mapping of agent_name -> episode_id for affected agents.
+    """
     energy_effect = _EVENT_ENERGY_EFFECT.get(event.event_id, 0)
+    episode_ids: dict[str, str] = {}
 
     for agent_name in event.affected_agents:
         agent = agents_by_name.get(agent_name)
@@ -178,14 +182,18 @@ def apply_sporadic_effects(
         if not agent or not agent.alive:
             continue
         try:
-            agent.smrti.remember(
+            ep_id = agent.smrti.remember(
                 content=event.description,
                 type="episode",
                 valence=event.valence,
                 metadata={"event_type": event.event_id},
             )
+            if ep_id:
+                episode_ids[agent_name] = ep_id
         except Exception:
             pass
+
+    return episode_ids
 
 
 def _season_modifier(event_id: str, base_prob: float, season: str) -> float:

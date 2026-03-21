@@ -32,6 +32,11 @@ TOWN.connectWS = function() {
   ws.onmessage = function(evt) {
     try {
       var data = JSON.parse(evt.data);
+      if (data.type === 'reset') {
+        /* World regenerated — clear local state before new data arrives */
+        if (typeof TOWN._handleReset === 'function') TOWN._handleReset();
+        return;
+      }
       TOWN.state.tickQueue.push(data);
     } catch (e) {
       /* Ignore malformed messages */

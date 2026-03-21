@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 from smrti import Smrti
 
 from smrti_town.agent import Agent
@@ -9,10 +11,14 @@ from smrti_town.calendar import SimCalendar
 from smrti_town.engine import SimEngine
 from smrti_town.spatial import TownTopology, build_millbrook_topology
 
+if TYPE_CHECKING:
+    from smrti_town.llm import LLMClient
+
 
 def create_millbrook(
     db_path: str = "~/.smrti/town.db",
     tenant_id: str = "millbrook",
+    llm_client: "LLMClient | None" = None,
 ) -> SimEngine:
     """Create the Millbrook scenario with 6 starting agents and full town layout."""
 
@@ -124,6 +130,7 @@ def create_millbrook(
         calendar=calendar,
         db_path=db_path,
         tenant_id=tenant_id,
+        llm_client=llm_client,
     )
 
     return engine

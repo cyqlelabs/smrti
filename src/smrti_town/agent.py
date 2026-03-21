@@ -25,8 +25,10 @@ from smrti_town.config import (
     GREETINGS,
     LIFE_STAGES,
     PERSONALITY_ACTION_BIAS,
+    PRESET_TRAITS,
     ROMANTIC_LINES,
     SMALL_TALK,
+    TRAIT_NAMES,
 )
 from smrti_town.drives import AgentDrives
 
@@ -88,6 +90,7 @@ class Agent:
         db_path: str = "~/.smrti/town.db",
         tenant_id: str = "millbrook",
         parents: tuple[str, str] | None = None,
+        traits: dict[str, float] | None = None,
     ) -> None:
         self.name = name
         self.personality_preset = personality
@@ -102,6 +105,12 @@ class Agent:
         self._interaction_counts: dict[str, int] = {}  # target_name -> count
         self._db_path = db_path
         self._tenant_id = tenant_id
+
+        # Behavioural traits — heritable floats 0..1 that modulate decisions.
+        # Initialised from preset if not explicitly provided.
+        self.traits: dict[str, float] = traits or dict(
+            PRESET_TRAITS.get(personality, PRESET_TRAITS["balanced"])
+        )
 
         # Smrti instance — write to agent's private space, read from
         # agent space + world + culture
@@ -151,6 +160,51 @@ class Agent:
     @property
     def energy_decay_mult(self) -> float:
         return self.life_stage_info.get("energy_decay_mult", 1.0)
+
+    def effective_action_bias(self) -> dict[str, float]:
+        """Compute action bias by blending preset defaults with behavioural traits.
+
+        Traits modulate the preset bias:
+          - shyness     lowers social bias
+          - proactivity raises all non-social biases slightly
+          - laziness    lowers duty bias
+          - adventurous raises wander bias
+          - creativity  raises curiosity bias
+          - nurturing   raises romance & social bias
+          - leadership  raises social bias (initiator tendency)
+        """
+        base = dict(PERSONALITY_ACTION_BIAS.get(
+            self.personality_preset, PERSONALITY_ACTION_BIAS["balanced"]
+        ))
+        t = self.traits
+
+        # Shyness inverts social tendency
+        base["social"] = max(0.0, min(1.0,
+            base["social"] * (1.0 - t.get("shyness", 0.3) * 0.8)
+            + t.get("leadership", 0.4) * 0.3
+            + t.get("nurturing", 0.5) * 0.2
+        ))
+
+        # Laziness suppresses duty
+        base["duty"] = max(0.0, min(1.0,
+            base["duty"] * (1.0 - t.get("laziness", 0.3) * 0.7)
+            + t.get("proactivity", 0.5) * 0.15
+        ))
+
+        # Adventurousness and creativity boost wander and curiosity
+        base["wander"] = max(0.0, min(1.0,
+            base["wander"] + t.get("adventurous", 0.4) * 0.4
+        ))
+        base["curiosity"] = max(0.0, min(1.0,
+            base["curiosity"] + t.get("creativity", 0.5) * 0.2
+        ))
+
+        # Nurturing boosts romance
+        base["romance"] = max(0.0, min(1.0,
+            base["romance"] + t.get("nurturing", 0.5) * 0.2
+        ))
+
+        return base
 
     def increment_interaction(self, target_name: str) -> None:
         self._interaction_counts[target_name] = (
@@ -285,7 +339,7 @@ class Agent:
         place_agents: dict[str, list[str]],
     ) -> Action:
         drive = ctx.urgent_drive
-        bias = PERSONALITY_ACTION_BIAS.get(self.personality_preset, PERSONALITY_ACTION_BIAS["balanced"])
+        bias = self.effective_action_bias()
 
         if drive == "hunger":
             return self._decide_eat(ctx, available_places)
@@ -339,21 +393,32 @@ class Agent:
         place_agents: dict[str, list[str]],
         bias: dict,
     ) -> Action:
-        # Talk to someone nearby
-        if ctx.nearby_agents:
-            target = random.choice(ctx.nearby_agents)
+        shyness = self.traits.get("shyness", 0.3)
+
+        # Talk to someone nearby (shy agents are less likely to initiate)
+        if ctx.nearby_agents and random.random() > shyness * 0.6:
+            # Leadership trait: leaders pick the most-connected agent
+            if self.traits.get("leadership", 0.4) > 0.6:
+                scored = [(a, self.get_interaction_count(a)) for a in ctx.nearby_agents]
+                scored.sort(key=lambda x: x[1])
+                target = scored[0][0]  # least known — leaders reach out
+            else:
+                target = random.choice(ctx.nearby_agents)
             dialogue = self._generate_social_dialogue(target, ctx)
             return Action(type=ACTION_TALK, target=target, dialogue=dialogue)
 
-        # Move toward populated places
+        # Shy agents avoid crowded places; seek smaller groups or solitude
         social_bias = bias.get("social", 0.5)
         populated = [
             (p, agents) for p, agents in place_agents.items()
             if agents and p != self.location and p in available_places
         ]
         if populated and random.random() < social_bias:
-            # Prefer the place with the most people
-            populated.sort(key=lambda x: len(x[1]), reverse=True)
+            if shyness > 0.6:
+                # Shy: prefer the place with fewest people (still not empty)
+                populated.sort(key=lambda x: len(x[1]))
+            else:
+                populated.sort(key=lambda x: len(x[1]), reverse=True)
             target_place = populated[0][0]
             return Action(type=ACTION_MOVE, target=target_place, dialogue="Going to find some company.")
 
@@ -416,7 +481,12 @@ class Agent:
         available_places: list[str],
         place_agents: dict[str, list[str]],
     ) -> Action:
-        bias = PERSONALITY_ACTION_BIAS.get(self.personality_preset, PERSONALITY_ACTION_BIAS["balanced"])
+        bias = self.effective_action_bias()
+        stubbornness = self.traits.get("stubbornness", 0.3)
+        proactivity = self.traits.get("proactivity", 0.5)
+
+        # Proactive agents are more likely to do something even when idle
+        idle_threshold = 0.5 * (1.0 - proactivity * 0.6)
 
         # Talk to nearby agents if social-leaning personality
         if ctx.nearby_agents and random.random() < bias.get("social", 0.5):
@@ -424,17 +494,23 @@ class Agent:
             dialogue = self._generate_social_dialogue(target, ctx)
             return Action(type=ACTION_TALK, target=target, dialogue=dialogue)
 
-        # Wander if wander-leaning
-        if random.random() < bias.get("wander", 0.3):
+        # Stubborn agents are less likely to leave their current location
+        wander_chance = bias.get("wander", 0.3) * (1.0 - stubbornness * 0.5)
+        if random.random() < wander_chance:
             candidates = [p for p in available_places if p != self.location]
             if candidates:
                 target = random.choice(candidates)
                 return Action(type=ACTION_WANDER, target=target, dialogue="Just taking a walk.")
 
-        # Study if curiosity-leaning
-        if random.random() < bias.get("curiosity", 0.5) * 0.3:
-            if self.location == "Public_Library":
+        # Study if curiosity-leaning (proactive agents don't need to be at the library)
+        curiosity_chance = bias.get("curiosity", 0.5) * 0.3
+        if random.random() < curiosity_chance:
+            if self.location == "Public_Library" or proactivity > 0.7:
                 return Action(type=ACTION_STUDY, dialogue=random.choice(CURIOSITY_TOPICS))
+
+        # Lazy agents are content to do nothing
+        if random.random() < idle_threshold:
+            return Action(type=ACTION_WAIT, dialogue=f"{self.name} relaxes.")
 
         return Action(type=ACTION_WAIT, dialogue=f"{self.name} relaxes.")
 
@@ -485,6 +561,7 @@ class Agent:
             "life_stage": self.life_stage,
             "alive": self.alive,
             "personality": self.personality_preset,
+            "traits": {k: round(v, 3) for k, v in self.traits.items()},
             "drives": self.drives.to_dict(),
             "inventory": self.inventory,
             "parents": list(self.parents) if self.parents else None,

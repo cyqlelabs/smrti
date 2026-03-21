@@ -39,6 +39,24 @@ class AgentDrives:
     duty: int = 0
     romance: int = 0
 
+    # Fractional accumulators — drives are integers but small deltas
+    # (e.g. 0.25h scene ticks) produce sub-1.0 increments. We accumulate
+    # the fractional remainder here and add whole units once they reach 1.
+    _frac_hunger: float = 0.0
+    _frac_energy: float = 0.0
+    _frac_social: float = 0.0
+    _frac_curiosity: float = 0.0
+    _frac_duty: float = 0.0
+    _frac_romance: float = 0.0
+
+    def _acc(self, frac_attr: str, drive_attr: str, raw: float, sign: int = 1) -> None:
+        """Accumulate a fractional drive change, applying whole units."""
+        frac = getattr(self, frac_attr) + raw
+        whole = int(frac)
+        setattr(self, frac_attr, frac - whole)
+        if whole != 0:
+            setattr(self, drive_attr, _clamp(getattr(self, drive_attr) + sign * whole))
+
     def accumulate(
         self,
         delta_hours: float,
@@ -54,18 +72,17 @@ class AgentDrives:
         }
 
         if "hunger" in allowed:
-            self.hunger = _clamp(self.hunger + int(HUNGER_RATE * delta_hours))
+            self._acc("_frac_hunger", "hunger", HUNGER_RATE * delta_hours)
         if "energy" in allowed:
-            drain = int(ENERGY_DRAIN_RATE * delta_hours * energy_decay_mult)
-            self.energy = _clamp(self.energy - drain)
+            self._acc("_frac_energy", "energy", ENERGY_DRAIN_RATE * delta_hours * energy_decay_mult, sign=-1)
         if "social" in allowed:
-            self.social = _clamp(self.social + int(SOCIAL_RATE * delta_hours))
+            self._acc("_frac_social", "social", SOCIAL_RATE * delta_hours)
         if "curiosity" in allowed:
-            self.curiosity = _clamp(self.curiosity + int(CURIOSITY_RATE * delta_hours))
+            self._acc("_frac_curiosity", "curiosity", CURIOSITY_RATE * delta_hours)
         if "duty" in allowed and is_work_hours and is_adult:
-            self.duty = _clamp(self.duty + int(DUTY_RATE * delta_hours))
+            self._acc("_frac_duty", "duty", DUTY_RATE * delta_hours)
         if "romance" in allowed and is_adult:
-            self.romance = _clamp(self.romance + int(ROMANCE_RATE * delta_hours))
+            self._acc("_frac_romance", "romance", ROMANCE_RATE * delta_hours)
 
     def reset_hunger(self) -> None:
         self.hunger = HUNGER_RESET

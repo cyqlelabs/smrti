@@ -167,6 +167,61 @@ PARAM_BOUNDS = {
 STRESS_VARIANCE_BASE = 1.0
 STRESS_VARIANCE_MAX_MULT = 3.0
 
+# ── Behavioural personality traits ───────────────────────────────────
+# Heritable traits (0.0–1.0) that modulate the rule-based decision
+# system. They sit alongside the Smrti personality hyperparameters
+# but govern *behaviour*, not memory-engine tuning.
+#
+# Each trait modulates specific decision paths:
+#   shyness      — inverts social drive probability; shy agents avoid crowds
+#   proactivity  — increases probability of acting on low-urgency drives
+#   leadership   — when co-located, leader initiates conversations first
+#   laziness     — reduces probability of duty/work actions
+#   adventurous  — increases wander probability; seeks unvisited places
+#   nurturing    — boosts positive valence of social interactions
+#   stubbornness — reduces probability of changing current action/location
+#   creativity   — boosts curiosity-driven actions and diverse dialogue topics
+TRAIT_NAMES = [
+    "shyness",
+    "proactivity",
+    "leadership",
+    "laziness",
+    "adventurous",
+    "nurturing",
+    "stubbornness",
+    "creativity",
+]
+
+TRAIT_BOUNDS = {t: (0.0, 1.0) for t in TRAIT_NAMES}
+
+# Default trait profiles derived from personality presets
+PRESET_TRAITS = {
+    "balanced": {
+        "shyness": 0.3, "proactivity": 0.5, "leadership": 0.4, "laziness": 0.3,
+        "adventurous": 0.4, "nurturing": 0.5, "stubbornness": 0.3, "creativity": 0.5,
+    },
+    "analytical": {
+        "shyness": 0.6, "proactivity": 0.4, "leadership": 0.3, "laziness": 0.2,
+        "adventurous": 0.2, "nurturing": 0.3, "stubbornness": 0.7, "creativity": 0.6,
+    },
+    "curious": {
+        "shyness": 0.2, "proactivity": 0.7, "leadership": 0.3, "laziness": 0.4,
+        "adventurous": 0.8, "nurturing": 0.4, "stubbornness": 0.2, "creativity": 0.8,
+    },
+    "empathetic": {
+        "shyness": 0.4, "proactivity": 0.6, "leadership": 0.5, "laziness": 0.3,
+        "adventurous": 0.3, "nurturing": 0.9, "stubbornness": 0.2, "creativity": 0.5,
+    },
+    "maverick": {
+        "shyness": 0.1, "proactivity": 0.8, "leadership": 0.6, "laziness": 0.5,
+        "adventurous": 0.9, "nurturing": 0.3, "stubbornness": 0.6, "creativity": 0.7,
+    },
+    "deterministic": {
+        "shyness": 0.5, "proactivity": 0.4, "leadership": 0.7, "laziness": 0.1,
+        "adventurous": 0.1, "nurturing": 0.3, "stubbornness": 0.8, "creativity": 0.3,
+    },
+}
+
 # ── Personality → agent behaviour mapping ────────────────────────────
 # Maps personality presets to behavioural biases used by the rule-based
 # decision system. Higher value = stronger preference for that action

@@ -9,6 +9,7 @@ from smrti import Smrti
 
 from smrti_town.agent import Agent
 from smrti_town.calendar import SimCalendar
+from smrti_town.config import PRESET_TRAITS
 from smrti_town.engine import SimEngine
 from smrti_town.spatial import Place, TownTopology
 

@@ -387,10 +387,15 @@ class SimEngine:
             self._run_epoch()
             self._last_epoch_hours = self.calendar.total_hours
 
-            # Relationship gate checks
+            # Relationship gate checks (deduplicate pairs)
+            seen_pairs: set[tuple[str, str]] = set()
             for agent in alive_agents:
                 transitions = check_relationship_gates(agent, self.agents)
                 for t in transitions:
+                    pair = tuple(sorted([t.agent_name, t.target_name]))
+                    if pair in seen_pairs:
+                        continue
+                    seen_pairs.add(pair)
                     narratives = apply_relationship_transition(t, self._agents_by_name)
                     relationship_changes.extend(narratives)
                     events.append({
@@ -447,6 +452,8 @@ class SimEngine:
 
         elif action.type == ACTION_TALK:
             agent.drives.reduce_social()
+            if agent.drives.romance >= 40:
+                agent.drives.reduce_romance()
             if action.target:
                 target_agent = self._agents_by_name.get(action.target)
                 if target_agent:

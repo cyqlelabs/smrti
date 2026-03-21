@@ -1638,7 +1638,11 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
 
       // Wait for hero reveal animation to finish (~800ms)
       setTimeout(function() {
-        var tl = anime.timeline({ easing: 'easeOutExpo' });
+        var tl = anime.timeline({
+          easing: 'easeOutExpo',
+          direction: 'alternate',
+          loop: true
+        });
 
         // 1. Draw halos (stroke-dashoffset)
         var halos = document.querySelectorAll('.logo-halo');
@@ -1699,8 +1703,17 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           duration: 500
         }, '-=300');
 
-        // 6. Breathing pulse ring (loops forever)
+        // 6. Hold fully drawn state before reversing
         tl.add({
+          targets: '.logo-pulse',
+          r: [9, 12],
+          opacity: [0.35, 0.15],
+          duration: 2500,
+          easing: 'easeInOutSine'
+        }, '-=200');
+
+        // Separate breathing pulse that runs independently
+        anime({
           targets: '.logo-pulse',
           r: [9, 13],
           opacity: [0.35, 0.08],
@@ -1708,7 +1721,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           easing: 'easeInOutSine',
           direction: 'alternate',
           loop: true
-        }, '-=200');
+        });
 
       }, 800);
     })();

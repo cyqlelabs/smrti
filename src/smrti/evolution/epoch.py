@@ -183,16 +183,17 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     )
     atoms_pruned = len(dead_rows)
 
-    for row in dead_rows:
-        atom_id = row["id"]
+    if dead_rows:
+        atom_ids = [row["id"] for row in dead_rows]
+        ph = ",".join("?" * len(atom_ids))
         db.execute(
-            "DELETE FROM atoms WHERE type = 'relation' AND (source_id = ? OR target_id = ?)",
-            (atom_id, atom_id),
+            f"DELETE FROM atoms WHERE type = 'relation' AND (source_id IN ({ph}) OR target_id IN ({ph}))",
+            (*atom_ids, *atom_ids),
         )
-        db.execute("DELETE FROM vec_atoms WHERE atom_id = ?", (atom_id,))
-        db.execute("DELETE FROM evidence WHERE atom_id = ?", (atom_id,))
-        db.execute("DELETE FROM aliases WHERE atom_id = ?", (atom_id,))
-        db.execute("DELETE FROM atoms WHERE id = ?", (atom_id,))
+        db.execute(f"DELETE FROM vec_atoms WHERE atom_id IN ({ph})", tuple(atom_ids))
+        db.execute(f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(atom_ids))
+        db.execute(f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(atom_ids))
+        db.execute(f"DELETE FROM atoms WHERE id IN ({ph})", tuple(atom_ids))
 
     return EpochResult(
         beliefs_updated=beliefs_updated,

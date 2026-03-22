@@ -128,10 +128,9 @@ def retrieve(
     # Boost STI on accessed atoms within write_space only — reading from a
     # foreign space must not mutate that space's attention weights.
     if sti_boost > 0 and top_results:
-        for r in top_results:
-            db.execute(
-                "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ? AND tenant_id = ? AND space = ?",
-                (sti_boost, r.atom.id, tenant_id, write_space),
-            )
+        db.execute_many(
+            "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ? AND tenant_id = ? AND space = ?",
+            [(sti_boost, r.atom.id, tenant_id, write_space) for r in top_results],
+        )
 
     return top_results

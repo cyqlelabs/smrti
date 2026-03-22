@@ -165,18 +165,50 @@ class Agent:
         return self._interaction_counts.get(target_name, 0)
 
     def effective_action_bias(self) -> dict[str, float]:
-        """Return action bias dict, blending personality preset with traits."""
+        """Return action bias dict, blending personality preset with all traits."""
         from smrti_town.config import PERSONALITY_ACTION_BIAS
         base = dict(PERSONALITY_ACTION_BIAS.get(
             self.personality_preset,
             PERSONALITY_ACTION_BIAS["balanced"],
         ))
-        # Modulate with behavioural traits
         shyness = self.traits.get("shyness", 0.3)
         adventurous = self.traits.get("adventurous", 0.4)
-        base["social"] = max(0.0, min(1.0, base.get("social", 0.5) * (1.0 - shyness * 0.5)))
-        base["wander"] = max(0.0, min(1.0, base.get("wander", 0.3) * (1.0 + adventurous * 0.5)))
+        laziness = self.traits.get("laziness", 0.3)
+        leadership = self.traits.get("leadership", 0.4)
+        creativity = self.traits.get("creativity", 0.5)
+        nurturing = self.traits.get("nurturing", 0.5)
+        stubbornness = self.traits.get("stubbornness", 0.3)
+        # Shyness reduces social, leadership amplifies it
+        base["social"] = max(0.0, min(1.0, base.get("social", 0.5) * (1.0 - shyness * 0.5) * (1.0 + leadership * 0.3)))
+        # Adventurous boosts wander, stubbornness suppresses it
+        base["wander"] = max(0.0, min(1.0, base.get("wander", 0.3) * (1.0 + adventurous * 0.5) * (1.0 - stubbornness * 0.4)))
+        # Creativity amplifies curiosity-driven actions
+        base["curiosity"] = max(0.0, min(1.0, base.get("curiosity", 0.5) * (1.0 + creativity * 0.4)))
+        # Laziness suppresses duty/work
+        base["duty"] = max(0.0, min(1.0, base.get("duty", 0.5) * (1.0 - laziness * 0.5)))
+        # Nurturing amplifies romance/social warmth
+        base["romance"] = max(0.0, min(1.0, base.get("romance", 0.5) * (1.0 + nurturing * 0.2)))
         return base
+
+    def _memory_valence_for_agent(self, agent_name: str, memories: list[dict]) -> float:
+        """Return average valence of memories that mention a given agent name."""
+        vals = [m["valence"] for m in memories if agent_name in (m.get("content") or "")]
+        return sum(vals) / len(vals) if vals else 0.0
+
+    def _memory_preferred_location(self, candidates: list[str], memories: list[dict]) -> str | None:
+        """Return the candidate location with the strongest positive memory association."""
+        scores: dict[str, float] = {}
+        for m in memories:
+            content = (m.get("content") or "").lower()
+            for place in candidates:
+                key = place.lower().replace("_", " ")
+                if key in content or place.lower() in content:
+                    scores[place] = scores.get(place, 0.0) + m.get("valence", 0.0)
+        if scores:
+            best = max(scores, key=lambda k: scores[k])
+            if scores[best] > 0.2:
+                return best
+        return None
 
     def persist_interactions(self) -> None:
         """Save interaction counts directly to the Smrti DB."""
@@ -351,7 +383,7 @@ class Agent:
         place_agents: dict[str, list[str]],
     ) -> Action:
         drive = ctx.urgent_drive
-        bias = PERSONALITY_ACTION_BIAS.get(self.personality_preset, PERSONALITY_ACTION_BIAS["balanced"])
+        bias = self.effective_action_bias()
 
         if drive == "hunger":
             return self._decide_eat(ctx, available_places)
@@ -395,10 +427,20 @@ class Agent:
         place_agents: dict[str, list[str]],
         bias: dict,
     ) -> Action:
-        # Talk to someone nearby
+        # Talk to someone nearby — prefer agents with positive memory association
         if ctx.nearby_agents:
-            target = random.choice(ctx.nearby_agents)
-            return Action(type=ACTION_TALK, target=target)
+            stubbornness = self.traits.get("stubbornness", 0.3)
+            candidates = []
+            for name in ctx.nearby_agents:
+                mem_val = self._memory_valence_for_agent(name, ctx.memories)
+                # Stubborn agents avoid those they remember negatively
+                if mem_val < -0.3 and random.random() < stubbornness:
+                    continue
+                candidates.append((name, mem_val))
+            if not candidates:
+                candidates = [(name, 0.0) for name in ctx.nearby_agents]
+            candidates.sort(key=lambda x: x[1], reverse=True)
+            return Action(type=ACTION_TALK, target=candidates[0][0])
 
         # Move toward populated places
         social_bias = bias.get("social", 0.5)
@@ -407,15 +449,21 @@ class Agent:
             if agents and p != self.location and p in available_places
         ]
         if populated and random.random() < social_bias:
-            # Prefer the place with the most people
+            # Prefer the place with the most people, biased by positive memories
             populated.sort(key=lambda x: len(x[1]), reverse=True)
             target_place = populated[0][0]
+            mem_place = self._memory_preferred_location(
+                [p for p, _ in populated], ctx.memories
+            )
+            if mem_place:
+                target_place = mem_place
             return Action(type=ACTION_MOVE, target=target_place)
 
-        # Go to a social hub
+        # Go to a social hub — prefer one with positive memories
         social_places = [p for p in available_places if ctx.place_types.get(p) in ("public", "outdoor")]
         if social_places and self.location not in social_places:
-            return Action(type=ACTION_MOVE, target=random.choice(social_places))
+            mem_place = self._memory_preferred_location(social_places, ctx.memories)
+            return Action(type=ACTION_MOVE, target=mem_place or random.choice(social_places))
 
         return Action(type=ACTION_WAIT)
 
@@ -446,14 +494,15 @@ class Agent:
         place_agents: dict[str, list[str]],
         bias: dict,
     ) -> Action:
-        # Look for romantic partners nearby
+        # Look for romantic partners nearby — weight by interaction history and memory valence
         romance_bias = bias.get("romance", 0.5)
         if ctx.nearby_agents and random.random() < romance_bias:
-            # Prefer agents with high interaction count
-            scored = [
-                (a, self.get_interaction_count(a))
-                for a in ctx.nearby_agents
-            ]
+            scored = []
+            for a in ctx.nearby_agents:
+                mem_val = self._memory_valence_for_agent(a, ctx.memories)
+                # Combine interaction count and memory valence
+                score = self.get_interaction_count(a) + mem_val * 5
+                scored.append((a, score))
             scored.sort(key=lambda x: x[1], reverse=True)
             target = scored[0][0]
             return Action(type=ACTION_TALK, target=target)
@@ -471,7 +520,7 @@ class Agent:
         available_places: list[str],
         place_agents: dict[str, list[str]],
     ) -> Action:
-        bias = PERSONALITY_ACTION_BIAS.get(self.personality_preset, PERSONALITY_ACTION_BIAS["balanced"])
+        bias = self.effective_action_bias()
 
         # Talk to nearby agents if social-leaning personality
         if ctx.nearby_agents and random.random() < bias.get("social", 0.5):

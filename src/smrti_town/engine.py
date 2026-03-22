@@ -143,6 +143,7 @@ class SimEngine:
 
         # Agents by name for fast lookup
         self._agents_by_name: dict[str, Agent] = {a.name: a for a in agents}
+        self._agent_last_location: dict[str, str] = {}
 
     def set_broadcast(self, callback: Callable[[dict], Any]) -> None:
         self._broadcast = callback
@@ -297,7 +298,7 @@ class SimEngine:
                 ):
                     # Small probability per interaction when gate is met
                     import random
-                    if random.random() < 0.02:
+                    if random.random() < 0.005:
                         child = spawn_child(
                             agent, target_agent, self.agents, self.db_path, self.tenant_id
                         )
@@ -411,7 +412,7 @@ class SimEngine:
         # ── Phase 7: Epoch (periodic) ────────────────────────────────
         hours_since_epoch = self.calendar.total_hours - self._last_epoch_hours
         if hours_since_epoch >= EPOCH_INTERVAL_HOURS or delta >= TICK_SKIP:
-            self._run_epoch()
+            await asyncio.to_thread(self._run_epoch)
             self._last_epoch_hours = self.calendar.total_hours
 
             # Relationship gate checks (deduplicate pairs)
@@ -502,7 +503,9 @@ class SimEngine:
     # ── Read spaces update ───────────────────────────────────────────
 
     def _update_agent_read_spaces(self, agent: Agent) -> None:
-        """Update agent's read_spaces based on current location."""
+        """Update agent's read_spaces based on current location (skips if unchanged)."""
+        if self._agent_last_location.get(agent.name) == agent.location:
+            return
         spaces = [
             f"Agent_Space_{agent.name}",
             "World_Space",
@@ -513,6 +516,7 @@ class SimEngine:
         if place and place.has_space:
             spaces.append(place.space_name)
         agent.smrti.read_spaces = spaces
+        self._agent_last_location[agent.name] = agent.location
 
     # ── Milestone injection ──────────────────────────────────────────
 
@@ -573,17 +577,15 @@ class SimEngine:
                 pass
 
     def _get_all_spaces(self) -> list[str]:
-        """Get all spaces for this tenant from the DB."""
+        """Get all spaces for this tenant from the DB (direct query, no Smrti init)."""
         try:
-            smrti = Smrti(
-                db_path=self.db_path,
-                personality="balanced",
-                tenant_id=self.tenant_id,
-                write_space="World_Space",
+            from smrti.core.db import get_database
+            db = get_database(self.db_path)
+            rows = db.fetchall(
+                "SELECT DISTINCT space FROM atoms WHERE tenant_id = ?",
+                (self.tenant_id,),
             )
-            spaces = smrti.list_spaces()
-            smrti.close()
-            return spaces
+            return [r["space"] for r in rows]
         except Exception:
             return []
 

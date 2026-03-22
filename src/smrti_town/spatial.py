@@ -141,6 +141,20 @@ class TownTopology:
         """Return names of all places with a given place_type."""
         return [name for name, p in self.places.items() if p.place_type == place_type]
 
+    def places_by_type(self, place_type: str) -> list[str]:
+        """Alias for places_of_type."""
+        return self.places_of_type(place_type)
+
+    def home_for(self, agent_name: str) -> str | None:
+        """Return the home place whose name contains agent_name, or any home as fallback."""
+        homes = self.places_of_type("home")
+        if not homes:
+            return None
+        for name in homes:
+            if agent_name in name:
+                return name
+        return homes[0]
+
     def move_agent(self, agent_name: str, from_place: str, to_place: str) -> None:
         if from_place in self.places:
             self.places[from_place].remove_occupant(agent_name)

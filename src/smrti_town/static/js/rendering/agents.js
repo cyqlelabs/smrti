@@ -271,9 +271,23 @@ TOWN.updateAgentSprite = function(scene, agent) {
   var headOffY = radius * 2 + 14;
 
   /* Target iso position */
-  var pos = TOWN.getPlaceCenter(agent.location || 'Main_Street');
+  var wx, wy;
+  if (agent.world_pos && agent.world_pos[0] !== 0) {
+    wx = agent.world_pos[0];
+    wy = agent.world_pos[1];
+  } else {
+    var place = TOWN.state.town.places[agent.location];
+    if (place) {
+      wx = place.x + place.w / 2;
+      wy = place.y + place.h / 2;
+    } else {
+      var pos_ = TOWN.getPlaceCenter(agent.location || 'Main_Street');
+      wx = pos_.x;
+      wy = pos_.y;
+    }
+  }
   var off = TOWN.getAgentOffset(name, agent.location);
-  var tx = pos.x + off.dx, ty = pos.y + off.dy;
+  var tx = wx + off.dx, ty = wy + off.dy;
 
   var moving = Math.abs(sprite.x - tx) > 3 || Math.abs(sprite.y - ty) > 3;
 
@@ -318,6 +332,12 @@ TOWN.updateAgentSprite = function(scene, agent) {
     TOWN.drawPerson(sprite.gfx, sprite.x, sprite.y, color, agent.life_stage,
                     agent.alive !== false, false, sprite._walkPhase, agent.mood_valence || 0);
     TOWN.drawDriveBars(sprite.driveBarContainer, sprite.x, sprite.y, 6, agent.drives);
+    /* Walking wobble from server-side moving flag */
+    if (agent.moving) {
+      var wobblePhase = (Date.now() / 150) % (Math.PI * 2);
+      sprite.gfx.rotation = Math.sin(wobblePhase) * 0.08;
+      sprite.gfx.y += Math.sin(wobblePhase * 2) * 2;
+    }
   }
 
   /* Dead */

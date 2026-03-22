@@ -4,7 +4,7 @@ A town simulation where every resident has a real memory graph.
 
 Each agent carries a [Smrti](../smrti/) memory engine — beliefs stored as graph nodes with Bayesian truth values, emotional valence, and salience weights. Agents decide what to do based on what they remember. When they talk, beliefs cross over. Over time, shared memories consolidate into town culture.
 
-Point it at a local LLM and it generates a new world from scratch. Watch it run in a Phaser 3 canvas. Query any resident's memories over REST.
+Point it at a local LLM and it generates a new world from scratch. Watch it run in a full isometric 3D Phaser canvas with mood-tinted agents and a relationship overlay. Query any resident's memories over REST.
 
 ---
 
@@ -37,7 +37,7 @@ If no LLM is reachable, the server falls back to **Millbrook** — a pre-built t
 | 1 | Drive accumulation (hunger, energy, social, curiosity, duty, romance); death checks |
 | 2 | Each agent queries their Smrti instance and collects the 5 most salient memories |
 | 3 | Rule-based decision — no LLM calls, purely deterministic |
-| 3.5 | LLM dialogue enrichment fires in the background; the tick never waits for it |
+| 3.5 | LLM dialogue enrichment — queued via `DialogueQueue`; the tick never waits for it |
 | 4 | Actions resolve: agents move, eat, sleep, work, talk |
 | 5 | Each action becomes an episode written to the agent's memory space |
 | 6 | Conversations propagate: place space gets the narration, listener gets their own copy |
@@ -126,6 +126,9 @@ POST /pause                       Pause
 POST /resume                      Resume
 POST /skip                        Skip one week of simulated time
 POST /regenerate                  Generate a new world (returns 202, streams via WS)
+
+GET  /culture                     Space_Culture atoms (town-wide shared beliefs)
+POST /events/inject               Inject a player-triggered event (9 event types)
 
 GET  /settings                    Current LLM settings
 POST /settings                    Update LLM settings

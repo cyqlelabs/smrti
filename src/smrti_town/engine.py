@@ -52,6 +52,10 @@ from smrti_town.sporadic import (
     apply_sporadic_effects,
     generate_sporadic_events,
 )
+from smrti_town.economy import EconomyManager
+from smrti_town.gridmap import GridMap
+from smrti_town.navgrid import NavGrid, CELL_SIZE, grid_to_world
+from smrti_town.petition import PetitionManager
 
 logger = logging.getLogger("smrti_town.engine")
 
@@ -149,6 +153,32 @@ class SimEngine:
         self._agent_last_location: dict[str, str] = {}
         self._injected_events: list[dict] = []
         self._pending_moves: dict[str, str] = {}
+
+        # Grid-based systems
+        self.navgrid = NavGrid()
+        self.gridmap = GridMap()
+        self.economy = EconomyManager()
+        self.petition_manager = PetitionManager(db_path, tenant_id)
+
+        # Bake navgrid from initial topology
+        self.navgrid.bake(self.topology)
+
+        # Seed starter petitions for missing building types
+        existing_types = {
+            p.place_type for p in self.topology.places.values()
+            if p.place_type and p.place_type not in ("public", "other")
+        }
+        self.petition_manager.seed_needs(existing_types, current_hours=0.0)
+
+        # Initialize agent positions and economy
+        for agent in self.agents:
+            place = self.topology.places.get(agent.location)
+            if place:
+                wx = place.x + place.w / 2
+                wy = place.y + place.h / 2
+                agent.world_pos = (float(wx), float(wy))
+                self.navgrid.update_agent_position(agent.name, wx, wy)
+            self.economy.init_agent(agent.name)
 
     def set_broadcast(self, callback: Callable[[dict], Any]) -> None:
         self._broadcast = callback
@@ -263,6 +293,7 @@ class SimEngine:
                 calendar_hour=self.calendar.hour_of_day,
                 place_types=place_types,
             )
+            ctx.workplace = self.economy.workplaces.get(agent.name)
             agent_contexts[agent.name] = ctx
 
         # ── Phase 3: Decision ────────────────────────────────────────
@@ -299,7 +330,7 @@ class SimEngine:
             action = agent_actions.get(agent.name)
             if not action:
                 continue
-            self._resolve_action(agent, action)
+            self._resolve_action(agent, action, delta)
 
             # Check for reproduction
             if (
@@ -334,6 +365,35 @@ class SimEngine:
                             "description": birth_text,
                             "child": child.name,
                         })
+
+        # ── Phase 4.5: Movement stepping ──────────────────────────────
+        for agent in alive_agents:
+            if not agent.moving:
+                continue
+            speed = agent.speed * CELL_SIZE * delta  # world units this tick
+            reached = agent.step_movement(speed)
+            self.navgrid.update_agent_position(
+                agent.name, agent.world_pos[0], agent.world_pos[1],
+            )
+            if reached:
+                target = getattr(agent, '_move_target', None)
+                if target and target in self.topology.places:
+                    self.topology.move_agent(agent.name, agent.location, target)
+                    agent.location = target
+                    agent._move_target = None
+
+                    # Transitional encounters — check if agents share cells
+                    nearby = self.navgrid.agents_near(agent.name, radius=1)
+                    for other_name in nearby:
+                        other = self._agents_by_name.get(other_name)
+                        if other and other.alive and random.random() < 0.3:
+                            mem_val = agent._memory_valence_for_agent(other_name, [])
+                            if mem_val > 0.2:
+                                events.append({
+                                    "type": "encounter",
+                                    "description": f"{agent.name} greets {other_name} on the road",
+                                    "agents": [agent.name, other_name],
+                                })
 
         # ── Phase 5: Narrative remember() ────────────────────────────
         for agent in alive_agents:
@@ -477,6 +537,32 @@ class SimEngine:
                         "agents": [t.agent_name, t.target_name],
                     })
 
+            # Petition scanning
+            existing_types = set()
+            for b in self.gridmap.buildings:
+                existing_types.add(b.building_type)
+            new_petitions = self.petition_manager.scan_culture(
+                self.calendar.total_hours, existing_types,
+            )
+            self.petition_manager.expire_old(self.calendar.total_hours)
+            for pet in new_petitions:
+                events.append({
+                    "type": "petition",
+                    "description": f"Citizens petition for a {pet.building_type}!",
+                    "building_type": pet.building_type,
+                    "urgency": pet.urgency,
+                })
+
+            # Economy: daily expenses
+            for agent in alive_agents:
+                has_home = self.topology.home_for(agent.name) is not None
+                self.economy.pay_daily_expenses(agent.name, has_home=has_home)
+            # Update prices
+            building_counts: dict[str, int] = {}
+            for b in self.gridmap.buildings:
+                building_counts[b.building_type] = building_counts.get(b.building_type, 0) + 1
+            self.economy.update_prices(building_counts)
+
         # ── Build result ─────────────────────────────────────────────
         agent_dicts = []
         for agent in self.agents:
@@ -503,22 +589,31 @@ class SimEngine:
 
     # ── Action resolution ────────────────────────────────────────────
 
-    def _resolve_action(self, agent: Agent, action: Action) -> None:
+    def _resolve_action(self, agent: Agent, action: Action, delta: float = 1.0) -> None:
         """Apply action effects to the simulation state."""
         if action.type == ACTION_MOVE or action.type == ACTION_WANDER:
             target = action.target
             if target and target in self.topology.places:
-                self.topology.move_agent(agent.name, agent.location, target)
-                agent.location = target
+                # Use navgrid pathfinding if doors exist
+                path = self.navgrid.find_path_between_places(agent.location, target)
+                if path:
+                    agent.assign_path(path)
+                    agent._move_target = target
+                else:
+                    # Fallback to instant teleport if no path found
+                    self.topology.move_agent(agent.name, agent.location, target)
+                    agent.location = target
 
         elif action.type == ACTION_EAT:
             agent.drives.reset_hunger()
+            self.economy.buy_food(agent.name, agent.location)
 
         elif action.type == ACTION_SLEEP:
             agent.drives.reset_energy()
 
         elif action.type == ACTION_WORK:
             agent.drives.reset_duty()
+            self.economy.process_work_tick(agent.name, delta, agent.life_stage)
 
         elif action.type == ACTION_STUDY:
             agent.drives.reduce_curiosity()
@@ -818,6 +913,9 @@ class SimEngine:
                 if self.topology.places.get(a, None) and self.topology.places[a].display
                 and self.topology.places.get(b, None) and self.topology.places[b].display
             ],
+            "grid": self.gridmap.to_dict(),
+            "economy": self.economy.to_dict(),
+            "petitions": self.petition_manager.to_dict(),
         }
 
     def get_agent(self, name: str) -> dict | None:
@@ -844,3 +942,31 @@ class SimEngine:
             ]
         except Exception:
             return []
+
+    def place_building(self, building_type: str, grid_x: int, grid_y: int) -> dict:
+        """Place a building and trigger staff generation."""
+        placed = self.gridmap.place_building(building_type, grid_x, grid_y)
+        # Register in topology
+        self.topology.add_place(placed.place)
+        # Rebake navgrid
+        self.navgrid.bake(self.topology)
+        return {
+            "place_name": placed.place.name,
+            "building_type": building_type,
+            "grid_origin": list(placed.grid_origin),
+            "door_cell": list(placed.door_cell),
+        }
+
+    def get_buildable(self) -> list[dict]:
+        """Return list of unlocked building types."""
+        pop = sum(1 for a in self.agents if a.alive)
+        unlocked = self.gridmap.get_unlocked_buildings(pop)
+        from smrti_town.gridmap import BUILDING_DEFS
+        return [
+            {
+                "type": name,
+                "grid_size": list(BUILDING_DEFS[name].grid_size),
+                "staff_role": BUILDING_DEFS[name].staff_role,
+            }
+            for name in unlocked
+        ]

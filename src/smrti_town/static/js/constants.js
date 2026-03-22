@@ -59,6 +59,30 @@ TOWN.LOG_COLORS = {
 TOWN.SPEED_LEVELS = [1, 2, 5, 10];
 TOWN.SPEED_LABELS = ['1x', '2x', '5x', '10x'];
 
+/* Action → emoji icon shown above agent head */
+TOWN.ACTION_ICONS = {
+  sleep:   '\uD83D\uDCA4',  /* 💤 */
+  eat:     '\uD83C\uDF7D',  /* 🍽 */
+  work:    '\uD83D\uDD27',  /* 🔧 */
+  talk:    '\uD83D\uDCAC',  /* 💬 */
+  walk:    '',
+  read:    '\uD83D\uDCDA',  /* 📖 */
+  relax:   '\u2615',        /* ☕ */
+  romance: '\uD83D\uDC95',  /* 💕 */
+  gather:  '\uD83C\uDF89',  /* 🎉 */
+  idle:    '',
+};
+
+/* Fallback building color by place_type when no explicit color supplied */
+TOWN.PLACE_TYPE_COLORS = {
+  home:       '#C8854A',
+  commercial: '#4D96FF',
+  work:       '#845EC2',
+  public:     '#8B4C8B',
+  outdoor:    '#5C9E5C',
+  other:      '#888888',
+};
+
 TOWN.PLACES = {
   Cafe_Rosetta:    { x: 320, y: 180, w: 160, h: 110, color: '#E8734A', icon: '\u2615',         label: 'Cafe Rosetta' },
   Public_Library:  { x: 560, y: 160, w: 160, h: 110, color: '#2A7B7F', icon: '\uD83D\uDCDA',   label: 'Library' },

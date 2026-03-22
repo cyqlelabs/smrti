@@ -169,15 +169,19 @@ TOWN.createAgentSprite = function(scene, agent) {
   var off    = TOWN.getAgentOffset(name, agent.location);
   var x = pos.x + off.dx, y = pos.y + off.dy;
 
+  /* Isometric depth based on world position */
+  var wx0 = x, wy0 = y;
+  var isoD = 10 + (wx0 + wy0) / 2000;
+
   /* Graphics */
-  var gfx = scene.add.graphics().setDepth(11);
+  var gfx = scene.add.graphics().setDepth(isoD);
   TOWN.drawPerson(gfx, x, y, color, agent.life_stage,
                   agent.alive !== false, false, 0, agent.mood_valence || 0);
 
   /* Hitzone centred on the head */
   var headOffY = radius * 2 + 14;
   var hitzone  = scene.add.circle(x, y - headOffY, radius + 8, 0x000000, 0)
-    .setInteractive({ useHandCursor: true }).setDepth(12);
+    .setInteractive({ useHandCursor: true }).setDepth(isoD + 0.001);
   hitzone.setData('agentName', name);
 
   /* Name label */
@@ -190,19 +194,26 @@ TOWN.createAgentSprite = function(scene, agent) {
       align: 'center',
       stroke: '#3D2B1F',
       strokeThickness: 3,
-    }).setOrigin(0.5, 1).setDepth(13);
+    }).setOrigin(0.5, 1).setDepth(isoD + 0.003);
+
+  /* Action icon (above name label) */
+  var actionIcon = scene.add.text(x, y - headOffY - radius - 18, '', {
+    fontSize: '15px',
+    align: 'center',
+  }).setOrigin(0.5, 1).setDepth(isoD + 0.004);
 
   /* Drive bars */
-  var driveBarContainer = scene.add.graphics().setDepth(12);
+  var driveBarContainer = scene.add.graphics().setDepth(isoD + 0.002);
 
   /* Selection ring */
-  var selRing = scene.add.graphics().setDepth(10);
+  var selRing = scene.add.graphics().setDepth(isoD - 0.001);
   selRing.setPosition(x, y - headOffY);
   selRing.setAlpha(0);
 
   scene.agentLayer.add(gfx);
   scene.agentLayer.add(hitzone);
   scene.agentLayer.add(nameText);
+  scene.agentLayer.add(actionIcon);
   scene.agentLayer.add(driveBarContainer);
   scene.agentLayer.add(selRing);
 
@@ -210,6 +221,7 @@ TOWN.createAgentSprite = function(scene, agent) {
     gfx: gfx,
     hitzone: hitzone,
     nameText: nameText,
+    actionIcon: actionIcon,
     driveBarContainer: driveBarContainer,
     selRing: selRing,
     speechBubble: null,
@@ -221,16 +233,29 @@ TOWN.createAgentSprite = function(scene, agent) {
     talking: false,
     _talkTween: null,
     _breatheTween: null,
+    _dimTween: null,
     _walkPhase: Math.random(),
     _walking: false,
+    _lastAction: '',
   };
   TOWN.state.agentSprites[name] = sprite;
+
+  /* Idle breathing tween — gentle 1px Y bob */
+  sprite._breatheTween = scene.tweens.add({
+    targets: gfx,
+    y: -1,
+    duration: 2500,
+    yoyo: true, repeat: -1,
+    ease: 'Sine.easeInOut',
+    delay: Math.random() * 2000,
+  });
 
   /* Pop-in */
   gfx.setAlpha(0);
   nameText.setAlpha(0);
+  actionIcon.setAlpha(0);
   scene.tweens.add({ targets: gfx,  alpha: 1, duration: 450, ease: 'Back.easeOut' });
-  scene.tweens.add({ targets: [nameText, driveBarContainer], alpha: 1, duration: 350, delay: 200 });
+  scene.tweens.add({ targets: [nameText, actionIcon, driveBarContainer], alpha: 1, duration: 350, delay: 200 });
 
   return sprite;
 };
@@ -291,7 +316,41 @@ TOWN.updateAgentSprite = function(scene, agent) {
 
   var moving = Math.abs(sprite.x - tx) > 3 || Math.abs(sprite.y - ty) > 3;
 
+  /* Update isometric depth from world position */
+  var isoD = 10 + (wx + wy) / 2000;
+  sprite.gfx.setDepth(isoD);
+  sprite.hitzone.setDepth(isoD + 0.001);
+  sprite.driveBarContainer.setDepth(isoD + 0.002);
+  sprite.nameText.setDepth(isoD + 0.003);
+  sprite.actionIcon.setDepth(isoD + 0.004);
+  sprite.selRing.setDepth(isoD - 0.001);
+
+  /* Action icon */
+  var actionIconText = TOWN.ACTION_ICONS[agent.action] || '';
+  if (actionIconText !== sprite._lastAction) {
+    sprite._lastAction = actionIconText;
+    sprite.actionIcon.setText(actionIconText);
+  }
+
+  /* Inside dim: fade agents doing indoor actions */
+  var INDOOR_ACTIONS = { sleep: true, eat: true, work: true, read: true };
+  var targetAlpha = (INDOOR_ACTIONS[agent.action] && agent.alive !== false) ? 0.55 : 1.0;
+  if (!sprite._dimTween && Math.abs((sprite.gfx.alpha) - targetAlpha) > 0.08) {
+    var _spr = sprite;
+    sprite._dimTween = scene.tweens.add({
+      targets: [sprite.gfx, sprite.nameText, sprite.driveBarContainer, sprite.actionIcon],
+      alpha: targetAlpha,
+      duration: 600,
+      ease: 'Sine.easeInOut',
+      onComplete: function() { _spr._dimTween = null; },
+    });
+  }
+
   if (moving) {
+    /* Pause breathing while walking */
+    if (sprite._breatheTween) sprite._breatheTween.pause();
+    sprite.gfx.y = 0;
+
     /* Animate movement + walk cycle */
     var fromX = sprite.x, fromY = sprite.y;
     sprite.x = tx; sprite.y = ty;
@@ -315,6 +374,7 @@ TOWN.updateAgentSprite = function(scene, agent) {
         TOWN.drawDriveBars(_sprite.driveBarContainer, cx, cy, 6, _agent.drives);
         _sprite.hitzone.setPosition(cx, cy - headOffY);
         _sprite.nameText.setPosition(cx, cy - headOffY - radius - 4);
+        _sprite.actionIcon.setPosition(cx, cy - headOffY - radius - 18);
         _sprite.selRing.setPosition(cx, cy - headOffY);
       },
       onComplete: function() {
@@ -322,21 +382,25 @@ TOWN.updateAgentSprite = function(scene, agent) {
         TOWN.drawPerson(_sprite.gfx, tx, ty, _color, _agent.life_stage,
                         _agent.alive !== false, false, _sprite._walkPhase, _agent.mood_valence || 0);
         TOWN.drawDriveBars(_sprite.driveBarContainer, tx, ty, 6, _agent.drives);
+        /* Resume breathing after arriving */
+        if (_sprite._breatheTween) _sprite._breatheTween.resume();
       },
     });
-    scene.tweens.add({ targets: sprite.hitzone, x: tx, y: ty - headOffY, duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.nameText, x: tx, y: ty - headOffY - radius - 4, duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.selRing,  x: tx, y: ty - headOffY, duration: dur, ease: 'Quad.easeInOut' });
+    scene.tweens.add({ targets: sprite.hitzone,  x: tx, y: ty - headOffY,           duration: dur, ease: 'Quad.easeInOut' });
+    scene.tweens.add({ targets: sprite.nameText,  x: tx, y: ty - headOffY - radius - 4,  duration: dur, ease: 'Quad.easeInOut' });
+    scene.tweens.add({ targets: sprite.actionIcon,x: tx, y: ty - headOffY - radius - 18, duration: dur, ease: 'Quad.easeInOut' });
+    scene.tweens.add({ targets: sprite.selRing,   x: tx, y: ty - headOffY,           duration: dur, ease: 'Quad.easeInOut' });
   } else {
-    /* Idle — redraw in place */
+    /* Idle — redraw in place, breathing tween active */
     TOWN.drawPerson(sprite.gfx, sprite.x, sprite.y, color, agent.life_stage,
                     agent.alive !== false, false, sprite._walkPhase, agent.mood_valence || 0);
     TOWN.drawDriveBars(sprite.driveBarContainer, sprite.x, sprite.y, 6, agent.drives);
+    /* Ensure action icon is positioned correctly when idle */
+    sprite.actionIcon.setPosition(sprite.x, sprite.y - headOffY - radius - 18);
     /* Walking wobble from server-side moving flag */
     if (agent.moving) {
       var wobblePhase = (Date.now() / 150) % (Math.PI * 2);
       sprite.gfx.rotation = Math.sin(wobblePhase) * 0.08;
-      sprite.gfx.y += Math.sin(wobblePhase * 2) * 2;
     }
   }
 

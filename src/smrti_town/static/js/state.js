@@ -26,6 +26,10 @@ TOWN.state = {
   demoMode: false,
   demoInterval: null,
   stars: [],
+  townHealth: 50,
+  milestones: new Set(),
+  bubblePool: [],
+  particlePool: [],
 };
 
 /* ── Helpers ─────────────────────────────────────────────────────── */

@@ -27,6 +27,11 @@
   /* ── Resize handler ────────────────────────────────────────────── */
   window.addEventListener('resize', TOWN._handleResize);
 
+  /* ── Tab visibility — pause tick processing when hidden ─────────── */
+  document.addEventListener('visibilitychange', function() {
+    TOWN.state.paused = document.hidden;
+  });
+
   /* ── Connect WebSocket ─────────────────────────────────────────── */
   TOWN.connectWS();
 

@@ -165,7 +165,79 @@ TOWN.processTick = function(scene, data) {
     TOWN.renderPlaceSidebar(TOWN.state.selectedPlace);
   }
 
+  /* ── Town Health ─────────────────────────────────────────────── */
+  TOWN.updateTownHealth();
+
+  /* ── Milestones ──────────────────────────────────────────────── */
+  TOWN._checkMilestones(data);
+
   return TOWN.sleep(50);
+};
+
+/* ── Milestone checker ───────────────────────────────────────────── */
+TOWN._checkMilestones = function(data) {
+  var ms = TOWN.state.milestones;
+
+  if (data.births && data.births.length && !ms.has('first_birth')) {
+    ms.add('first_birth');
+    TOWN.showToast('\uD83C\uDF7C', 'First birth in town!');
+  }
+
+  if (data.deaths && data.deaths.length && !ms.has('first_death')) {
+    ms.add('first_death');
+    TOWN.showToast('\u271E', 'The first soul passes from the town');
+  }
+
+  /* First marriage — scan relationships */
+  if (!ms.has('first_marriage')) {
+    var agents = TOWN.state.agents;
+    outer:
+    for (var n in agents) {
+      var rels = agents[n].relationships;
+      if (!rels) continue;
+      for (var r = 0; r < rels.length; r++) {
+        if (rels[r].state === 'married') {
+          ms.add('first_marriage');
+          TOWN.showToast('\uD83D\uDC8D', 'First wedding in town!');
+          break outer;
+        }
+      }
+    }
+  }
+
+  /* Population milestones */
+  var alive = 0;
+  for (var k in TOWN.state.agents) {
+    if (TOWN.state.agents[k].alive) alive++;
+  }
+  if (alive >= 10 && !ms.has('pop_10')) {
+    ms.add('pop_10');
+    TOWN.showToast('\uD83D\uDCC8', 'Population reaches 10!');
+  }
+
+  /* Year milestones */
+  var year = TOWN.state.calendar.year || 1;
+  if (year >= 5 && !ms.has('year_5')) {
+    ms.add('year_5');
+    TOWN.showToast('\uD83C\uDF82', 'Five years have passed!');
+  }
+  if (year >= 10 && !ms.has('year_10')) {
+    ms.add('year_10');
+    TOWN.showToast('\uD83C\uDFC6', 'A decade in this town!');
+  }
+};
+
+/* ── Toast notifications ─────────────────────────────────────────── */
+TOWN.showToast = function(icon, message) {
+  var container = document.getElementById('toast-container');
+  if (!container) return;
+  var el = document.createElement('div');
+  el.className = 'toast';
+  el.textContent = icon + ' ' + message;
+  container.appendChild(el);
+  setTimeout(function() {
+    if (el.parentNode) el.parentNode.removeChild(el);
+  }, 4200);
 };
 
 TOWN.processInit = function(scene, data) {
@@ -175,6 +247,12 @@ TOWN.processInit = function(scene, data) {
     clearInterval(TOWN.state.demoInterval);
     TOWN.state.demoInterval = null;
   }
+  /* Reset milestones and health for new world */
+  TOWN.state.milestones = new Set();
+  TOWN.state.townHealth  = 50;
+  /* Reset window lighting on new world */
+  TOWN._lastWindowTod  = null;
+  TOWN._lastSeasonTint = null;
 
   var townData = data.town || data.data || data;
 
@@ -194,6 +272,7 @@ TOWN.processInit = function(scene, data) {
         color: p.color || '#888888',
         icon: p.icon || '',
         label: p.label || key.replace(/_/g, ' '),
+        place_type: p.place_type || 'other',
       };
     }
     /* Clear and redraw */

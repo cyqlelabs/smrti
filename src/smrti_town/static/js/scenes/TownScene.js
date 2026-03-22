@@ -25,12 +25,24 @@ TOWN.TownScene = new Phaser.Class({
     this.roadLayer     = this.add.graphics().setDepth(1);
     this.buildingLayer = this.add.container(0, 0).setDepth(2);
 
+    /* Season tint overlay (screen-space, very low alpha) */
+    this.seasonOverlay = this.add.rectangle(
+      this.scale.width / 2, this.scale.height / 2,
+      this.scale.width * 4, this.scale.height * 4,
+      0x5C9E5C, 0
+    ).setDepth(5).setScrollFactor(0);
+    TOWN._seasonOverlay = this.seasonOverlay;
+
     /* Night overlay — scrollFactor(0) keeps it fixed to the screen */
     this.nightOverlay = this.add.rectangle(
       this.scale.width / 2, this.scale.height / 2,
       this.scale.width * 4, this.scale.height * 4,
       0x000020, 0
-    ).setDepth(5).setScrollFactor(0);
+    ).setDepth(5.5).setScrollFactor(0);
+
+    /* Window lighting layer (world-space, above buildings at depth 2) */
+    this.windowLayer = this.add.graphics().setDepth(2.5);
+    TOWN._windowLayerGfx = this.windowLayer;
 
     this.relOverlayLayer = this.add.graphics().setDepth(9);
     TOWN._relOverlayGfx  = this.relOverlayLayer;
@@ -188,8 +200,9 @@ TOWN._handleHover = function(pointer) {
 /* ── Resize handler ──────────────────────────────────────────────── */
 TOWN._handleResize = function() {
   var scene = TOWN.state.scene;
-  if (scene && scene.nightOverlay) {
-    scene.nightOverlay.setPosition(window.innerWidth / 2, window.innerHeight / 2);
-    scene.nightOverlay.setSize(window.innerWidth * 4, window.innerHeight * 4);
-  }
+  if (!scene) return;
+  var cx = window.innerWidth / 2, cy = window.innerHeight / 2;
+  var sw = window.innerWidth * 4,  sh = window.innerHeight * 4;
+  if (scene.nightOverlay)   { scene.nightOverlay.setPosition(cx, cy).setSize(sw, sh); }
+  if (scene.seasonOverlay)  { scene.seasonOverlay.setPosition(cx, cy).setSize(sw, sh); }
 };

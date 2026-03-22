@@ -215,8 +215,10 @@ TOWN.drawBuilding = function(scene, name, place) {
   var isStreet = name.toLowerCase().indexOf('street') !== -1;
   if (isStreet) return; /* streets drawn as roads */
 
-  var colorHex = place.color || '#888888';
   var placeType = place.place_type || 'other';
+  var colorHex  = (place.color && place.color !== '#888888')
+    ? place.color
+    : (TOWN.PLACE_TYPE_COLORS[placeType] || '#888888');
 
   var topColor   = TOWN._lighten(colorHex, 35);
   var leftColor  = TOWN._hexToInt(colorHex);
@@ -441,6 +443,7 @@ TOWN.drawBuilding = function(scene, name, place) {
     x: place.x, y: place.y,
     w: w, h: h,
     boxH: boxH,
+    placeType: placeType,
     color: TOWN._hexToInt(colorHex),
     colorHex: colorHex,
   };

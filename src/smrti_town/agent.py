@@ -22,6 +22,8 @@ from smrti_town.config import (
     ACTION_WORK,
     LIFE_STAGES,
     PERSONALITY_ACTION_BIAS,
+    PRESET_TRAITS,
+    TRAIT_NAMES,
 )
 from smrti_town.drives import AgentDrives
 
@@ -84,6 +86,7 @@ class Agent:
         db_path: str = "~/.smrti/town.db",
         tenant_id: str = "millbrook",
         parents: tuple[str, str] | None = None,
+        traits: dict | None = None,
     ) -> None:
         self.name = name
         self.personality_preset = personality
@@ -98,6 +101,11 @@ class Agent:
         self._interaction_counts: dict[str, int] = {}  # target_name -> count
         self._db_path = db_path
         self._tenant_id = tenant_id
+        self._place_types: dict[str, str] = {}
+        self.traits: dict[str, float] = (
+            traits if traits is not None
+            else dict(PRESET_TRAITS.get(personality, PRESET_TRAITS["balanced"]))
+        )
 
         # Smrti instance — write to agent's private space, read from
         # agent space + world + culture
@@ -155,6 +163,54 @@ class Agent:
 
     def get_interaction_count(self, target_name: str) -> int:
         return self._interaction_counts.get(target_name, 0)
+
+    def effective_action_bias(self) -> dict[str, float]:
+        """Return action bias dict, blending personality preset with traits."""
+        from smrti_town.config import PERSONALITY_ACTION_BIAS
+        base = dict(PERSONALITY_ACTION_BIAS.get(
+            self.personality_preset,
+            PERSONALITY_ACTION_BIAS["balanced"],
+        ))
+        # Modulate with behavioural traits
+        shyness = self.traits.get("shyness", 0.3)
+        adventurous = self.traits.get("adventurous", 0.4)
+        base["social"] = max(0.0, min(1.0, base.get("social", 0.5) * (1.0 - shyness * 0.5)))
+        base["wander"] = max(0.0, min(1.0, base.get("wander", 0.3) * (1.0 + adventurous * 0.5)))
+        return base
+
+    def persist_interactions(self) -> None:
+        """Save interaction counts directly to the Smrti DB."""
+        import json
+        label = f"__interactions__{self.name}"
+        data = json.dumps(self._interaction_counts)
+        try:
+            db = self.smrti.db
+            db.execute(
+                "DELETE FROM atoms WHERE label = ? AND tenant_id = ? AND space = ?",
+                (label, self._tenant_id, f"Agent_Space_{self.name}"),
+            )
+            db.execute(
+                "INSERT INTO atoms (id, type, label, content, tenant_id, space, probability, confidence) "
+                "VALUES (?, 'belief', ?, ?, ?, ?, 1.0, 1.0)",
+                (label, label, data, self._tenant_id, f"Agent_Space_{self.name}"),
+            )
+        except Exception:
+            pass
+
+    def restore_interactions(self) -> None:
+        """Load interaction counts directly from the Smrti DB."""
+        import json
+        label = f"__interactions__{self.name}"
+        try:
+            db = self.smrti.db
+            rows = db.fetchall(
+                "SELECT content FROM atoms WHERE label = ? AND tenant_id = ? AND space = ?",
+                (label, self._tenant_id, f"Agent_Space_{self.name}"),
+            )
+            if rows:
+                self._interaction_counts = json.loads(rows[0]["content"])
+        except Exception:
+            pass
 
     # ── Perception ───────────────────────────────────────────────────
 
@@ -220,6 +276,7 @@ class Agent:
         ctx: PerceptionContext,
         available_places: list[str],
         place_agents: dict[str, list[str]],
+        place_types: dict[str, str] | None = None,
     ) -> Action:
         """Rule-based decision system. No LLM calls.
 
@@ -230,6 +287,19 @@ class Agent:
         4. Personality-influenced idle action
         5. Random wandering
         """
+        if place_types is not None:
+            self._place_types = place_types
+            ctx = PerceptionContext(
+                location=ctx.location,
+                time_of_day=ctx.time_of_day,
+                season=ctx.season,
+                nearby_agents=ctx.nearby_agents,
+                urgent_drive=ctx.urgent_drive,
+                memories=ctx.memories,
+                schedule_obligation=ctx.schedule_obligation,
+                personality_preset=ctx.personality_preset,
+                place_types=place_types,
+            )
         if not self.alive:
             return Action(type=ACTION_WAIT)
         if not self.can_talk and not self.can_move:

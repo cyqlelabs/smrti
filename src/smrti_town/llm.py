@@ -27,6 +27,7 @@ _WORLD_SCHEMA_EXAMPLE = {
             "label": "Town Square",
             "description": "The beating heart of civic life, ringed by old oaks.",
             "type": "outdoor",
+            "icon": "🌳",
             "personality": "empathetic",
             "is_outdoor": True,
             "has_space": True,
@@ -37,6 +38,7 @@ _WORLD_SCHEMA_EXAMPLE = {
             "label": "Main Street",
             "description": "The central artery connecting all public buildings.",
             "type": "street",
+            "icon": "",
             "personality": "balanced",
             "is_outdoor": True,
             "has_space": False,
@@ -47,6 +49,7 @@ _WORLD_SCHEMA_EXAMPLE = {
             "label": "Elena's Bakery",
             "description": "Smells of fresh bread from 5am. A gossip hub.",
             "type": "public",
+            "icon": "🥖",
             "personality": "empathetic",
             "is_outdoor": False,
             "has_space": True,
@@ -57,6 +60,7 @@ _WORLD_SCHEMA_EXAMPLE = {
             "label": "Elena's Home",
             "description": "A tidy cottage on the edge of town.",
             "type": "home",
+            "icon": "🏠",
             "personality": "balanced",
             "is_outdoor": False,
             "has_space": True,
@@ -130,6 +134,7 @@ OUTPUT RULES — strictly enforced:
 - relationship.target: must match an agent name in your agents list
 - has_space: true for homes and socially significant buildings; false for streets and paths
 - type: exactly one of: home, public, outdoor, street
+- icon: single emoji for the place (e.g. ☕ for cafe, 📚 for library, 🌳 for park, 🏠 for home); use empty string for streets
 - All place names in connects_to must exist in your places list
 - Respond with ONLY valid JSON. No markdown, no code fences, no commentary.\
 """
@@ -149,6 +154,9 @@ class LLMSettings:
     worldgen_timeout: float = 300.0     # seconds; 0 = no timeout
     enabled: bool = True
     world_theme: str = ""           # e.g. "coastal fishing village, 1950s"
+    tick_interval_ms: int = 2000     # wall-clock ms to sleep between ticks
+    dialogue_queue_size: int = 8     # max pending requests before dropping
+    dialogue_batch_size: int = 3     # max requests merged into one LLM call
 
     def to_dict(self) -> dict:
         return dataclasses.asdict(self)
@@ -286,6 +294,84 @@ class LLMClient:
         except Exception as exc:
             logger.debug("Dialogue generation failed (%s → %s): %s", speaker, target, exc)
             return fallback
+
+    # ── Batched dialogue generation ───────────────────────────────────
+
+    async def generate_dialogue_batch(self, requests: list) -> list[str]:
+        """Generate one dialogue line per request in a single LLM call.
+
+        Returns a list of strings parallel to ``requests``.  Falls back to each
+        request's ``fallback`` string on any error or length mismatch so the
+        caller never has to special-case failures.
+        """
+        fallbacks = [r.fallback for r in requests]
+        if not self.settings.enabled or not requests:
+            return fallbacks
+
+        chars = []
+        for i, r in enumerate(requests):
+            mem_lines = [m["content"] for m in r.memories[:3] if m.get("content")]
+            entry: dict = {
+                "index": i,
+                "speaker": r.speaker,
+                "target": r.target,
+                "location": r.location.replace("_", " "),
+                "time_of_day": r.time_of_day,
+                "season": r.season,
+                "personality": r.personality,
+            }
+            if r.urgent_drive:
+                entry["urgent_drive"] = r.urgent_drive
+            if mem_lines:
+                entry["memories"] = mem_lines
+            chars.append(entry)
+
+        import json as _json
+        prompt = (
+            "You are a narrator for a life simulation. "
+            "Generate exactly one in-character dialogue line for each character below.\n"
+            "Return ONLY a JSON array of strings, one per character, in index order.\n"
+            "No markdown, no code fences, no commentary — only the JSON array.\n\n"
+            "Rules for each line:\n"
+            "- One natural sentence only — no continuation, no monologue.\n"
+            "- Specific, personal, in-character — no clichés, no generic greetings.\n"
+            "- No speaker attribution, no surrounding quotes.\n\n"
+            f"Characters:\n{_json.dumps(chars, ensure_ascii=False)}\n\n"
+            f'Respond with ONLY the JSON array, e.g.: {_json.dumps(["line for index 0"] * len(requests))}'
+        )
+
+        n = len(requests)
+        max_tokens = self.settings.max_tokens * n + 100
+        timeout = (self.settings.dialogue_timeout * n) if self.settings.dialogue_timeout else None
+
+        try:
+            raw = await self._chat(
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                timeout=timeout,
+            )
+            # Strip markdown fences if model ignores instruction
+            if "```" in raw:
+                for part in raw.split("```")[1:]:
+                    part = part.lstrip("json").strip()
+                    if part.startswith("["):
+                        raw = part
+                        break
+            parsed = _json.loads(raw)
+            if not isinstance(parsed, list):
+                return fallbacks
+            # Merge parsed entries with fallbacks for any missing indices
+            result = list(fallbacks)
+            for idx, text in enumerate(parsed):
+                if idx < n and isinstance(text, str) and text.strip():
+                    t = text.strip()
+                    if len(t) >= 2 and t[0] in ('"', "'") and t[-1] == t[0]:
+                        t = t[1:-1]
+                    result[idx] = t or fallbacks[idx]
+            return result
+        except Exception as exc:
+            logger.debug("Batch dialogue generation failed: %s", exc)
+            return fallbacks
 
     # ── World generation ──────────────────────────────────────────────
 

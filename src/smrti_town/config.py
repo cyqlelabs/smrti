@@ -404,39 +404,3 @@ CULTURE_CONFIDENCE_MIN = 0.5   # only promote bridge atoms above this confidence
 # ── Population cap ───────────────────────────────────────────────────
 MAX_POPULATION = 20            # soft cap — reduces fertility when exceeded
 
-# ── Conversation generation ──────────────────────────────────────────
-GREETINGS = [
-    "Hey {target}, how are you?",
-    "Good to see you, {target}!",
-    "Hello {target}! What's new?",
-    "{target}! I was hoping to run into you.",
-]
-
-SMALL_TALK = [
-    "The weather has been interesting lately, hasn't it?",
-    "I've been thinking a lot about things recently.",
-    "Have you heard anything new around town?",
-    "This is a nice spot, isn't it?",
-    "I wonder what's happening at the market today.",
-    "It's been a while since we last talked.",
-]
-
-ROMANTIC_LINES = [
-    "I really enjoy spending time with you, {target}.",
-    "Being here with you makes everything better, {target}.",
-    "You know, {target}, I feel so comfortable around you.",
-    "I was thinking about you earlier, {target}.",
-]
-
-FOOD_TOPICS = [
-    "I'm starving! Time for a good meal.",
-    "The food here always hits the spot.",
-    "I could really go for something to eat.",
-]
-
-CURIOSITY_TOPICS = [
-    "I read the most fascinating thing today.",
-    "I've been curious about how things work around here.",
-    "Do you know anything about the history of this place?",
-    "I learned something interesting recently.",
-]

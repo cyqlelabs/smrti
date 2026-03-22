@@ -9,7 +9,6 @@ from smrti import Smrti
 
 from smrti_town.agent import Agent
 from smrti_town.calendar import SimCalendar
-from smrti_town.config import PRESET_TRAITS
 from smrti_town.engine import SimEngine
 from smrti_town.spatial import Place, TownTopology
 
@@ -72,22 +71,29 @@ def _build_engine(
 
 # ── Topology ──────────────────────────────────────────────────────────
 
+_VALID_PLACE_TYPES = frozenset({"street", "public", "outdoor", "home", "other"})
+
+
+def _valid_place_type(value: object) -> str:
+    v = str(value or "").strip().lower()
+    return v if v in _VALID_PLACE_TYPES else "other"
+
+
 def _build_topology(places_data: list[dict]) -> TownTopology:
     topo = TownTopology()
 
-    _valid_types = {"home", "public", "outdoor", "street"}
     for p in places_data:
         name = _norm_name(p.get("name", ""))
         if not name:
             continue
-        raw_type = str(p.get("type", "public")).strip().lower()
-        place_type = raw_type if raw_type in _valid_types else "public"
         place = Place(
             name=name,
             personality=_valid_personality(p.get("personality")),
             is_outdoor=bool(p.get("is_outdoor", False)),
             has_space=bool(p.get("has_space", True)),
-            place_type=place_type,
+            place_type=_valid_place_type(p.get("type")),
+            label=(p.get("label") or name.replace("_", " ")).strip(),
+            icon=str(p.get("icon") or "").strip(),
         )
         topo.add_place(place)
 
@@ -109,7 +115,86 @@ def _build_topology(places_data: list[dict]) -> TownTopology:
             if name != root and not topo.neighbors(name):
                 topo.connect(name, root)
 
+    _assign_layout(topo, places_data)
+
     return topo
+
+
+_TYPE_DEFAULTS: dict[str, tuple[str, str]] = {
+    "public":  ("#4A6FA5", "🏛"),
+    "outdoor": ("#5C9E5C", "🌳"),
+    "home":    ("#D4A03C", "🏠"),
+    "street":  ("#B8A88A", ""),
+    "other":   ("#888888", ""),
+}
+
+
+def _assign_layout(topo: TownTopology, places_data: list[dict]) -> None:
+    """Assign x/y/w/h/color to places for an LLM-generated world.
+
+    Canvas viewport: 920 × 600.
+    Layout zones:
+      - Streets:  horizontal band at y=285, span width
+      - Public:   top row  at y=130
+      - Homes:    bottom-left, 2-column grid starting at y=400
+      - Outdoors: bottom-right at y=390
+    """
+    streets  = [p for p in topo.places.values() if p.place_type == "street"]
+    publics  = [p for p in topo.places.values() if p.place_type == "public"]
+    homes    = [p for p in topo.places.values() if p.place_type == "home"]
+    outdoors = [p for p in topo.places.values() if p.place_type == "outdoor"]
+    others   = [p for p in topo.places.values() if p.place_type == "other"]
+
+    # Streets — horizontal band
+    canvas_w = 920
+    if streets:
+        street_w = max(80, canvas_w // len(streets) - 10)
+        for i, p in enumerate(streets):
+            p.x = 20 + i * (street_w + 8)
+            p.y = 278
+            p.w = street_w
+            p.h = 28
+
+    # Public buildings — top row
+    if publics:
+        pub_w = min(160, max(100, (canvas_w - 40) // len(publics) - 10))
+        for i, p in enumerate(publics):
+            p.x = 20 + i * (pub_w + 10)
+            p.y = 130
+            p.w = pub_w
+            p.h = 110
+
+    # Homes — 2-column grid, bottom-left
+    if homes:
+        col_w, col_h = 130, 100
+        for i, p in enumerate(homes):
+            col = i % 2
+            row = i // 2
+            p.x = 20 + col * (col_w + 10)
+            p.y = 390 + row * (col_h + 10)
+            p.w = col_w
+            p.h = col_h
+
+    # Outdoors — bottom-right
+    if outdoors:
+        out_w = min(200, max(120, (canvas_w - 40) // len(outdoors) - 10))
+        for i, p in enumerate(outdoors):
+            p.x = canvas_w - (i + 1) * (out_w + 10)
+            p.y = 390
+            p.w = out_w
+            p.h = 130
+
+    # Others — hide (virtual/root nodes)
+    for p in others:
+        p.display = False
+
+    # Apply colors and default icons
+    for p in topo.places.values():
+        default_color, default_icon = _TYPE_DEFAULTS.get(p.place_type, ("#888888", ""))
+        if not p.color or p.color == "#888888":
+            p.color = default_color
+        if not p.icon:
+            p.icon = default_icon
 
 
 # ── Agents ────────────────────────────────────────────────────────────
@@ -164,10 +249,6 @@ def _build_agents(
         agents.append(agent)
         if start_loc in topology.places:
             topology.places[start_loc].add_occupant(name)
-
-    # Restore any persisted interaction counts from a previous run
-    for agent in agents:
-        agent.restore_interactions()
 
     # Second pass: seed relationships (all agents now exist)
     agents_by_name = {a.name: a for a in agents}

@@ -40,6 +40,7 @@ from smrti_town.lifecycle import (
     compute_life_stage,
     spawn_child,
 )
+from smrti_town.dialogue_queue import DialogueQueue, DialogueRequest
 from smrti_town.extractor import fire_extraction
 from smrti_town.narrator import Narrator
 from smrti_town.spatial import TownTopology
@@ -118,6 +119,16 @@ class SimEngine:
         # cancel them mid-execution (asyncio only holds weak references).
         self._bg_tasks: set[asyncio.Task] = set()
 
+        # Bounded single-worker queue for LLM dialogue enrichment
+        self._dialogue_queue: DialogueQueue | None = None
+        if llm_client:
+            s = llm_client.settings
+            self._dialogue_queue = DialogueQueue(
+                llm_client=llm_client,
+                maxsize=s.dialogue_queue_size,
+                batch_size=s.dialogue_batch_size,
+            )
+
         # Place smrti instances for socially significant places
         self._place_smrtis: dict[str, Smrti] = {}
         for place in self.topology.places.values():
@@ -135,6 +146,8 @@ class SimEngine:
 
     def set_broadcast(self, callback: Callable[[dict], Any]) -> None:
         self._broadcast = callback
+        if self._dialogue_queue:
+            self._dialogue_queue.set_broadcast(callback)
 
     # ── Main tick loop ───────────────────────────────────────────────
 
@@ -144,27 +157,37 @@ class SimEngine:
         self.paused = False
         ticks_run = 0
 
-        while self.running:
-            if self.paused:
-                await asyncio.sleep(0.05)
-                continue
+        if self._dialogue_queue:
+            self._dialogue_queue.start()
 
-            result = await self.tick()
+        try:
+            while self.running:
+                if self.paused:
+                    await asyncio.sleep(0.05)
+                    continue
 
-            if self._broadcast:
-                try:
-                    await self._broadcast(result.to_dict())
-                except Exception as exc:
-                    logger.warning("Broadcast error: %s", exc)
+                result = await self.tick()
 
-            ticks_run += 1
-            if max_ticks and ticks_run >= max_ticks:
-                break
+                if self._broadcast:
+                    try:
+                        await self._broadcast(result.to_dict())
+                    except Exception as exc:
+                        logger.warning("Broadcast error: %s", exc)
 
-            # Yield control so WebSocket and HTTP can process
-            await asyncio.sleep(0.01)
+                ticks_run += 1
+                if max_ticks and ticks_run >= max_ticks:
+                    break
 
-        self.running = False
+                # Yield control so WebSocket and HTTP can process.
+                # Honour tick_interval_ms from LLM settings (default 500ms).
+                interval = 0.5
+                if self.llm_client:
+                    interval = self.llm_client.settings.tick_interval_ms / 1000.0
+                await asyncio.sleep(max(0.01, interval))
+        finally:
+            self.running = False
+            if self._dialogue_queue:
+                await self._dialogue_queue.stop()
 
     async def tick(self) -> TickResult:
         """Execute one full 8-phase tick."""
@@ -215,6 +238,8 @@ class SimEngine:
                 if n in self._agents_by_name and self._agents_by_name[n].alive
             ]
 
+        place_types = {name: p.place_type for name, p in self.topology.places.items()}
+
         for agent in alive_agents:
             if not agent.can_talk and not agent.can_move:
                 continue
@@ -230,6 +255,7 @@ class SimEngine:
                 time_of_day=self.calendar.time_of_day(),
                 season=self.calendar.season,
                 calendar_hour=self.calendar.hour_of_day,
+                place_types=place_types,
             )
             agent_contexts[agent.name] = ctx
 
@@ -248,10 +274,9 @@ class SimEngine:
 
         # ── Phase 3.5: LLM dialogue enrichment (fire-and-forget) ─────
         # Tasks run in the background; the tick is never blocked by LLM latency.
-        if self.llm_client and self.llm_client.settings.enabled:
-            await self._enrich_dialogue_llm(
-                alive_agents, agent_actions, agent_contexts, self.tick_number
-            )
+        if self._dialogue_queue and self.llm_client and self.llm_client.settings.enabled:
+            self._dialogue_queue.update_tick(self.tick_number)
+            await self._enrich_dialogue_llm(alive_agents, agent_actions, agent_contexts)
 
         # ── Phase 4: Engine resolution ───────────────────────────────
         for agent in alive_agents:
@@ -320,16 +345,17 @@ class SimEngine:
             action = agent_actions.get(agent.name)
             if not action or action.type != ACTION_TALK or not action.target:
                 continue
-            if not action.dialogue:
-                continue
 
             target_agent = self._agents_by_name.get(action.target)
             if not target_agent or not target_agent.alive:
                 continue
 
-            # Track interactions
+            # Track interactions regardless of whether dialogue is present
             agent.increment_interaction(action.target)
             target_agent.increment_interaction(agent.name)
+
+            if not action.dialogue:
+                continue
 
             narration = self.narrator.narrate_conversation(
                 speaker=agent.name,
@@ -585,16 +611,17 @@ class SimEngine:
         alive_agents: list[Agent],
         agent_actions: dict[str, Action],
         agent_contexts: dict[str, Any],
-        tick_number: int,
     ) -> None:
-        """Fire-and-forget LLM dialogue generation for all TALK actions.
+        """Enqueue TALK-action agents into the dialogue queue.
 
-        The tick is NOT blocked — each agent gets a background asyncio.Task.
-        When the model responds (which may take many seconds on slow local
-        models), a ``dialogue_patch`` message is broadcast to connected clients
-        so the event log updates live.  Template dialogue in the tick result is
-        always shown immediately as a fallback.
+        The queue is bounded and single-worker, so it provides natural
+        backpressure: if a slow local model can't keep up, new requests are
+        silently dropped and the template fallback dialogue stays visible.
+        Batching merges multiple requests into one LLM call when they arrive
+        simultaneously.
         """
+        if not self._dialogue_queue:
+            return
         for agent in alive_agents:
             action = agent_actions.get(agent.name)
             if (
@@ -605,55 +632,18 @@ class SimEngine:
             ):
                 continue
             ctx = agent_contexts[agent.name]
-            # Capture loop variables before launching task
-            task = asyncio.create_task(
-                self._generate_and_broadcast_dialogue(
-                    agent=agent,
-                    target=action.target,
-                    fallback=action.dialogue,
-                    ctx=ctx,
-                    tick_number=tick_number,
-                )
-            )
-            self._bg_tasks.add(task)
-            task.add_done_callback(self._bg_tasks.discard)
-
-    async def _generate_and_broadcast_dialogue(
-        self,
-        agent: Agent,
-        target: str,
-        fallback: str,
-        ctx: Any,
-        tick_number: int,
-    ) -> None:
-        """Background task: call LLM, then broadcast patch to clients."""
-        if not self.llm_client:
-            return
-        enriched = await self.llm_client.generate_dialogue(
-            speaker=agent.name,
-            target=target,
-            location=agent.location,
-            time_of_day=ctx.time_of_day,
-            season=ctx.season,
-            personality=agent.personality_preset,
-            urgent_drive=ctx.urgent_drive,
-            memories=ctx.memories,
-            fallback=fallback,
-        )
-        if enriched == fallback:
-            return  # LLM failed or returned same text — nothing to patch
-
-        if self._broadcast:
-            try:
-                await self._broadcast({
-                    "type": "dialogue_patch",
-                    "tick": tick_number,
-                    "speaker": agent.name,
-                    "target": target,
-                    "content": enriched,
-                })
-            except Exception as exc:
-                logger.debug("Broadcast dialogue_patch failed: %s", exc)
+            self._dialogue_queue.enqueue(DialogueRequest(
+                speaker=agent.name,
+                target=action.target,
+                location=agent.location,
+                time_of_day=ctx.time_of_day,
+                season=ctx.season,
+                personality=agent.personality_preset,
+                urgent_drive=ctx.urgent_drive,
+                memories=ctx.memories,
+                fallback=action.dialogue or "",
+                tick_number=self.tick_number,
+            ))
 
     # ── Control ──────────────────────────────────────────────────────
 
@@ -683,7 +673,13 @@ class SimEngine:
             "places": {
                 name: place.to_dict()
                 for name, place in self.topology.places.items()
+                if place.display
             },
+            "connections": [
+                [a, b] for a, b in self.topology.all_connections()
+                if self.topology.places.get(a, None) and self.topology.places[a].display
+                and self.topology.places.get(b, None) and self.topology.places[b].display
+            ],
         }
 
     def get_agent(self, name: str) -> dict | None:

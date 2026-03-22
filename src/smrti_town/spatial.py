@@ -19,9 +19,16 @@ class Place:
     # A Place_Space is only created for socially significant places.
     # Leaf rooms use their parent's space.
     has_space: bool = True
-    # Semantic type used by agents when choosing where to go.
-    # Valid values: "home", "public", "outdoor", "street"
-    place_type: str = "public"
+    # Layout / rendering fields
+    place_type: str = "other"   # "street", "public", "outdoor", "home", "other"
+    display: bool = True        # False = root/virtual node, not shown on map
+    x: int = 400
+    y: int = 300
+    w: int = 120
+    h: int = 90
+    color: str = "#888888"
+    icon: str = ""
+    label: str = ""
 
     def add_occupant(self, agent_name: str) -> None:
         self.occupants.add(agent_name)
@@ -39,9 +46,17 @@ class Place:
             "parent": self.parent,
             "personality": self.personality,
             "is_outdoor": self.is_outdoor,
-            "place_type": self.place_type,
             "occupants": sorted(self.occupants),
             "children": self.children,
+            "place_type": self.place_type,
+            "display": self.display,
+            "x": self.x,
+            "y": self.y,
+            "w": self.w,
+            "h": self.h,
+            "color": self.color,
+            "icon": self.icon,
+            "label": self.label,
         }
 
 
@@ -110,22 +125,21 @@ class TownTopology:
     def all_place_names(self) -> list[str]:
         return sorted(self.places.keys())
 
-    def places_by_type(self, place_type: str) -> list[str]:
-        """Return place names matching the given type (home, public, outdoor, street)."""
-        return [n for n, p in self.places.items() if p.place_type == place_type]
+    def all_connections(self) -> list[list[str]]:
+        """Return all unique bidirectional edges as [a, b] pairs."""
+        seen: set[frozenset] = set()
+        result: list[list[str]] = []
+        for a, neighbors in self._adjacency.items():
+            for b in neighbors:
+                key = frozenset((a, b))
+                if key not in seen:
+                    seen.add(key)
+                    result.append([a, b])
+        return result
 
-    def home_for(self, agent_name: str) -> str | None:
-        """Return the home place for a given agent, or None.
-
-        Convention: homes contain the agent's name (e.g. Alice_Home for Alice).
-        Falls back to first available home place if no name match found.
-        """
-        for name, place in self.places.items():
-            if place.place_type == "home" and agent_name in name:
-                return name
-        # Fallback: any home
-        homes = self.places_by_type("home")
-        return homes[0] if homes else None
+    def places_of_type(self, place_type: str) -> list[str]:
+        """Return names of all places with a given place_type."""
+        return [name for name, p in self.places.items() if p.place_type == place_type]
 
     def move_agent(self, agent_name: str, from_place: str, to_place: str) -> None:
         if from_place in self.places:
@@ -138,12 +152,33 @@ def build_millbrook_topology() -> TownTopology:
     """Construct the Millbrook town layout from the plan."""
     topo = TownTopology()
 
-    # Root
-    topo.add_place(Place(name="Town_Millbrook", is_outdoor=True, place_type="outdoor"))
+    # Root — virtual node, not shown on map
+    topo.add_place(Place(
+        name="Town_Millbrook",
+        is_outdoor=True,
+        place_type="other",
+        display=False,
+    ))
 
     # Streets
-    topo.add_place(Place(name="Elm_Street", parent="Town_Millbrook", is_outdoor=True, has_space=False, place_type="street"))
-    topo.add_place(Place(name="Main_Street", parent="Town_Millbrook", is_outdoor=True, has_space=False, place_type="street"))
+    topo.add_place(Place(
+        name="Elm_Street",
+        parent="Town_Millbrook",
+        is_outdoor=True,
+        has_space=False,
+        place_type="street",
+        x=160, y=290, w=160, h=30,
+        color="#C4B898", icon="", label="Elm St",
+    ))
+    topo.add_place(Place(
+        name="Main_Street",
+        parent="Town_Millbrook",
+        is_outdoor=True,
+        has_space=False,
+        place_type="street",
+        x=440, y=290, w=320, h=36,
+        color="#B8A88A", icon="", label="Main Street",
+    ))
 
     # Connect streets to town root
     topo.connect("Town_Millbrook", "Elm_Street")
@@ -151,21 +186,64 @@ def build_millbrook_topology() -> TownTopology:
     topo.connect("Elm_Street", "Main_Street")
 
     # Elm Street — homes
-    topo.add_place(Place(name="Alice_Home", parent="Elm_Street", personality="balanced", place_type="home"))
-    topo.add_place(Place(name="Sofia_Home", parent="Elm_Street", personality="balanced", place_type="home"))
+    topo.add_place(Place(
+        name="Alice_Home",
+        parent="Elm_Street",
+        personality="balanced",
+        place_type="home",
+        x=140, y=380, w=130, h=100,
+        color="#D4A03C", icon="🏠", label="Alice's Home",
+    ))
+    topo.add_place(Place(
+        name="Sofia_Home",
+        parent="Elm_Street",
+        personality="balanced",
+        place_type="home",
+        x=140, y=160, w=130, h=100,
+        color="#C4873C", icon="🏡", label="Sofia's Home",
+    ))
     topo.connect("Elm_Street", "Alice_Home")
     topo.connect("Elm_Street", "Sofia_Home")
 
     # Main Street — public buildings
-    topo.add_place(Place(name="Cafe_Rosetta", parent="Main_Street", personality="curious", place_type="public"))
-    topo.add_place(Place(name="Public_Library", parent="Main_Street", personality="analytical", place_type="public"))
-    topo.add_place(Place(name="Town_Market", parent="Main_Street", personality="maverick", place_type="public"))
+    topo.add_place(Place(
+        name="Cafe_Rosetta",
+        parent="Main_Street",
+        personality="curious",
+        place_type="public",
+        x=320, y=180, w=160, h=110,
+        color="#E8734A", icon="☕", label="Cafe Rosetta",
+    ))
+    topo.add_place(Place(
+        name="Public_Library",
+        parent="Main_Street",
+        personality="analytical",
+        place_type="public",
+        x=560, y=160, w=160, h=110,
+        color="#2A7B7F", icon="📚", label="Library",
+    ))
+    topo.add_place(Place(
+        name="Town_Market",
+        parent="Main_Street",
+        personality="maverick",
+        place_type="public",
+        x=720, y=360, w=160, h=110,
+        color="#8B4C8B", icon="🏪", label="Market",
+    ))
     topo.connect("Main_Street", "Cafe_Rosetta")
     topo.connect("Main_Street", "Public_Library")
     topo.connect("Main_Street", "Town_Market")
 
     # Central Park connects to Main Street and Elm Street
-    topo.add_place(Place(name="Central_Park", parent="Town_Millbrook", personality="empathetic", is_outdoor=True, place_type="outdoor"))
+    topo.add_place(Place(
+        name="Central_Park",
+        parent="Town_Millbrook",
+        personality="empathetic",
+        is_outdoor=True,
+        place_type="outdoor",
+        x=440, y=400, w=200, h=140,
+        color="#5C9E5C", icon="🌳", label="Central Park",
+    ))
     topo.connect("Town_Millbrook", "Central_Park")
     topo.connect("Main_Street", "Central_Park")
     topo.connect("Elm_Street", "Central_Park")

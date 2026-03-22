@@ -267,7 +267,10 @@ class SimEngine:
 
         # ── Phase 3: Decision ────────────────────────────────────────
         agent_actions: dict[str, Action] = {}
-        available_places = self.topology.all_place_names()
+        available_places = [
+            name for name in self.topology.all_place_names()
+            if self.topology.places[name].display
+        ]
         place_types = {n: p.place_type for n, p in self.topology.places.items()}
 
         for agent in alive_agents:

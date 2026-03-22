@@ -47,6 +47,39 @@ TOWN.initControls = function() {
   /* ── Sidebar toggle ──────────────────────────────────────────── */
   document.getElementById('sidebar-toggle').addEventListener('click', TOWN.toggleSidebar);
 
+  /* ── Relationship overlay toggle ─────────────────────────────── */
+  document.getElementById('btn-rel-overlay').addEventListener('click', function() {
+    TOWN.state.showRelOverlay = !TOWN.state.showRelOverlay;
+    this.classList.toggle('active', TOWN.state.showRelOverlay);
+  });
+
+  /* ── Town Beliefs panel ──────────────────────────────────────── */
+  document.getElementById('btn-culture').addEventListener('click', function() {
+    TOWN.showCulturePanel();
+  });
+
+  /* ── Event injection dropdown ────────────────────────────────── */
+  document.getElementById('event-inject-select').addEventListener('change', function() {
+    var eventId = this.value;
+    if (!eventId) return;
+    this.value = '';
+    fetch('/events/inject', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ event_id: eventId }),
+    }).then(function(r) { return r.json(); })
+      .then(function(data) {
+        if (data.status === 'queued') {
+          TOWN.addLogEntry('system', '\u25B6 Event triggered: ' + eventId.replace(/_/g, ' '));
+        } else {
+          TOWN.addLogEntry('system', '\u26A0 Event inject failed: ' + (data.error || '?'));
+        }
+      })
+      .catch(function() {
+        TOWN.addLogEntry('system', '\u26A0 Could not reach server to inject event.');
+      });
+  });
+
   /* ── Keyboard shortcuts ──────────────────────────────────────── */
   document.addEventListener('keydown', function(e) {
     /* Ignore if focused on an input */

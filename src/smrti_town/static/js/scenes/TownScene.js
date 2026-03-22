@@ -36,6 +36,11 @@ TOWN.TownScene = new Phaser.Class({
     /* Building container */
     this.buildingLayer = this.add.container(0, 0).setDepth(2);
 
+    /* Relationship overlay (below agents) */
+    this.relOverlayLayer = this.add.graphics().setDepth(9);
+    TOWN._relOverlayGfx = this.relOverlayLayer;
+    TOWN.state.showRelOverlay = false;
+
     /* Agent container */
     this.agentLayer = this.add.container(0, 0).setDepth(10);
 
@@ -66,6 +71,9 @@ TOWN.TownScene = new Phaser.Class({
 
     /* Ambient day/night cycle */
     TOWN.updateDayNight(this);
+
+    /* Relationship overlay */
+    TOWN.drawRelationshipOverlay(this);
   },
 });
 

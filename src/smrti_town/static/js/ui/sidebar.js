@@ -193,3 +193,40 @@ TOWN.toggleSidebar = function() {
     TOWN.closeSidebar();
   }
 };
+
+TOWN.showCulturePanel = function() {
+  TOWN.state.selectedAgent = null;
+  TOWN.state.selectedPlace = null;
+  TOWN.openSidebar();
+  var el = document.getElementById('sb-content');
+  el.innerHTML = '<div class="sb-section"><div class="sb-agent-name" style="color:#D4A03C">&#127758; Town Beliefs</div><div class="sb-agent-info" style="font-style:italic">Loading…</div></div>';
+
+  fetch('/culture?top_k=15')
+    .then(function(r) { return r.json(); })
+    .then(function(atoms) {
+      var esc = TOWN.escapeHtml;
+      var html = '<div class="sb-section"><div class="sb-agent-name" style="color:#D4A03C">&#127758; Town Beliefs</div>';
+      if (!atoms || !atoms.length) {
+        html += '<div class="sb-agent-info" style="font-style:italic">No shared beliefs yet — bridge discovery runs every 10th epoch.</div>';
+      }
+      html += '</div>';
+      if (atoms && atoms.length) {
+        html += '<div class="sb-section"><h3>Shared Knowledge</h3>';
+        for (var i = 0; i < atoms.length; i++) {
+          var a = atoms[i];
+          var valColor = a.valence > 0.2 ? '#6BCB77' : a.valence < -0.2 ? '#FF6B6B' : '#D4A03C';
+          html += '<div class="sb-rel-item">';
+          html += '<div class="sb-rel-dot" style="background:' + valColor + '"></div>';
+          html += '<span class="sb-rel-name">' + esc(a.content || a.label) + '</span>';
+          html += '<span class="sb-rel-state">' + Math.round(a.confidence * 100) + '%</span>';
+          html += '</div>';
+        }
+        html += '</div>';
+      }
+      document.getElementById('sb-content').innerHTML = html;
+    })
+    .catch(function() {
+      document.getElementById('sb-content').innerHTML =
+        '<div class="sb-section"><div class="sb-agent-info" style="color:#FF6B6B">Could not load culture data.</div></div>';
+    });
+};

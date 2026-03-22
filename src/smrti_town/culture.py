@@ -32,12 +32,17 @@ def promote_bridges_to_culture(
         read_spaces=["Space_Culture"],
     )
 
-    # Pre-fetch existing culture labels for dedup
+    # Pre-fetch existing culture labels for dedup via direct query (avoids wasted embedding)
     existing_labels: set[tuple[str, str]] = set()
     try:
-        culture_results = culture_smrti.recall(query="*", top_k=200)
-        for r in culture_results:
-            existing_labels.add((r.atom.label, r.atom.type.value))
+        from smrti.core.db import get_database
+        _db = get_database(db_path)
+        _rows = _db.fetchall(
+            "SELECT label, type FROM atoms WHERE tenant_id = ? AND space = 'Space_Culture' AND type IN ('belief', 'concept')",
+            (tenant_id,),
+        )
+        for r in _rows:
+            existing_labels.add((r["label"], r["type"]))
     except Exception:
         pass
 

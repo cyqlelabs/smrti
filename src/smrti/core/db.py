@@ -158,6 +158,17 @@ class Database:
             self._write_conn.executemany(sql, params_list)
             self._write_conn.commit()
 
+    def execute_batch(self, statements: list[tuple]) -> None:
+        """Execute multiple (sql, params) pairs in a single transaction."""
+        with self._write_lock:
+            try:
+                for sql, params in statements:
+                    self._write_conn.execute(sql, params)
+                self._write_conn.commit()
+            except Exception:
+                self._write_conn.rollback()
+                raise
+
     @contextmanager
     def _read_conn(self):
         conn = self._read_pool.get()

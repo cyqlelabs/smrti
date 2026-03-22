@@ -59,12 +59,13 @@ class Director:
             self.mode = "skip"
             return TICK_SKIP
 
-        # Scene mode: 2+ agents at the same place
+        # Scene mode: 2+ agents at the same non-home place
+        alive_names = {a.name for a in agents if a.alive}
         for place in places.values():
-            living_occupants = [
-                n for n in place.occupants
-                if any(a.name == n and a.alive for a in agents)
-            ]
+            # Sleeping together at home is montage, not scene
+            if place.place_type == "home":
+                continue
+            living_occupants = [n for n in place.occupants if n in alive_names]
             if len(living_occupants) >= 2:
                 self.mode = "scene"
                 return TICK_SCENE

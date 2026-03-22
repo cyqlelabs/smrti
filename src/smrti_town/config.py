@@ -122,7 +122,7 @@ REPRODUCTION_GATE = {
 }
 
 # ── Death parameters ─────────────────────────────────────────────────
-ELDER_DEATH_PROB_PER_TICK = 0.002   # per year past 65, per tick
+ELDER_DEATH_PROB_PER_TICK = 0.0003  # per year past 65, per tick
 STARVATION_HOURS = 48               # hours at energy=0 before death
 DEATH_LOW_ENERGY_MULT = 2.0
 

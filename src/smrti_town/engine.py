@@ -40,6 +40,7 @@ from smrti_town.lifecycle import (
     compute_life_stage,
     spawn_child,
 )
+from smrti_town.extractor import fire_extraction
 from smrti_town.narrator import Narrator
 from smrti_town.spatial import TownTopology
 from smrti_town.sporadic import (
@@ -302,12 +303,14 @@ class SimEngine:
             if narrative:
                 valence = self._estimate_action_valence(action)
                 try:
-                    agent.smrti.remember(
+                    ep_id = agent.smrti.remember(
                         content=narrative,
                         type="episode",
                         valence=valence,
                         metadata={"tick": self.tick_number, "action": action.type},
                     )
+                    if action.type == ACTION_TALK:
+                        fire_extraction(ep_id, narrative, agent.smrti, self.llm_client, self._bg_tasks)
                 except Exception:
                     pass
 
@@ -338,22 +341,24 @@ class SimEngine:
             place_smrti = self._place_smrtis.get(agent.location)
             if place_smrti:
                 try:
-                    place_smrti.remember(
+                    place_ep_id = place_smrti.remember(
                         content=narration["place"],
                         type="episode",
                         valence=0.1,
                     )
+                    fire_extraction(place_ep_id, narration["place"], place_smrti, self.llm_client, self._bg_tasks)
                 except Exception:
                     pass
 
             # Epistemic copy to listener
             try:
-                target_agent.smrti.remember(
+                listener_ep_id = target_agent.smrti.remember(
                     content=narration["listener"],
                     type="episode",
                     valence=0.1,
                     metadata={"speaker": agent.name, "location": agent.location},
                 )
+                fire_extraction(listener_ep_id, narration["listener"], target_agent.smrti, self.llm_client, self._bg_tasks)
             except Exception:
                 pass
 
@@ -369,7 +374,11 @@ class SimEngine:
             alive_agents, self.topology, delta, self.calendar.season
         )
         for sevt in sporadic_events:
-            apply_sporadic_effects(sevt, self._agents_by_name)
+            sporadic_ep_ids = apply_sporadic_effects(sevt, self._agents_by_name)
+            for agent_name, ep_id in sporadic_ep_ids.items():
+                agent = self._agents_by_name.get(agent_name)
+                if agent and agent.alive:
+                    fire_extraction(ep_id, sevt.description, agent.smrti, self.llm_client, self._bg_tasks)
             events.append(sevt.to_dict())
 
         # ── Phase 7: Epoch (periodic) ────────────────────────────────

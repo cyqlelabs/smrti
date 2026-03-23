@@ -65,7 +65,45 @@ html, body {
   font-family: 'Nunito', sans-serif;
 }
 
+#top-bar .town-health {
+  font-family: 'Fredoka', sans-serif;
+  font-size: 14px; font-weight: 700;
+  color: #FFD93D;
+  transition: color 0.8s ease;
+  white-space: nowrap;
+}
+
 #top-bar .spacer { flex: 1; }
+
+/* ── Toast notifications ───────────────────────────────────────── */
+#toast-container {
+  position: fixed; top: 64px; right: 20px; z-index: 200;
+  display: flex; flex-direction: column; gap: 8px;
+  pointer-events: none;
+}
+
+.toast {
+  background: #5D3A1A;
+  color: #FFF8F0;
+  font-family: 'Fredoka', sans-serif;
+  font-size: 14px; font-weight: 600;
+  padding: 10px 16px;
+  border-radius: 12px;
+  border-left: 3px solid #FFD93D;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.35);
+  animation: toastIn 0.3s ease-out, toastOut 0.4s 3.7s ease-in forwards;
+  max-width: 260px;
+}
+
+@keyframes toastIn {
+  from { opacity: 0; transform: translateX(30px); }
+  to   { opacity: 1; transform: translateX(0);    }
+}
+
+@keyframes toastOut {
+  from { opacity: 1; transform: translateX(0);    }
+  to   { opacity: 0; transform: translateX(30px); }
+}
 
 #top-bar .ws-status {
   display: flex; align-items: center; gap: 6px;

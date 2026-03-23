@@ -155,7 +155,7 @@ TOWN.selectAgent = function(name) {
   if (TOWN.state.agents[name]) {
     TOWN.renderAgentSidebar(TOWN.state.agents[name]);
   }
-  /* Update selection ring */
+  /* Update selection ring + camera pan */
   var scene = TOWN.state.scene;
   if (scene) {
     var sprites = TOWN.state.agentSprites;
@@ -163,6 +163,10 @@ TOWN.selectAgent = function(name) {
       if (n === name) {
         TOWN.showSelectionRing(scene, sprites[n]);
         TOWN.highlightAgent(scene, n);
+        /* Smoothly pan camera to the selected agent */
+        var sp = sprites[n];
+        var headOffY = sp.radius * 2 + 14;
+        scene.cameras.main.pan(sp.x, sp.y - headOffY / 2, 500, 'Quad.easeOut');
       } else if (sprites[n].selRing.alpha > 0) {
         scene.tweens.killTweensOf(sprites[n].selRing);
         sprites[n].selRing.setAlpha(0);

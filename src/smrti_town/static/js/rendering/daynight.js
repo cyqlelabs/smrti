@@ -3,8 +3,13 @@
    ================================================================ */
 window.TOWN = window.TOWN || {};
 
+/* Module-level TOD/season change trackers */
+TOWN._lastWindowTod   = null;
+TOWN._lastSeasonTint  = null;
+
 TOWN.updateDayNight = function(scene) {
-  var tod = TOWN.state.calendar.time_of_day || 'morning';
+  var tod    = TOWN.state.calendar.time_of_day || 'morning';
+  var season = TOWN.state.calendar.season      || 'spring';
   var todCfg = TOWN.TOD_COLORS[tod] || TOWN.TOD_COLORS.morning;
 
   /* Background color — smooth transition */
@@ -16,9 +21,27 @@ TOWN.updateDayNight = function(scene) {
     var current = scene.nightOverlay.alpha;
     var newAlpha = current + (target - current) * 0.04;
     scene.nightOverlay.setAlpha(newAlpha);
-
-    /* Overlay tint color */
     scene.nightOverlay.setFillStyle(todCfg.overlay, newAlpha);
+  }
+
+  /* Season tint overlay — update when season changes */
+  if (season !== TOWN._lastSeasonTint && TOWN._seasonOverlay) {
+    TOWN._lastSeasonTint = season;
+    var sc = TOWN.SEASON_TINTS[season];
+    if (sc) {
+      TOWN._seasonOverlay.setFillStyle(sc.overlay, 1);
+      scene.tweens.add({
+        targets: TOWN._seasonOverlay,
+        alpha: sc.alpha,
+        duration: 3000,
+        ease: 'Sine.easeInOut',
+      });
+    }
+  }
+
+  /* Window lighting — update when TOD changes */
+  if (tod !== TOWN._lastWindowTod) {
+    TOWN.updateWindowLighting();
   }
 
   /* Stars at night */
@@ -27,6 +50,65 @@ TOWN.updateDayNight = function(scene) {
     TOWN._twinkleStars(scene);
   } else {
     TOWN._hideStars(scene);
+  }
+};
+
+/* ── Lit window overlay ───────────────────────────────────────────── */
+TOWN.updateWindowLighting = function() {
+  var gfx = TOWN._windowLayerGfx;
+  if (!gfx) return;
+  var tod = TOWN.state.calendar && TOWN.state.calendar.time_of_day;
+  TOWN._lastWindowTod = tod;
+  gfx.clear();
+
+  var isNight = (tod === 'night' || tod === 'evening');
+  if (!isNight) return;
+
+  var town = TOWN.state.town;
+  if (!town || !town.places) return;
+  var sprites = TOWN.state.placeSprites;
+
+  for (var pName in sprites) {
+    var sp   = sprites[pName];
+    var place = town.places[pName];
+    if (!place) continue;
+    var pt = sp.placeType || place.place_type || 'other';
+    if (pt === 'outdoor') continue;
+    if (pName.toLowerCase().indexOf('street') !== -1) continue;
+
+    var w = sp.w, h = sp.h, bH = sp.boxH;
+    var wx = sp.x, wy = sp.y;
+    var winRows = (pt === 'public') ? 2 : 1;
+    var winCols = (pt === 'public') ? 3 : 2;
+
+    /* Deterministic per-window hash for consistent lit pattern */
+    var nameHash = 0;
+    for (var ci = 0; ci < pName.length; ci++) {
+      nameHash = (nameHash * 31 + pName.charCodeAt(ci)) & 0xFFFF;
+    }
+    var litThreshold = (tod === 'night') ? 0.65 : 0.42;
+
+    for (var row = 0; row < winRows; row++) {
+      for (var col = 0; col < winCols; col++) {
+        var winHash = (nameHash + row * 7919 + col * 1009) & 0xFFFF;
+        if ((winHash / 0xFFFF) > litThreshold) continue;
+
+        var wX  = wx + w  * (0.15 + col * (0.7 / Math.max(winCols - 1, 1)));
+        var wY  = wy + h;
+        var wZb = bH * (0.2 + row * 0.38);
+        var wZt = wZb + bH * 0.22;
+        var wD  = h * 0.10;
+        var alpha = (tod === 'night') ? 0.88 : 0.58;
+
+        gfx.fillStyle(0xFFE87A, alpha);
+        gfx.fillPoints([
+          TOWN.isoProject(wX,      wY, wZb),
+          TOWN.isoProject(wX + wD, wY, wZb),
+          TOWN.isoProject(wX + wD, wY, wZt),
+          TOWN.isoProject(wX,      wY, wZt),
+        ], true);
+      }
+    }
   }
 };
 

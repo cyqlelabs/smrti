@@ -52,12 +52,18 @@ _DOMAIN_BUILDING_PRIORITIES: dict[str, list[str]] = {
 }
 
 _NEED_BUILDING_MAP: dict[str, list[str]] = {
+    # canonical agent need names
+    "hunger": ["farm", "bakery", "butcher", "market", "granary"],
+    "shelter": ["cottage", "house", "apartment", "inn"],
+    "health": ["clinic", "hospital", "well", "water_tower"],
+    "safety": ["constabulary", "jail", "fire_station", "courthouse"],
+    "social": ["tavern", "park", "church", "festival_grounds"],
+    "education": ["school", "library", "university"],
+    "purpose": ["general_store", "blacksmith", "trading_post", "market", "bakery"],
+    "culture": ["park", "theater", "museum", "festival_grounds", "church"],
+    # legacy aliases kept for any external callers
     "housing": ["cottage", "house", "apartment", "inn"],
     "food": ["farm", "bakery", "butcher", "market", "granary"],
-    "safety": ["constabulary", "jail", "fire_station", "courthouse"],
-    "education": ["school", "library", "university"],
-    "health": ["clinic", "hospital", "well", "water_tower"],
-    "culture": ["park", "theater", "museum", "festival_grounds", "church"],
     "infrastructure": ["well", "water_tower", "warehouse", "trading_post"],
     "commerce": ["general_store", "bakery", "market", "tavern", "blacksmith"],
 }
@@ -257,7 +263,17 @@ class Council:
                 return "Higher taxes burden our citizens. We should cut spending instead."
             return style_base
 
-        # Event or policy.
+        # Event proposal — vary by role so members don't all say the same thing.
+        if proposal.action_type == "event":
+            role_lines: dict[str, str] = {
+                "mayor": f"A gathering will lift spirits and remind us why we built this town. {style_base}",
+                "sheriff": "A public event means crowds. We will need to ensure order.",
+                "treasurer": f"The cost is modest and morale has real economic value. {style_base}",
+                "superintendent": "Community celebrations strengthen social bonds and civic pride.",
+                "doctor": "Shared joy is good for health. I support a festival.",
+            }
+            return role_lines.get(member.role, style_base)
+
         return style_base
 
     # ── resolution ──────────────────────────────────────────────────────

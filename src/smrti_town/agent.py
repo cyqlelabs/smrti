@@ -1,10 +1,10 @@
-"""Agent: wraps drives + location + inventory + age + smrti instance."""
+"""Citizen — the main agent class for smrti-town."""
 
 from __future__ import annotations
 
 import random
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import TYPE_CHECKING
 
 from smrti import Smrti
 
@@ -12,674 +12,719 @@ from smrti_town.config import (
     ACTION_EAT,
     ACTION_INTERACT,
     ACTION_MOVE,
-    ACTION_PROPOSE,
+    ACTION_PLAY,
+    ACTION_PRAY,
     ACTION_REPRODUCE,
+    ACTION_SHOP,
     ACTION_SLEEP,
     ACTION_STUDY,
     ACTION_TALK,
     ACTION_WAIT,
     ACTION_WANDER,
     ACTION_WORK,
+    AGENT_SPEED_CHILD,
+    AGENT_SPEED_DEFAULT,
+    AGENT_SPEED_ELDER,
+    BUILDING_CATALOG,
+    ELDER_DEATH_PROB_PER_TICK,
+    ENTREPRENEURSHIP_COMMERCE_SKILL,
+    ENTREPRENEURSHIP_SAVINGS_THRESHOLD,
+    HOURS_PER_YEAR,
     LIFE_STAGES,
+    NEED_MAX,
     PERSONALITY_ACTION_BIAS,
     PRESET_TRAITS,
+    STARVATION_HOURS,
+    STARTING_WALLET,
     TRAIT_NAMES,
 )
-from smrti_town.drives import AgentDrives
+from smrti_town.drives import CitizenNeeds
+from smrti_town.skills import SkillSet
 
+if TYPE_CHECKING:
+    from smrti_town.calendar import SimCalendar
+    from smrti_town.spatial import Place, TownTopology
+
+
+# ── Data classes ──────────────────────────────────────────────────────
 
 @dataclass
 class Action:
-    """Structured action output from agent decision."""
-
     type: str
-    target: Optional[str] = None
+    target: str | None = None
     dialogue: str = ""
     metadata: dict = field(default_factory=dict)
-
-    def to_dict(self) -> dict:
-        d = {"type": self.type}
-        if self.target:
-            d["target"] = self.target
-        if self.dialogue:
-            d["dialogue"] = self.dialogue
-        if self.metadata:
-            d["metadata"] = self.metadata
-        return d
 
 
 @dataclass
 class PerceptionContext:
-    """Gathered context for decision making."""
-
     location: str
     time_of_day: str
     season: str
-    nearby_agents: list[str]
-    urgent_drive: Optional[str]
-    memories: list[dict]
-    schedule_obligation: Optional[str]
-    personality_preset: str
-    place_types: dict = field(default_factory=dict)
-    workplace: Optional[str] = None
-
-    def to_dict(self) -> dict:
-        return {
-            "location": self.location,
-            "time_of_day": self.time_of_day,
-            "season": self.season,
-            "nearby_agents": self.nearby_agents,
-            "urgent_drive": self.urgent_drive,
-            "schedule_obligation": self.schedule_obligation,
-            "personality": self.personality_preset,
-        }
+    nearby_agents: list[str] = field(default_factory=list)
+    urgent_need: str | None = None
+    memories: list[dict] = field(default_factory=list)
+    schedule_obligation: str | None = None
+    personality_preset: str = "balanced"
+    current_hour: float = 12.0
+    place_building_key: str | None = None
+    has_home: bool = False
+    has_job: bool = False
+    crime_rate: float = 0.0
 
 
-class Agent:
-    """A person in the town. Wraps drives (Python) + memory (Smrti)."""
+# ── Visual DNA generator ─────────────────────────────────────────────
+
+_SKIN_TONES = [0xFFDDB4, 0xF1C27D, 0xE0AC69, 0xC68642, 0x8D5524, 0x6B3A2A]
+_HAIR_COLORS = [0x090806, 0x2C222B, 0x71635A, 0xB7A69E, 0xD6C4C2, 0xCB6820, 0xE6CEA8]
+_SHIRT_COLORS = [0xE74C3C, 0x3498DB, 0x2ECC71, 0xF39C12, 0x9B59B6, 0x1ABC9C, 0xE67E22, 0x7F8C8D]
+_PANT_COLORS = [0x2C3E50, 0x34495E, 0x795548, 0x4A235A, 0x1B4F72, 0x1E8449]
+
+
+def _generate_visual_dna() -> dict:
+    return {
+        "skin": random.choice(_SKIN_TONES),
+        "hair": random.choice(_HAIR_COLORS),
+        "shirt": random.choice(_SHIRT_COLORS),
+        "pants": random.choice(_PANT_COLORS),
+        "hat": random.random() < 0.3,
+        "hair_style": random.randint(0, 4),
+        "body_type": random.randint(0, 2),
+    }
+
+
+# ── Citizen ───────────────────────────────────────────────────────────
+
+class Citizen:
+    """A town citizen with Smrti memory, Maslow needs, skills, and traits."""
 
     def __init__(
         self,
         name: str,
         personality: str = "balanced",
-        location: str = "Central_Park",
+        location: str = "",
         age_years: float = 25.0,
         db_path: str = "~/.smrti/town.db",
         tenant_id: str = "millbrook",
         parents: tuple[str, str] | None = None,
-        traits: dict | None = None,
+        traits: dict[str, float] | None = None,
+        home: str | None = None,
+        workplace: str | None = None,
+        council_role: str | None = None,
+        initial_skills: dict[str, float] | None = None,
+        visual_dna: dict | None = None,
     ) -> None:
         self.name = name
         self.personality_preset = personality
         self.location = location
-        self.age_hours: float = age_years * 672.0  # HOURS_PER_YEAR
-        self.drives = AgentDrives()
-        self.inventory: list[str] = []
-        self.alive: bool = True
-        self.parents = parents
-        self.last_milestone_year: int = int(age_years)
-        self.starvation_hours: float = 0.0
-        self._interaction_counts: dict[str, int] = {}  # target_name -> count
-        self._db_path = db_path
-        self._tenant_id = tenant_id
-        self._place_types: dict[str, str] = {}
-        self.mood_valence: float = 0.0
-        # Movement state (navgrid-based)
-        self.path: list[tuple[float, float]] = []  # world-coordinate waypoints
-        self.path_index: int = 0
-        self.moving: bool = False
-        self.speed: float = 3.0  # tiles per tick
-        self.world_pos: tuple[float, float] = (0.0, 0.0)  # current interpolated position
-        self.facing: str = "se"  # direction for sprite orientation
-        # Visual DNA for paperdoll rendering
-        self.visual_dna: dict = {}
-        # Economy
-        self.wallet: int = 100
-        self._relationships: list[dict] = []
-        self._regression_cooldown: dict[str, bool] = {}  # target_name → True while cooling
-        self.traits: dict[str, float] = (
-            traits if traits is not None
-            else dict(PRESET_TRAITS.get(personality, PRESET_TRAITS["balanced"]))
-        )
 
-        # Smrti instance — write to agent's private space, read from
-        # agent space + world + culture
+        # Smrti memory instance
+        write_space = f"Agent_Space_{name}"
         self.smrti = Smrti(
             db_path=db_path,
             personality=personality,
             tenant_id=tenant_id,
-            write_space=f"Agent_Space_{name}",
-            read_spaces=[
-                f"Agent_Space_{name}",
-                "World_Space",
-                "Space_Culture",
-            ],
+            write_space=write_space,
+            read_spaces=[write_space, "World_Space", "Space_Culture"],
         )
 
-    # ── Properties ───────────────────────────────────────────────────
+        # Drives and skills
+        self.needs = CitizenNeeds()
+        self.skills = SkillSet(initial=initial_skills)
+
+        # Economy
+        self.wallet: int = STARTING_WALLET
+
+        # Traits
+        if traits is not None:
+            self.traits: dict[str, float] = {
+                t: max(0.0, min(1.0, traits.get(t, 0.5))) for t in TRAIT_NAMES
+            }
+        elif personality in PRESET_TRAITS:
+            self.traits = dict(PRESET_TRAITS[personality])
+        else:
+            self.traits = dict(PRESET_TRAITS["balanced"])
+
+        # Visual appearance
+        self.visual_dna: dict = visual_dna if visual_dna is not None else _generate_visual_dna()
+
+        # Movement state
+        self.world_pos: tuple[float, float] = (0.0, 0.0)
+        self.path: list[tuple[float, float]] = []
+        self.path_index: int = 0
+        self.moving: bool = False
+        self.speed: float = AGENT_SPEED_DEFAULT
+        self.facing: str = "south"
+
+        # Life
+        self.alive: bool = True
+        self.age_hours: float = age_years * HOURS_PER_YEAR
+        self.parents = parents
+        self.home = home
+        self.workplace = workplace
+        self.council_role = council_role
+
+        # Social
+        self.relationships: dict[str, str] = {}  # name -> relationship_type
+        self.interaction_counts: dict[str, int] = {}
+
+        # Health tracking
+        self.starvation_hours: float = 0.0
+
+        # Current action (set by decide())
+        self.current_action: Action | None = None
+
+    # ── properties ────────────────────────────────────────────────────
 
     @property
     def age_years(self) -> float:
-        return self.age_hours / 672.0
+        return self.age_hours / HOURS_PER_YEAR
 
     @property
     def life_stage(self) -> str:
-        years = self.age_years
-        for stage, info in LIFE_STAGES.items():
+        age = self.age_years
+        for stage_name, info in LIFE_STAGES.items():
             lo, hi = info["age_range"]
-            if lo <= years < hi:
-                return stage
+            if lo <= age < hi:
+                return stage_name
         return "elder"
 
     @property
     def life_stage_info(self) -> dict:
-        return LIFE_STAGES.get(self.life_stage, LIFE_STAGES["elder"])
-
-    @property
-    def active_drives(self) -> list[str]:
-        return self.life_stage_info.get("drives", ["hunger", "energy", "social"])
+        return LIFE_STAGES.get(self.life_stage, LIFE_STAGES["adult"])
 
     @property
     def can_move(self) -> bool:
-        return self.life_stage_info.get("can_move", False)
+        return self.life_stage_info.get("can_move", True)
 
     @property
     def can_talk(self) -> bool:
-        return self.life_stage_info.get("can_talk", False)
+        return self.life_stage_info.get("can_talk", True)
 
     @property
-    def energy_decay_mult(self) -> float:
-        return self.life_stage_info.get("energy_decay_mult", 1.0)
+    def can_work(self) -> bool:
+        return self.life_stage_info.get("can_work", True)
 
-    def increment_interaction(self, target_name: str) -> None:
-        self._interaction_counts[target_name] = (
-            self._interaction_counts.get(target_name, 0) + 1
+    @property
+    def can_reproduce(self) -> bool:
+        return self.life_stage_info.get("can_reproduce", False)
+
+    # ── tick ──────────────────────────────────────────────────────────
+
+    def tick_state(self, delta_hours: float, crime_rate: float = 0.0) -> None:
+        """Update age, needs, starvation tracking, and death checks."""
+        if not self.alive:
+            return
+
+        # Age
+        self.age_hours += delta_hours
+
+        # Speed by life stage
+        stage = self.life_stage
+        if stage == "child":
+            self.speed = AGENT_SPEED_CHILD
+        elif stage == "elder":
+            self.speed = AGENT_SPEED_ELDER
+        else:
+            self.speed = AGENT_SPEED_DEFAULT
+
+        # Needs
+        self.needs.tick(
+            delta_hours=delta_hours,
+            life_stage=stage,
+            has_home=self.home is not None,
+            has_job=self.workplace is not None,
+            crime_rate=crime_rate,
         )
 
-    def get_interaction_count(self, target_name: str) -> int:
-        return self._interaction_counts.get(target_name, 0)
+        # Starvation
+        if self.needs.hunger >= NEED_MAX:
+            self.starvation_hours += delta_hours
+        else:
+            self.starvation_hours = max(0.0, self.starvation_hours - delta_hours)
 
-    def effective_action_bias(self) -> dict[str, float]:
-        """Return action bias dict, blending personality preset with all traits."""
-        from smrti_town.config import PERSONALITY_ACTION_BIAS
-        base = dict(PERSONALITY_ACTION_BIAS.get(
-            self.personality_preset,
-            PERSONALITY_ACTION_BIAS["balanced"],
-        ))
-        shyness = self.traits.get("shyness", 0.3)
-        adventurous = self.traits.get("adventurous", 0.4)
-        laziness = self.traits.get("laziness", 0.3)
-        leadership = self.traits.get("leadership", 0.4)
-        creativity = self.traits.get("creativity", 0.5)
-        nurturing = self.traits.get("nurturing", 0.5)
-        stubbornness = self.traits.get("stubbornness", 0.3)
-        # Shyness reduces social, leadership amplifies it
-        base["social"] = max(0.0, min(1.0, base.get("social", 0.5) * (1.0 - shyness * 0.5) * (1.0 + leadership * 0.3)))
-        # Adventurous boosts wander, stubbornness suppresses it
-        base["wander"] = max(0.0, min(1.0, base.get("wander", 0.3) * (1.0 + adventurous * 0.5) * (1.0 - stubbornness * 0.4)))
-        # Creativity amplifies curiosity-driven actions
-        base["curiosity"] = max(0.0, min(1.0, base.get("curiosity", 0.5) * (1.0 + creativity * 0.4)))
-        # Laziness suppresses duty/work
-        base["duty"] = max(0.0, min(1.0, base.get("duty", 0.5) * (1.0 - laziness * 0.5)))
-        # Nurturing amplifies romance/social warmth
-        base["romance"] = max(0.0, min(1.0, base.get("romance", 0.5) * (1.0 + nurturing * 0.2)))
-        return base
-
-    def _memory_valence_for_agent(self, agent_name: str, memories: list[dict]) -> float:
-        """Return average valence of memories that mention a given agent name."""
-        vals = [m["valence"] for m in memories if agent_name in (m.get("content") or "")]
-        return sum(vals) / len(vals) if vals else 0.0
-
-    def _memory_preferred_location(self, candidates: list[str], memories: list[dict]) -> str | None:
-        """Return the candidate location with the strongest positive memory association."""
-        scores: dict[str, float] = {}
-        for m in memories:
-            content = (m.get("content") or "").lower()
-            for place in candidates:
-                key = place.lower().replace("_", " ")
-                if key in content or place.lower() in content:
-                    scores[place] = scores.get(place, 0.0) + m.get("valence", 0.0)
-        if scores:
-            best = max(scores, key=lambda k: scores[k])
-            if scores[best] > 0.2:
-                return best
-        return None
-
-    def step_movement(self, delta_tiles: float) -> bool:
-        """Advance along the path by delta_tiles. Returns True if destination reached."""
-        if not self.moving or not self.path or self.path_index >= len(self.path):
-            self.moving = False
-            return True
-
-        remaining = delta_tiles
-        while remaining > 0 and self.path_index < len(self.path):
-            target = self.path[self.path_index]
-            dx = target[0] - self.world_pos[0]
-            dy = target[1] - self.world_pos[1]
-            dist = (dx * dx + dy * dy) ** 0.5
-
-            if dist <= remaining:
-                # Reached this waypoint
-                self.world_pos = target
-                self.path_index += 1
-                remaining -= dist
-                # Update facing direction
-                if abs(dx) > abs(dy):
-                    self.facing = "e" if dx > 0 else "w"
-                else:
-                    self.facing = "s" if dy > 0 else "n"
-            else:
-                # Move toward waypoint
-                ratio = remaining / dist if dist > 0 else 0
-                self.world_pos = (
-                    self.world_pos[0] + dx * ratio,
-                    self.world_pos[1] + dy * ratio,
-                )
-                if abs(dx) > abs(dy):
-                    self.facing = "e" if dx > 0 else "w"
-                else:
-                    self.facing = "s" if dy > 0 else "n"
-                remaining = 0
-
-        if self.path_index >= len(self.path):
-            self.moving = False
-            return True
-        return False
-
-    def assign_path(self, waypoints: list[tuple[float, float]]) -> None:
-        """Assign a new movement path from navgrid A*."""
-        if not waypoints:
+        # Death checks
+        if self.starvation_hours >= STARVATION_HOURS:
+            self.alive = False
             return
-        self.path = waypoints
-        self.path_index = 0
-        self.moving = True
 
-    def persist_interactions(self) -> None:
-        """Save interaction counts directly to the Smrti DB (single transaction)."""
-        import json
-        label = f"__interactions__{self.name}"
-        data = json.dumps(self._interaction_counts)
-        try:
-            db = self.smrti.db
-            db.execute_batch([
-                (
-                    "DELETE FROM atoms WHERE label = ? AND tenant_id = ? AND space = ?",
-                    (label, self._tenant_id, f"Agent_Space_{self.name}"),
-                ),
-                (
-                    "INSERT INTO atoms (id, type, label, content, tenant_id, space, probability, confidence) "
-                    "VALUES (?, 'belief', ?, ?, ?, ?, 1.0, 1.0)",
-                    (label, label, data, self._tenant_id, f"Agent_Space_{self.name}"),
-                ),
-            ])
-        except Exception:
-            pass
+        if stage == "elder" and random.random() < ELDER_DEATH_PROB_PER_TICK:
+            self.alive = False
 
-    def update_relationships(self, all_agents: list[Agent]) -> None:
-        """Cache relationship states for all known agents (called at epoch time)."""
-        from smrti_town.lifecycle import _infer_relationship_state
-        _STATE_VALENCE = {
-            "married": 0.8, "romantic": 0.7, "close_friend": 0.5,
-            "friend": 0.3, "acquaintance": 0.1,
-        }
-        rels = []
-        for other in all_agents:
-            if other.name == self.name or not other.alive:
-                continue
-            count = self.get_interaction_count(other.name)
-            if count == 0:
-                continue
-            state = _infer_relationship_state(self, other)
-            rels.append({
-                "name": other.name,
-                "state": state,
-                "count": count,
-                "valence": _STATE_VALENCE.get(state, 0.0),
-            })
-        self._relationships = rels
-
-    def restore_interactions(self) -> None:
-        """Load interaction counts directly from the Smrti DB."""
-        import json
-        label = f"__interactions__{self.name}"
-        try:
-            db = self.smrti.db
-            rows = db.fetchall(
-                "SELECT content FROM atoms WHERE label = ? AND tenant_id = ? AND space = ?",
-                (label, self._tenant_id, f"Agent_Space_{self.name}"),
-            )
-            if rows:
-                self._interaction_counts = json.loads(rows[0]["content"])
-        except Exception:
-            pass
-
-    # ── Perception ───────────────────────────────────────────────────
+    # ── perception ────────────────────────────────────────────────────
 
     def perceive(
         self,
+        topology: TownTopology,
+        calendar: SimCalendar,
         nearby_agents: list[str],
-        time_of_day: str,
-        season: str,
-        calendar_hour: float,
-        place_types: dict[str, str] | None = None,
+        place: Place | None = None,
     ) -> PerceptionContext:
-        """Gather context for decision-making."""
-        if not self.alive or not self.can_talk:
-            return PerceptionContext(
-                location=self.location,
-                time_of_day=time_of_day,
-                season=season,
-                nearby_agents=nearby_agents,
-                urgent_drive=None,
-                memories=[],
-                schedule_obligation=None,
-                personality_preset=self.personality_preset,
-                place_types=place_types or {},
-            )
-
-        # Check schedule obligations
-        schedule_obligation = self._check_schedule(calendar_hour)
-
-        # Query smrti for relevant memories
-        query = f"I am at {self.location}. It is {time_of_day}, {season}."
-        if nearby_agents:
-            query += f" {', '.join(nearby_agents)} are here."
-        memories = []
+        """Build a PerceptionContext from the current environment."""
+        # Recall relevant memories for decision-making.
+        location_name = place.name if place else self.location
+        memories: list[dict] = []
         try:
-            recall_results = self.smrti.recall(query=query, top_k=5)
-            for r in recall_results:
-                memories.append({
-                    "content": r.atom.content or r.atom.label,
-                    "salience": r.salience,
-                    "valence": r.atom.valence.valence if r.atom.valence else 0.0,
-                })
-            if memories:
-                self.mood_valence = sum(m["valence"] for m in memories) / len(memories)
+            results = self.smrti.recall(
+                f"at {location_name} with {', '.join(nearby_agents[:3])}" if nearby_agents
+                else f"at {location_name}",
+                top_k=5,
+                min_confidence=0.1,
+            )
+            memories = [
+                {
+                    "content": r.content,
+                    "valence": r.valence,
+                    "probability": r.probability,
+                }
+                for r in results
+            ]
         except Exception:
             pass
 
-        urgent_drive = self.drives.highest_urgent_drive(self.active_drives)
+        # Schedule obligation
+        schedule_obligation: str | None = None
+        schedule = self.life_stage_info.get("schedule")
+        if schedule:
+            hour = calendar.hour
+            for obligation, (start, end) in schedule.items():
+                if start <= hour < end:
+                    schedule_obligation = obligation
+                    break
+
+        building_key = place.building_key if place else None
 
         return PerceptionContext(
-            location=self.location,
-            time_of_day=time_of_day,
-            season=season,
+            location=location_name,
+            time_of_day=calendar.time_of_day,
+            season=calendar.season,
             nearby_agents=nearby_agents,
-            urgent_drive=urgent_drive,
+            urgent_need=self.needs.highest_unmet_need(self.life_stage),
             memories=memories,
             schedule_obligation=schedule_obligation,
             personality_preset=self.personality_preset,
-            place_types=place_types or {},
+            current_hour=calendar.hour,
+            place_building_key=building_key,
+            has_home=self.home is not None,
+            has_job=self.workplace is not None,
+            crime_rate=0.0,
         )
 
-    # ── Decision ─────────────────────────────────────────────────────
+    # ── decision ──────────────────────────────────────────────────────
 
-    def decide(
-        self,
-        ctx: PerceptionContext,
-        available_places: list[str],
-        place_agents: dict[str, list[str]],
-        place_types: dict[str, str] | None = None,
-    ) -> Action:
-        """Rule-based decision system. No LLM calls.
+    def decide(self, context: PerceptionContext, topology: TownTopology | None = None) -> Action:
+        """Rule-based decision engine.  No LLM calls.
 
-        Priority order:
-        1. Sleep if exhausted or nighttime
-        2. Schedule obligations (school/work)
-        3. Highest urgent drive above threshold
-        4. Personality-influenced idle action
-        5. Random wandering
+        Priority: satisfy highest unmet need first, modulated by personality
+        traits and memory valence.
         """
-        if place_types is not None:
-            self._place_types = place_types
-            ctx = PerceptionContext(
-                location=ctx.location,
-                time_of_day=ctx.time_of_day,
-                season=ctx.season,
-                nearby_agents=ctx.nearby_agents,
-                urgent_drive=ctx.urgent_drive,
-                memories=ctx.memories,
-                schedule_obligation=ctx.schedule_obligation,
-                personality_preset=ctx.personality_preset,
-                place_types=place_types,
-            )
         if not self.alive:
             return Action(type=ACTION_WAIT)
-        if not self.can_talk and not self.can_move:
-            return Action(type=ACTION_WAIT, dialogue="(infant)")
 
-        # 1. Sleep — very low energy or nighttime
-        if self.drives.energy <= 10 or (
-            ctx.time_of_day == "night" and self.drives.energy < 60
+        if not self.can_move:
+            return Action(type=ACTION_WAIT)
+
+        # Night time → sleep (unless urgent hunger or health need)
+        if context.time_of_day == "night" and context.urgent_need not in ("hunger", "health"):
+            if self.home and self.location != self.home:
+                return Action(type=ACTION_MOVE, target=self.home, metadata={"reason": "sleep"})
+            return Action(type=ACTION_SLEEP)
+
+        # Schedule obligations override non-urgent needs
+        if context.schedule_obligation and context.urgent_need not in ("hunger", "health"):
+            return self._handle_schedule(context, topology)
+
+        # Address urgent needs in Maslow order
+        need = context.urgent_need
+        if need:
+            return self._handle_need(need, context, topology)
+
+        # No urgent need — personality-driven optional activities
+        return self._idle_action(context, topology)
+
+    def _handle_schedule(self, context: PerceptionContext, topology: TownTopology | None) -> Action:
+        obligation = context.schedule_obligation
+        if obligation == "work" and self.workplace:
+            if self.location != self.workplace:
+                return Action(type=ACTION_MOVE, target=self.workplace, metadata={"reason": "work"})
+            return Action(type=ACTION_WORK, target=self.workplace)
+        if obligation == "school" and topology:
+            school = self._find_building("school", topology)
+            if school and self.location != school:
+                return Action(type=ACTION_MOVE, target=school, metadata={"reason": "school"})
+            if school:
+                return Action(type=ACTION_STUDY, target=school)
+        return Action(type=ACTION_WAIT)
+
+    def _handle_need(
+        self, need: str, context: PerceptionContext, topology: TownTopology | None
+    ) -> Action:
+        if need == "hunger":
+            return self._handle_hunger(context, topology)
+        elif need == "shelter":
+            return self._handle_shelter(context, topology)
+        elif need == "health":
+            return self._handle_health(context, topology)
+        elif need == "safety":
+            return self._handle_safety(context, topology)
+        elif need == "social":
+            return self._handle_social(context, topology)
+        elif need == "education":
+            return self._handle_education(context, topology)
+        elif need == "purpose":
+            return self._handle_purpose(context, topology)
+        elif need == "culture":
+            return self._handle_culture(context, topology)
+        elif need == "actualization":
+            return self._handle_actualization(context, topology)
+        return Action(type=ACTION_WAIT)
+
+    # ── need handlers ─────────────────────────────────────────────────
+
+    def _handle_hunger(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        # If at a food source, eat.
+        if ctx.place_building_key and self._building_provides_food(ctx.place_building_key):
+            return Action(type=ACTION_EAT, target=ctx.location)
+        # Move to nearest food source.
+        if topo:
+            dest = self._find_food_source(topo)
+            if dest and dest != ctx.location:
+                return Action(type=ACTION_MOVE, target=dest, metadata={"reason": "hunger"})
+            if dest:
+                return Action(type=ACTION_EAT, target=dest)
+        # Fallback: if at home, eat (subsistence).
+        if self.home and ctx.location == self.home:
+            return Action(type=ACTION_EAT, target=ctx.location)
+        if self.home:
+            return Action(type=ACTION_MOVE, target=self.home, metadata={"reason": "hunger"})
+        return Action(type=ACTION_WAIT, metadata={"reason": "no_food"})
+
+    def _handle_shelter(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        if self.home:
+            if ctx.location != self.home:
+                return Action(type=ACTION_MOVE, target=self.home, metadata={"reason": "shelter"})
+            return Action(type=ACTION_SLEEP)
+        # Homeless: go to inn or town hall.
+        if topo:
+            shelter = self._find_building("inn", topo) or self._find_building("town_hall", topo)
+            if shelter and ctx.location != shelter:
+                return Action(type=ACTION_MOVE, target=shelter, metadata={"reason": "shelter"})
+            if shelter:
+                return Action(type=ACTION_SLEEP, target=shelter)
+        return Action(type=ACTION_WAIT, metadata={"reason": "homeless"})
+
+    def _handle_health(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        if topo:
+            clinic = self._find_building("clinic", topo) or self._find_building("hospital", topo)
+            if clinic and ctx.location != clinic:
+                return Action(type=ACTION_MOVE, target=clinic, metadata={"reason": "health"})
+            if clinic:
+                return Action(type=ACTION_INTERACT, target=clinic, metadata={"reason": "health"})
+        # No clinic — rest at home.
+        if self.home and ctx.location != self.home:
+            return Action(type=ACTION_MOVE, target=self.home, metadata={"reason": "rest"})
+        return Action(type=ACTION_SLEEP, metadata={"reason": "rest"})
+
+    def _handle_safety(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        # Stay home or move near constabulary.
+        if self.home and ctx.location != self.home:
+            return Action(type=ACTION_MOVE, target=self.home, metadata={"reason": "safety"})
+        if topo:
+            safe = self._find_building("constabulary", topo)
+            if safe and ctx.location != safe:
+                return Action(type=ACTION_MOVE, target=safe, metadata={"reason": "safety"})
+        return Action(type=ACTION_WAIT, metadata={"reason": "safety"})
+
+    def _handle_social(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        # Personality bias: shy citizens are less likely to seek social contact.
+        if random.random() < self.traits.get("shyness", 0.3) * 0.5:
+            return Action(type=ACTION_WAIT, metadata={"reason": "shy"})
+
+        # If already near other agents, talk to someone.
+        if ctx.nearby_agents and self.can_talk:
+            target = self._pick_social_target(ctx)
+            return Action(type=ACTION_TALK, target=target)
+
+        # Move to a social venue.
+        if topo:
+            venue = self._find_social_venue(topo, ctx)
+            if venue and ctx.location != venue:
+                return Action(type=ACTION_MOVE, target=venue, metadata={"reason": "social"})
+            if venue and ctx.nearby_agents:
+                return Action(type=ACTION_TALK, target=self._pick_social_target(ctx))
+        return Action(type=ACTION_WANDER, metadata={"reason": "social"})
+
+    def _handle_education(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        if topo:
+            school = (
+                self._find_building("school", topo)
+                or self._find_building("library", topo)
+                or self._find_building("university", topo)
+            )
+            if school and ctx.location != school:
+                return Action(type=ACTION_MOVE, target=school, metadata={"reason": "education"})
+            if school:
+                return Action(type=ACTION_STUDY, target=school)
+        return Action(type=ACTION_WAIT, metadata={"reason": "no_school"})
+
+    def _handle_purpose(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        # Laziness trait reduces work probability.
+        if random.random() < self.traits.get("laziness", 0.3) * 0.4:
+            return self._idle_action(ctx, topo)
+
+        if self.workplace:
+            if ctx.location != self.workplace:
+                return Action(type=ACTION_MOVE, target=self.workplace, metadata={"reason": "work"})
+            return Action(type=ACTION_WORK, target=self.workplace)
+
+        # No assigned workplace — try odd jobs at any commercial/industrial building.
+        if topo:
+            for bkey in ("farm", "lumber_mill", "quarry", "general_store", "market"):
+                place = self._find_building(bkey, topo)
+                if place:
+                    if ctx.location != place:
+                        return Action(type=ACTION_MOVE, target=place, metadata={"reason": "odd_job"})
+                    return Action(type=ACTION_WORK, target=place, metadata={"reason": "odd_job"})
+        return Action(type=ACTION_WANDER, metadata={"reason": "no_work"})
+
+    def _handle_culture(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        if topo:
+            venue = (
+                self._find_building("theater", topo)
+                or self._find_building("museum", topo)
+                or self._find_building("park", topo)
+                or self._find_building("festival_grounds", topo)
+            )
+            if venue and ctx.location != venue:
+                return Action(type=ACTION_MOVE, target=venue, metadata={"reason": "culture"})
+            if venue:
+                return Action(type=ACTION_PLAY, target=venue)
+        return Action(type=ACTION_WANDER, metadata={"reason": "culture"})
+
+    def _handle_actualization(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        # Check entrepreneurship eligibility.
+        if (
+            self.wallet >= ENTREPRENEURSHIP_SAVINGS_THRESHOLD
+            and self.skills.level("commerce") >= ENTREPRENEURSHIP_COMMERCE_SKILL
         ):
-            return self._decide_sleep(ctx, available_places)
-
-        # 2. Schedule obligations
-        if ctx.schedule_obligation:
-            return self._decide_schedule(ctx, available_places)
-
-        # 3. Urgent drive
-        if ctx.urgent_drive:
-            return self._decide_drive(ctx, available_places, place_agents)
-
-        # 4. Personality-biased idle action
-        return self._decide_idle(ctx, available_places, place_agents)
-
-    # ── Private decision helpers ─────────────────────────────────────
-
-    def _decide_sleep(self, ctx: PerceptionContext, available_places: list[str]) -> Action:
-        home_candidates = [p for p in available_places if ctx.place_types.get(p) == "home"]
-        if home_candidates and self.location not in home_candidates:
-            return Action(type=ACTION_MOVE, target=home_candidates[0])
-        return Action(type=ACTION_SLEEP)
-
-    def _decide_schedule(self, ctx: PerceptionContext, available_places: list[str]) -> Action:
-        if ctx.schedule_obligation == "school":
-            school_places = [p for p in available_places if ctx.place_types.get(p) == "public"]
-            if school_places and self.location not in school_places:
-                return Action(type=ACTION_MOVE, target=school_places[0])
-            return Action(type=ACTION_STUDY)
-        if ctx.schedule_obligation == "work":
-            # Prefer assigned workplace; fall back to any public/commercial place
-            if ctx.workplace and ctx.workplace in available_places:
-                if self.location != ctx.workplace:
-                    return Action(type=ACTION_MOVE, target=ctx.workplace)
-                return Action(type=ACTION_WORK)
-            work_places = [
-                p for p in available_places
-                if ctx.place_types.get(p) in ("public", "shop", "market", "farm")
-            ]
-            if work_places and self.location not in work_places:
-                target = random.choice(work_places)
-                return Action(type=ACTION_MOVE, target=target)
-            return Action(type=ACTION_WORK)
-        return Action(type=ACTION_WAIT)
-
-    def _decide_drive(
-        self,
-        ctx: PerceptionContext,
-        available_places: list[str],
-        place_agents: dict[str, list[str]],
-    ) -> Action:
-        drive = ctx.urgent_drive
-        bias = self.effective_action_bias()
-
-        if drive == "hunger":
-            return self._decide_eat(ctx, available_places)
-        if drive == "energy":
-            return self._decide_sleep(ctx, available_places)
-        if drive == "social":
-            return self._decide_social(ctx, available_places, place_agents, bias)
-        if drive == "curiosity":
-            return self._decide_curiosity(ctx, available_places, bias)
-        if drive == "duty":
-            return self._decide_schedule(
-                PerceptionContext(
-                    location=ctx.location,
-                    time_of_day=ctx.time_of_day,
-                    season=ctx.season,
-                    nearby_agents=ctx.nearby_agents,
-                    urgent_drive=ctx.urgent_drive,
-                    memories=ctx.memories,
-                    schedule_obligation="work",
-                    personality_preset=ctx.personality_preset,
-                    place_types=ctx.place_types,
-                ),
-                available_places,
+            return Action(
+                type=ACTION_INTERACT,
+                metadata={"reason": "entrepreneurship", "eligible": True},
             )
-        if drive == "romance":
-            return self._decide_romance(ctx, available_places, place_agents, bias)
+        # Otherwise pursue culture or education as self-improvement.
+        if random.random() < 0.5:
+            return self._handle_culture(ctx, topo)
+        return self._handle_education(ctx, topo)
 
-        return Action(type=ACTION_WAIT)
+    # ── idle / personality-driven ─────────────────────────────────────
 
-    def _decide_eat(self, ctx: PerceptionContext, available_places: list[str]) -> Action:
-        food_places = [
-            p for p in available_places
-            if ctx.place_types.get(p) in ("market", "farm", "public")
-        ]
-        if food_places and self.location not in food_places:
-            target = random.choice(food_places)
-            return Action(type=ACTION_MOVE, target=target)
-        return Action(type=ACTION_EAT)
+    def _idle_action(self, ctx: PerceptionContext, topo: TownTopology | None) -> Action:
+        """Choose an action based on personality bias when no need is urgent."""
+        bias = PERSONALITY_ACTION_BIAS.get(self.personality_preset, PERSONALITY_ACTION_BIAS["balanced"])
 
-    def _decide_social(
-        self,
-        ctx: PerceptionContext,
-        available_places: list[str],
-        place_agents: dict[str, list[str]],
-        bias: dict,
-    ) -> Action:
-        # Talk to someone nearby — prefer agents with positive memory association
-        if ctx.nearby_agents:
-            stubbornness = self.traits.get("stubbornness", 0.3)
-            candidates = []
-            for name in ctx.nearby_agents:
-                mem_val = self._memory_valence_for_agent(name, ctx.memories)
-                # Stubborn agents avoid those they remember negatively
-                if mem_val < -0.3 and random.random() < stubbornness:
-                    continue
-                candidates.append((name, mem_val))
-            if not candidates:
-                candidates = [(name, 0.0) for name in ctx.nearby_agents]
-            candidates.sort(key=lambda x: x[1], reverse=True)
-            return Action(type=ACTION_TALK, target=candidates[0][0])
+        # Build weighted choices.
+        choices: list[tuple[str, float]] = []
+        for category, weight in bias.items():
+            choices.append((category, weight))
 
-        # Move toward populated places
-        social_bias = bias.get("social", 0.5)
-        populated = [
-            (p, agents) for p, agents in place_agents.items()
-            if agents and p != self.location and p in available_places
-        ]
-        if populated and random.random() < social_bias:
-            # Prefer the place with the most people, biased by positive memories
-            populated.sort(key=lambda x: len(x[1]), reverse=True)
-            target_place = populated[0][0]
-            mem_place = self._memory_preferred_location(
-                [p for p, _ in populated], ctx.memories
+        # Pick by weighted random.
+        category = self._weighted_choice(choices)
+
+        if category == "social" and ctx.nearby_agents and self.can_talk:
+            return Action(type=ACTION_TALK, target=self._pick_social_target(ctx))
+        elif category == "social" and topo:
+            venue = self._find_social_venue(topo, ctx)
+            if venue and ctx.location != venue:
+                return Action(type=ACTION_MOVE, target=venue, metadata={"reason": "social_idle"})
+        elif category == "education" and topo:
+            school = self._find_building("library", topo) or self._find_building("school", topo)
+            if school and ctx.location != school:
+                return Action(type=ACTION_MOVE, target=school, metadata={"reason": "study_idle"})
+            if school:
+                return Action(type=ACTION_STUDY, target=school)
+        elif category == "purpose" and self.workplace:
+            if ctx.location != self.workplace:
+                return Action(type=ACTION_MOVE, target=self.workplace, metadata={"reason": "extra_work"})
+            return Action(type=ACTION_WORK, target=self.workplace)
+        elif category == "culture" and topo:
+            venue = (
+                self._find_building("park", topo)
+                or self._find_building("theater", topo)
+                or self._find_building("museum", topo)
             )
-            if mem_place:
-                target_place = mem_place
-            return Action(type=ACTION_MOVE, target=target_place)
+            if venue and ctx.location != venue:
+                return Action(type=ACTION_MOVE, target=venue, metadata={"reason": "culture_idle"})
+            if venue:
+                return Action(type=ACTION_PLAY, target=venue)
+        elif category == "wander":
+            return Action(type=ACTION_WANDER)
 
-        # Go to a social hub — prefer one with positive memories
-        social_places = [p for p in available_places if ctx.place_types.get(p) in ("public", "outdoor")]
-        if social_places and self.location not in social_places:
-            mem_place = self._memory_preferred_location(social_places, ctx.memories)
-            return Action(type=ACTION_MOVE, target=mem_place or random.choice(social_places))
-
+        # Default fallback.
+        if self.traits.get("adventurous", 0.4) > 0.5:
+            return Action(type=ACTION_WANDER)
         return Action(type=ACTION_WAIT)
 
-    def _decide_curiosity(
-        self,
-        ctx: PerceptionContext,
-        available_places: list[str],
-        bias: dict,
-    ) -> Action:
-        curiosity_bias = bias.get("curiosity", 0.5)
-        curiosity_places = [p for p in available_places if ctx.place_types.get(p) == "public"]
-        if curiosity_places and self.location not in curiosity_places and random.random() < curiosity_bias:
-            return Action(type=ACTION_MOVE, target=random.choice(curiosity_places))
-        if ctx.place_types.get(self.location) == "public":
-            return Action(type=ACTION_STUDY)
-        # Wander to explore
-        if random.random() < bias.get("wander", 0.3):
-            candidates = [p for p in available_places if p != self.location]
-            if candidates:
-                target = random.choice(candidates)
-                return Action(type=ACTION_WANDER, target=target)
-        return Action(type=ACTION_INTERACT)
+    # ── helpers ───────────────────────────────────────────────────────
 
-    def _decide_romance(
-        self,
-        ctx: PerceptionContext,
-        available_places: list[str],
-        place_agents: dict[str, list[str]],
-        bias: dict,
-    ) -> Action:
-        # Look for romantic partners nearby — weight by interaction history and memory valence
-        romance_bias = bias.get("romance", 0.5)
-        if ctx.nearby_agents and random.random() < romance_bias:
-            scored = []
-            for a in ctx.nearby_agents:
-                mem_val = self._memory_valence_for_agent(a, ctx.memories)
-                # Combine interaction count and memory valence
-                score = self.get_interaction_count(a) + mem_val * 5
-                scored.append((a, score))
-            scored.sort(key=lambda x: x[1], reverse=True)
-            target = scored[0][0]
-            return Action(type=ACTION_TALK, target=target)
-
-        # Move toward social places to meet people
-        social_places = [p for p in available_places if ctx.place_types.get(p) in ("public", "outdoor")]
-        if social_places and self.location not in social_places:
-            return Action(type=ACTION_MOVE, target=random.choice(social_places))
-
-        return Action(type=ACTION_WAIT)
-
-    def _decide_idle(
-        self,
-        ctx: PerceptionContext,
-        available_places: list[str],
-        place_agents: dict[str, list[str]],
-    ) -> Action:
-        bias = self.effective_action_bias()
-
-        # Children: prefer to stay near a parent
-        if self.life_stage == "child" and self.parents:
-            for place, occupants in place_agents.items():
-                if place == self.location:
-                    continue
-                for parent_name in self.parents:
-                    if parent_name and parent_name in occupants and place in available_places:
-                        if random.random() < 0.55:
-                            return Action(type=ACTION_MOVE, target=place)
-
-        # Talk to nearby agents if social-leaning personality
-        if ctx.nearby_agents and random.random() < bias.get("social", 0.5):
-            target = random.choice(ctx.nearby_agents)
-            return Action(type=ACTION_TALK, target=target)
-
-        # Wander if wander-leaning
-        if random.random() < bias.get("wander", 0.3):
-            candidates = [p for p in available_places if p != self.location]
-            if candidates:
-                target = random.choice(candidates)
-                return Action(type=ACTION_WANDER, target=target)
-
-        # Study if curiosity-leaning
-        if random.random() < bias.get("curiosity", 0.5) * 0.3:
-            if ctx.place_types.get(self.location) == "public":
-                return Action(type=ACTION_STUDY)
-
-        return Action(type=ACTION_WAIT)
-
-    def _check_schedule(self, calendar_hour: float) -> str | None:
-        schedule = self.life_stage_info.get("schedule")
-        if not schedule:
+    def _find_building(self, building_key: str, topo: TownTopology) -> str | None:
+        """Find the nearest place with the given building_key, avoiding places
+        with negative memory valence."""
+        places = topo.places_by_building(building_key)
+        if not places:
             return None
-        for obligation, (start, end) in schedule.items():
-            if start <= calendar_hour < end:
-                return obligation
+        if len(places) == 1:
+            return places[0].name
+
+        # Score by distance (prefer closer) and memory valence (avoid negative).
+        best_name: str | None = None
+        best_score = float("-inf")
+        for p in places:
+            dist = topo.path_distance(self.location, p.name) if self.location else 99
+            if dist < 0:
+                dist = 99
+            # Check memory valence for this place.
+            valence_bias = self._place_valence(p.name)
+            score = -dist + valence_bias * 3.0
+            if score > best_score:
+                best_score = score
+                best_name = p.name
+        return best_name
+
+    def _find_food_source(self, topo: TownTopology) -> str | None:
+        """Find a place that provides food."""
+        food_places: list[str] = []
+        for p in topo.places.values():
+            if p.building_key and self._building_provides_food(p.building_key):
+                food_places.append(p.name)
+        if not food_places:
+            return None
+        if len(food_places) == 1:
+            return food_places[0]
+        # Prefer closest.
+        food_places.sort(key=lambda n: topo.path_distance(self.location, n) if self.location else 99)
+        return food_places[0]
+
+    def _find_social_venue(self, topo: TownTopology, ctx: PerceptionContext) -> str | None:
+        """Find a social venue (tavern, park, church, festival_grounds)."""
+        for bkey in ("tavern", "park", "church", "festival_grounds"):
+            place = self._find_building(bkey, topo)
+            if place:
+                return place
         return None
 
-    # ── Serialization ────────────────────────────────────────────────
+    @staticmethod
+    def _building_provides_food(building_key: str) -> bool:
+        bdef = BUILDING_CATALOG.get(building_key)
+        return bdef is not None and bdef.provides_food
+
+    def _pick_social_target(self, ctx: PerceptionContext) -> str:
+        """Pick a nearby agent to interact with, preferring positive memory valence."""
+        if not ctx.nearby_agents:
+            return ""
+        if len(ctx.nearby_agents) == 1:
+            return ctx.nearby_agents[0]
+
+        # Weight by relationship and memory valence.
+        candidates: list[tuple[str, float]] = []
+        for name in ctx.nearby_agents:
+            weight = 1.0
+            # Boost friends.
+            rel = self.relationships.get(name)
+            if rel in ("friend", "close_friend", "romantic", "married"):
+                weight += 2.0
+            # Memory valence bias.
+            valence = self._person_valence(name)
+            weight += valence * 2.0
+            weight = max(0.1, weight)
+            candidates.append((name, weight))
+
+        return self._weighted_choice(candidates)
+
+    def _place_valence(self, place_name: str) -> float:
+        """Return average valence of memories about a place.  0.0 if none."""
+        try:
+            results = self.smrti.recall(place_name, top_k=3, min_confidence=0.1)
+            if not results:
+                return 0.0
+            return sum(r.valence for r in results) / len(results)
+        except Exception:
+            return 0.0
+
+    def _person_valence(self, person_name: str) -> float:
+        """Return average valence of memories about a person.  0.0 if none."""
+        try:
+            results = self.smrti.recall(person_name, top_k=3, min_confidence=0.1)
+            if not results:
+                return 0.0
+            return sum(r.valence for r in results) / len(results)
+        except Exception:
+            return 0.0
+
+    @staticmethod
+    def _weighted_choice(items: list[tuple[str, float]]) -> str:
+        """Weighted random selection from a list of (value, weight) tuples."""
+        if not items:
+            return ""
+        total = sum(w for _, w in items)
+        if total <= 0:
+            return items[0][0]
+        r = random.random() * total
+        cumulative = 0.0
+        for value, weight in items:
+            cumulative += weight
+            if r <= cumulative:
+                return value
+        return items[-1][0]
+
+    # ── interaction tracking ──────────────────────────────────────────
+
+    def record_interaction(self, other_name: str) -> None:
+        self.interaction_counts[other_name] = self.interaction_counts.get(other_name, 0) + 1
+
+    def persist_interactions(self, db) -> None:
+        """Save pairwise interaction counts to the DB."""
+        rows = [
+            (self.name, other, count)
+            for other, count in self.interaction_counts.items()
+        ]
+        if rows:
+            db.execute_many(
+                "INSERT OR REPLACE INTO citizen_interactions (citizen, other, count) VALUES (?, ?, ?)",
+                rows,
+            )
+
+    def restore_interactions(self, db) -> None:
+        """Reload pairwise interaction counts from the DB."""
+        rows = db.fetchall(
+            "SELECT other, count FROM citizen_interactions WHERE citizen = ?",
+            (self.name,),
+        )
+        self.interaction_counts = {r["other"]: r["count"] for r in rows} if rows else {}
+
+    # ── serialization ─────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
         return {
             "name": self.name,
+            "personality": self.personality_preset,
             "location": self.location,
-            "age_years": round(self.age_years, 1),
+            "age_years": round(self.age_years, 2),
             "life_stage": self.life_stage,
             "alive": self.alive,
-            "personality": self.personality_preset,
-            "drives": self.drives.to_dict(),
-            "inventory": self.inventory,
-            "parents": list(self.parents) if self.parents else None,
-            "mood_valence": round(self.mood_valence, 2),
-            "relationships": self._relationships,
+            "needs": self.needs.to_dict(),
+            "skills": self.skills.to_dict(),
+            "wallet": self.wallet,
+            "traits": self.traits,
+            "visual_dna": self.visual_dna,
             "world_pos": list(self.world_pos),
             "moving": self.moving,
             "facing": self.facing,
-            "wallet": self.wallet,
-            "visual_dna": self.visual_dna,
+            "home": self.home,
+            "workplace": self.workplace,
+            "council_role": self.council_role,
+            "relationships": self.relationships,
+            "current_action": {
+                "type": self.current_action.type,
+                "target": self.current_action.target,
+            } if self.current_action else None,
         }

@@ -1,100 +1,79 @@
 /**
- * Petition panel — shows community requests from Space_Culture.
+ * Petition list panel with approve/dismiss buttons.
  */
-(function() {
-  'use strict';
 
-  TOWN.updatePetitionBadge = function() {
-    var badge = document.getElementById('petition-badge');
-    if (!badge) return;
-    fetch('/petitions')
-      .then(function(r) { return r.json(); })
-      .then(function(petitions) {
-        var pending = petitions.filter(function(p) { return p.status === 'pending'; });
-        badge.textContent = pending.length || '';
-        badge.style.display = pending.length > 0 ? 'inline-block' : 'none';
-      })
-      .catch(function() {});
-  };
+var Petitions = {
+  el: null,
+  listEl: null,
 
-  TOWN.showPetitionPanel = function() {
-    var panel = document.getElementById('petition-panel');
-    if (!panel) return;
-    panel.style.display = 'block';
+  init: function() {
+    this.el = document.getElementById('ui-petitions');
+    this.listEl = document.getElementById('petitions-list');
+    document.getElementById('petitions-close').addEventListener('click', function() {
+      Petitions.hide();
+    });
+  },
 
-    fetch('/petitions')
-      .then(function(r) { return r.json(); })
-      .then(function(petitions) {
-        var pending = petitions.filter(function(p) { return p.status === 'pending'; });
-        var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
-          + '<h3 style="margin:0;color:#e0d0c0">Community Petitions</h3>'
-          + '<button onclick="TOWN.hidePetitionPanel()" style="background:none;border:none;color:#a09080;font-size:18px;cursor:pointer;line-height:1">&times;</button>'
-          + '</div>';
-        if (pending.length === 0) {
-          html += '<p class="empty">No pending petitions.</p>';
-        } else {
-          pending.forEach(function(p) {
-            var urgencyClass = p.urgency > 0.8 ? 'urgent' : (p.urgency > 0.5 ? 'moderate' : 'low');
-            html += '<div class="petition-card ' + urgencyClass + '">';
-            html += '<div class="petition-icon">' + _buildingIcon(p.building_type) + '</div>';
-            html += '<div class="petition-info">';
-            html += '<strong>' + p.building_type + '</strong>';
-            html += '<div class="petition-urgency">Urgency: ' + Math.round(p.urgency * 100) + '%</div>';
-            if (p.evidence.length > 0) {
-              html += '<div class="petition-evidence">"' + TOWN.escapeHtml(p.evidence[0]) + '"</div>';
-            }
-            if (p.petitioners.length > 0) {
-              html += '<div class="petition-petitioners">From: ' + p.petitioners.join(', ') + '</div>';
-            }
-            html += '</div>';
-            html += '<div class="petition-actions">';
-            html += '<button onclick="TOWN.approvePetition(' + p.idx + ')">Approve</button>';
-            html += '<button onclick="TOWN.dismissPetition(' + p.idx + ')" class="dismiss">Dismiss</button>';
-            html += '</div>';
-            html += '</div>';
-          });
-        }
-        panel.innerHTML = html;
-      })
-      .catch(function() {
-        panel.innerHTML = '<p>Failed to load petitions.</p>';
+  show: function() {
+    this.el.classList.remove('hidden');
+    this.render();
+  },
+
+  hide: function() {
+    this.el.classList.add('hidden');
+  },
+
+  toggle: function() {
+    if (this.el.classList.contains('hidden')) {
+      this.show();
+    } else {
+      this.hide();
+    }
+  },
+
+  render: function() {
+    var petitions = GameState.petitions || [];
+    if (petitions.length === 0) {
+      this.listEl.innerHTML = '<div style="color:var(--text-dim);font-size:12px;padding:8px;">No pending petitions.</div>';
+      return;
+    }
+
+    var html = '';
+    for (var i = 0; i < petitions.length; i++) {
+      var p = petitions[i];
+      if (p.status && p.status !== 'pending') continue;
+
+      html += '<div class="petition-item">';
+      html += '<div class="petition-type">' + _esc(p.building_type || p.type || 'Request') + '</div>';
+      html += '<div class="petition-desc">' + _esc(p.description || p.reason || '') + '</div>';
+      html += '<div class="petition-actions">';
+      html += '<button class="btn-primary btn-small" data-petition-approve="' + i + '">Approve</button>';
+      html += '<button class="btn-secondary btn-small" data-petition-dismiss="' + i + '">Dismiss</button>';
+      html += '</div>';
+      html += '</div>';
+    }
+
+    this.listEl.innerHTML = html;
+
+    // Attach handlers
+    var approveButtons = this.listEl.querySelectorAll('[data-petition-approve]');
+    for (var a = 0; a < approveButtons.length; a++) {
+      approveButtons[a].addEventListener('click', function() {
+        var idx = parseInt(this.getAttribute('data-petition-approve'), 10);
+        fetch('/petitions/' + idx + '/approve', { method: 'POST' })
+          .then(function(r) { return r.json(); })
+          .then(function() { Petitions.render(); });
       });
-  };
+    }
 
-  TOWN.hidePetitionPanel = function() {
-    var panel = document.getElementById('petition-panel');
-    if (panel) panel.style.display = 'none';
-  };
-
-  TOWN.approvePetition = function(idx) {
-    fetch('/petitions/' + idx + '/approve', { method: 'POST' })
-      .then(function(r) { return r.json(); })
-      .then(function(result) {
-        if (result.building_type) {
-          TOWN.enterPlacementMode(result.building_type, [5, 4]);
-        }
-        TOWN.showPetitionPanel();
-        TOWN.updatePetitionBadge();
-      })
-      .catch(function() {});
-  };
-
-  TOWN.dismissPetition = function(idx) {
-    fetch('/petitions/' + idx + '/dismiss', { method: 'POST' })
-      .then(function() {
-        TOWN.showPetitionPanel();
-        TOWN.updatePetitionBadge();
-      })
-      .catch(function() {});
-  };
-
-  function _buildingIcon(type) {
-    var icons = {
-      city_hall: '\uD83C\uDFDB\uFE0F', house: '\uD83C\uDFE0', farm: '\uD83C\uDF3E', market: '\uD83C\uDFEA',
-      school: '\uD83C\uDFEB', workshop: '\uD83D\uDD28', clinic: '\uD83C\uDFE5', tavern: '\uD83C\uDF7A',
-      church: '\u26EA', library: '\uD83D\uDCDA'
-    };
-    return icons[type] || '\uD83C\uDFD7\uFE0F';
-  }
-
-})();
+    var dismissButtons = this.listEl.querySelectorAll('[data-petition-dismiss]');
+    for (var d = 0; d < dismissButtons.length; d++) {
+      dismissButtons[d].addEventListener('click', function() {
+        var idx = parseInt(this.getAttribute('data-petition-dismiss'), 10);
+        fetch('/petitions/' + idx + '/dismiss', { method: 'POST' })
+          .then(function(r) { return r.json(); })
+          .then(function() { Petitions.render(); });
+      });
+    }
+  },
+};

@@ -1,180 +1,182 @@
-"""Town topology: Place class, path distance, occupant tracking."""
+"""TownTopology + Place — adjacency graph for town navigation."""
 
 from __future__ import annotations
 
+from collections import deque
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from smrti import Smrti
 
 
 @dataclass
 class Place:
-    """A location in the town."""
-
     name: str
-    parent: Optional[str] = None
-    personality: str = "balanced"
+    place_type: str  # civic, commercial, residential, industrial, cultural, infrastructure, outdoor
+    building_key: str | None = None
     is_outdoor: bool = False
     occupants: set[str] = field(default_factory=set)
-    children: list[str] = field(default_factory=list)
-    # A Place_Space is only created for socially significant places.
-    # Leaf rooms use their parent's space.
-    has_space: bool = True
-    # Layout / rendering fields
-    place_type: str = "other"   # "street", "public", "outdoor", "home", "other"
-    display: bool = True        # False = root/virtual node, not shown on map
-    x: int = 400
-    y: int = 300
-    w: int = 120
-    h: int = 90
-    color: str = "#888888"
-    icon: str = ""
-    label: str = ""
-
-    def add_occupant(self, agent_name: str) -> None:
-        self.occupants.add(agent_name)
-
-    def remove_occupant(self, agent_name: str) -> None:
-        self.occupants.discard(agent_name)
+    grid_x: int = 0
+    grid_y: int = 0
+    smrti: "Smrti | None" = None
+    _home_of: set[str] = field(default_factory=set)
+    _workplace_of: set[str] = field(default_factory=set)
 
     @property
     def space_name(self) -> str:
         return f"Place_Space_{self.name}"
 
+    def add_occupant(self, name: str) -> None:
+        self.occupants.add(name)
+
+    def remove_occupant(self, name: str) -> None:
+        self.occupants.discard(name)
+
     def to_dict(self) -> dict:
         return {
             "name": self.name,
-            "parent": self.parent,
-            "personality": self.personality,
+            "place_type": self.place_type,
+            "building_key": self.building_key,
             "is_outdoor": self.is_outdoor,
             "occupants": sorted(self.occupants),
-            "children": self.children,
-            "place_type": self.place_type,
-            "display": self.display,
-            "x": self.x,
-            "y": self.y,
-            "w": self.w,
-            "h": self.h,
-            "color": self.color,
-            "icon": self.icon,
-            "label": self.label,
+            "grid_x": self.grid_x,
+            "grid_y": self.grid_y,
         }
 
 
 class TownTopology:
-    """Spatial graph of places with path distance calculation."""
+    """Undirected adjacency graph of named Places with BFS path distance."""
 
     def __init__(self) -> None:
         self.places: dict[str, Place] = {}
         self._adjacency: dict[str, set[str]] = {}
 
+    # ── graph mutations ───────────────────────────────────────────────
     def add_place(self, place: Place) -> None:
         self.places[place.name] = place
-        if place.name not in self._adjacency:
-            self._adjacency[place.name] = set()
-        if place.parent and place.parent in self.places:
-            self.places[place.parent].children.append(place.name)
-            self._adjacency.setdefault(place.parent, set()).add(place.name)
-            self._adjacency[place.name].add(place.parent)
+        self._adjacency.setdefault(place.name, set())
 
     def connect(self, a: str, b: str) -> None:
-        """Add a bidirectional edge between two places."""
+        """Create a bidirectional edge between two places."""
         self._adjacency.setdefault(a, set()).add(b)
         self._adjacency.setdefault(b, set()).add(a)
 
+    def remove_place(self, name: str) -> Place | None:
+        place = self.places.pop(name, None)
+        if place is None:
+            return None
+        neighbors = self._adjacency.pop(name, set())
+        for nb in neighbors:
+            self._adjacency.get(nb, set()).discard(name)
+        return place
+
+    # ── queries ───────────────────────────────────────────────────────
+    def neighbors(self, place_name: str) -> list[str]:
+        return sorted(self._adjacency.get(place_name, set()))
+
     def path_distance(self, a: str, b: str) -> int:
-        """BFS shortest path distance between two places. -1 if unreachable."""
+        """BFS shortest path distance.  Returns -1 if unreachable."""
         if a == b:
             return 0
         if a not in self._adjacency or b not in self._adjacency:
             return -1
         visited: set[str] = {a}
-        queue: list[tuple[str, int]] = [(a, 0)]
-        idx = 0
-        while idx < len(queue):
-            current, dist = queue[idx]
-            idx += 1
-            for neighbor in self._adjacency.get(current, set()):
-                if neighbor == b:
+        queue: deque[tuple[str, int]] = deque([(a, 0)])
+        while queue:
+            current, dist = queue.popleft()
+            for nb in self._adjacency.get(current, ()):
+                if nb == b:
                     return dist + 1
-                if neighbor not in visited:
-                    visited.add(neighbor)
-                    queue.append((neighbor, dist + 1))
+                if nb not in visited:
+                    visited.add(nb)
+                    queue.append((nb, dist + 1))
         return -1
 
-    def neighbors(self, place_name: str) -> list[str]:
-        return sorted(self._adjacency.get(place_name, set()))
+    def find_path(self, a: str, b: str) -> list[str]:
+        """BFS shortest path returning list of place names from *a* to *b*
+        (inclusive).  Returns empty list if unreachable."""
+        if a == b:
+            return [a]
+        if a not in self._adjacency or b not in self._adjacency:
+            return []
+        visited: set[str] = {a}
+        queue: deque[tuple[str, list[str]]] = deque([(a, [a])])
+        while queue:
+            current, path = queue.popleft()
+            for nb in self._adjacency.get(current, ()):
+                if nb == b:
+                    return path + [nb]
+                if nb not in visited:
+                    visited.add(nb)
+                    queue.append((nb, path + [nb]))
+        return []
 
-    def reachable_places(self, from_place: str, max_dist: int = 1) -> list[str]:
-        """Return places reachable within max_dist hops."""
-        result: list[str] = []
-        visited: set[str] = {from_place}
-        queue: list[tuple[str, int]] = [(from_place, 0)]
-        idx = 0
-        while idx < len(queue):
-            current, dist = queue[idx]
-            idx += 1
-            if dist > 0:
-                result.append(current)
-            if dist < max_dist:
-                for neighbor in self._adjacency.get(current, set()):
-                    if neighbor not in visited:
-                        visited.add(neighbor)
-                        queue.append((neighbor, dist + 1))
-        return result
+    def places_by_type(self, place_type: str) -> list[Place]:
+        return [p for p in self.places.values() if p.place_type == place_type]
+
+    def places_by_building(self, building_key: str) -> list[Place]:
+        return [p for p in self.places.values() if p.building_key == building_key]
+
+    def home_for(self, citizen_name: str) -> Place | None:
+        for p in self.places.values():
+            if citizen_name in p._home_of:
+                return p
+        return None
+
+    def workplace_for(self, citizen_name: str) -> Place | None:
+        for p in self.places.values():
+            if citizen_name in p._workplace_of:
+                return p
+        return None
+
+    def assign_home(self, citizen_name: str, place_name: str) -> None:
+        # Remove from previous home first.
+        for p in self.places.values():
+            p._home_of.discard(citizen_name)
+        place = self.places.get(place_name)
+        if place:
+            place._home_of.add(citizen_name)
+
+    def assign_workplace(self, citizen_name: str, place_name: str) -> None:
+        for p in self.places.values():
+            p._workplace_of.discard(citizen_name)
+        place = self.places.get(place_name)
+        if place:
+            place._workplace_of.add(citizen_name)
+
+    def unassign_home(self, citizen_name: str) -> None:
+        for p in self.places.values():
+            p._home_of.discard(citizen_name)
+
+    def unassign_workplace(self, citizen_name: str) -> None:
+        for p in self.places.values():
+            p._workplace_of.discard(citizen_name)
+
+    def move_agent(self, name: str, from_place: str | None, to_place: str) -> None:
+        if from_place and from_place in self.places:
+            self.places[from_place].remove_occupant(name)
+        if to_place in self.places:
+            self.places[to_place].add_occupant(name)
 
     def all_place_names(self) -> list[str]:
         return sorted(self.places.keys())
 
     def all_connections(self) -> list[list[str]]:
-        """Return all unique bidirectional edges as [a, b] pairs."""
-        seen: set[frozenset] = set()
-        result: list[list[str]] = []
-        for a, neighbors in self._adjacency.items():
-            for b in neighbors:
-                key = frozenset((a, b))
+        """Return deduplicated edge list as [[a, b], ...]."""
+        seen: set[tuple[str, str]] = set()
+        edges: list[list[str]] = []
+        for a, nbs in self._adjacency.items():
+            for b in nbs:
+                key = (min(a, b), max(a, b))
                 if key not in seen:
                     seen.add(key)
-                    result.append([a, b])
-        return result
+                    edges.append(list(key))
+        return edges
 
-    def places_of_type(self, place_type: str) -> list[str]:
-        """Return names of all places with a given place_type."""
-        return [name for name, p in self.places.items() if p.place_type == place_type]
-
-    def places_by_type(self, place_type: str) -> list[str]:
-        """Alias for places_of_type."""
-        return self.places_of_type(place_type)
-
-    def home_for(self, agent_name: str) -> str | None:
-        """Return the home place whose name contains agent_name, or any home as fallback."""
-        homes = self.places_of_type("home")
-        if not homes:
-            return None
-        for name in homes:
-            if agent_name in name:
-                return name
-        return homes[0]
-
-    def move_agent(self, agent_name: str, from_place: str, to_place: str) -> None:
-        if from_place in self.places:
-            self.places[from_place].remove_occupant(agent_name)
-        if to_place in self.places:
-            self.places[to_place].add_occupant(agent_name)
-
-
-def build_millbrook_topology() -> TownTopology:
-    """Founding scenario: a single Town Hall where settlers begin."""
-    topo = TownTopology()
-    topo.add_place(Place(
-        name="Town_Hall",
-        personality="balanced",
-        is_outdoor=False,
-        has_space=True,
-        place_type="public",
-        display=True,
-        x=360, y=220, w=200, h=140,
-        color="#5D3A1A",
-        icon="\U0001f3db\ufe0f",
-        label="Town Hall",
-    ))
-    return topo
+    # ── serialization ─────────────────────────────────────────────────
+    def to_dict(self) -> dict:
+        return {
+            "places": {name: p.to_dict() for name, p in self.places.items()},
+            "connections": self.all_connections(),
+        }

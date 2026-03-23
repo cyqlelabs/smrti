@@ -1,227 +1,132 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Smrti Town</title>
-
-<!-- Fonts: Fredoka (display) + Nunito (body) -->
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@400;500;600;700&family=Nunito:wght@400;600;700&display=swap" rel="stylesheet">
-
-<!-- Styles -->
-<link rel="stylesheet" href="css/main.css">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>smrti-town</title>
+  <link rel="stylesheet" href="css/main.css">
 </head>
 <body>
+  <div id="game-container"></div>
 
-<!-- Top Bar -->
-<div id="top-bar">
-  <div class="logo">Smrti Town</div>
-  <div class="sep"></div>
-  <div class="clock-group">
-    <span id="sim-time">&#9728;&#65039; 06:00</span>
-    <span id="sim-day" style="color:rgba(255,248,240,0.55)">Day 1</span>
-    <span id="sim-season" style="color:#5C9E5C">Spring</span>
-    <span id="sim-year" style="color:rgba(255,248,240,0.55)">Year 1</span>
+  <!-- UI Overlays -->
+  <div id="ui-topbar" class="ui-panel hidden">
+    <div id="topbar-clock"></div>
+    <div id="topbar-treasury"></div>
+    <div id="topbar-population"></div>
+    <div id="topbar-speed"></div>
   </div>
-  <div class="sep"></div>
-  <span id="director-badge" class="badge badge-routine">Routine</span>
-  <span id="tick-counter" class="tick-counter">Tick 0</span>
-  <div class="sep"></div>
-  <span id="town-health" class="town-health">\uD83D\uDC9B 50</span>
-  <div class="spacer"></div>
-  <div class="ws-status">
-    <div id="ws-dot" class="ws-dot ws-connecting"></div>
-    <span id="ws-label">Connecting</span>
+
+  <div id="ui-sidebar" class="ui-panel hidden">
+    <div id="sidebar-close" class="panel-close">&times;</div>
+    <div id="sidebar-content"></div>
   </div>
-  <button id="btn-settings" title="LLM Settings">&#9881;</button>
-</div>
 
-<!-- Settings Modal -->
-<div id="settings-overlay" class="settings-overlay hidden">
-  <div class="settings-modal">
-    <div class="settings-header">
-      <span class="settings-title">&#9881; LLM Settings</span>
-      <button id="settings-close" class="settings-close">&times;</button>
+  <div id="ui-eventlog" class="ui-panel hidden">
+    <div id="eventlog-title">Events</div>
+    <div id="eventlog-entries"></div>
+  </div>
+
+  <div id="ui-controls" class="ui-panel hidden">
+    <button id="btn-pause" title="Pause">&#9646;&#9646;</button>
+    <button id="btn-play" title="Play">&#9654;</button>
+    <button id="btn-skip" title="Skip week">&#9193;</button>
+  </div>
+
+  <div id="ui-toolbar" class="ui-panel hidden">
+    <div id="toolbar-title">Build</div>
+    <div id="toolbar-items"></div>
+  </div>
+
+  <div id="ui-council-overlay" class="ui-overlay hidden">
+    <div class="overlay-card overlay-wide">
+      <h2>Council Meeting</h2>
+      <div id="council-debate"></div>
+      <div id="council-proposal"></div>
+      <div id="council-actions"></div>
     </div>
+  </div>
 
-    <div class="settings-body">
-      <div class="settings-row settings-toggle-row">
-        <label class="settings-label" for="set-enabled">Enable LLM</label>
-        <label class="toggle-switch">
-          <input type="checkbox" id="set-enabled" checked>
-          <span class="toggle-slider"></span>
-        </label>
-      </div>
-
-      <div class="settings-group-label">Connection</div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-base-url">Endpoint URL</label>
-        <input class="settings-input" id="set-base-url" type="text"
-               placeholder="http://0.0.0.0:8421/v1">
-      </div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-model">Model</label>
-        <input class="settings-input" id="set-model" type="text"
-               placeholder="Qwen3.5-9B-Q8_0.gguf">
-      </div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-dialogue-timeout">Dialogue timeout (s)</label>
-        <input class="settings-input settings-input-sm" id="set-dialogue-timeout"
-               type="number" min="0" max="300" step="5"
-               title="Seconds to wait for dialogue response. 0 = no timeout.">
-      </div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-worldgen-timeout">World gen timeout (s)</label>
-        <input class="settings-input settings-input-sm" id="set-worldgen-timeout"
-               type="number" min="0" max="3600" step="30"
-               title="Seconds to wait for world generation. 0 = no timeout (recommended for slow local models).">
-      </div>
-
-      <div class="settings-group-label">Generation</div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-temperature">Temperature</label>
-        <input class="settings-input settings-input-sm" id="set-temperature"
-               type="number" min="0" max="2" step="0.05">
-      </div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-top-p">Top P</label>
-        <input class="settings-input settings-input-sm" id="set-top-p"
-               type="number" min="0" max="1" step="0.05">
-      </div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-max-tokens">Dialogue tokens</label>
-        <input class="settings-input settings-input-sm" id="set-max-tokens"
-               type="number" min="20" max="300" step="10">
-      </div>
-
-      <div class="settings-group-label">World Generation</div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-theme">World theme</label>
-        <input class="settings-input" id="set-theme" type="text"
-               placeholder="e.g. coastal fishing village, 1950s">
-      </div>
-
-      <div class="settings-row">
-        <label class="settings-label" for="set-worldgen-tokens">World gen tokens</label>
-        <input class="settings-input settings-input-sm" id="set-worldgen-tokens"
-               type="number" min="512" max="8192" step="256">
-      </div>
+  <div id="ui-petitions" class="ui-panel hidden">
+    <div class="panel-header">
+      <span>Petitions</span>
+      <span id="petitions-close" class="panel-close">&times;</span>
     </div>
+    <div id="petitions-list"></div>
+  </div>
 
-    <div class="settings-footer">
-      <button id="btn-settings-regenerate" class="settings-btn settings-btn-regen">
-        &#9851; Regenerate World
-      </button>
-      <div class="settings-footer-right">
-        <button id="btn-settings-cancel" class="settings-btn settings-btn-cancel">Cancel</button>
-        <button id="btn-settings-save" class="settings-btn settings-btn-save">Save</button>
+  <div id="ui-economy" class="ui-panel hidden">
+    <div class="panel-header">
+      <span>Economy</span>
+      <span id="economy-close" class="panel-close">&times;</span>
+    </div>
+    <div id="economy-content"></div>
+  </div>
+
+  <div id="ui-settings" class="ui-overlay hidden">
+    <div class="overlay-card">
+      <h2>Settings</h2>
+      <div id="settings-form"></div>
+      <div class="overlay-actions">
+        <button id="settings-save" class="btn-primary">Save</button>
+        <button id="settings-cancel" class="btn-secondary">Cancel</button>
       </div>
     </div>
   </div>
-</div>
 
-<!-- Sidebar Toggle -->
-<button id="sidebar-toggle" title="Toggle sidebar">&#8250;</button>
-
-<!-- Right Sidebar -->
-<div id="sidebar">
-  <div id="sb-content">
-    <div class="sb-empty">Click an agent or building to inspect</div>
+  <div id="ui-mayor-select" class="ui-overlay hidden">
+    <div class="overlay-card overlay-wide">
+      <h2>Choose Your Mayor</h2>
+      <div id="mayor-candidates"></div>
+    </div>
   </div>
-</div>
 
-<!-- Event Log -->
-<div id="event-log"></div>
-
-<!-- Bottom Controls -->
-<div id="bottom-bar">
-  <button id="btn-play" class="active">&#9208; Pause</button>
-  <div class="sep-bar"></div>
-  <div class="speed-group">
-    <label>Speed</label>
-    <button class="speed-btn speed-active">1x</button>
-    <button class="speed-btn">2x</button>
-    <button class="speed-btn">5x</button>
-    <button class="speed-btn">10x</button>
+  <div id="ui-council-reveal" class="ui-overlay hidden">
+    <div class="overlay-card overlay-wide">
+      <h2>Council Formed</h2>
+      <div id="council-members"></div>
+      <div class="overlay-actions">
+        <button id="council-begin" class="btn-primary">Begin</button>
+      </div>
+    </div>
   </div>
-  <div class="sep-bar"></div>
-  <button id="btn-skip-morning" title="Skip to next morning">&#9728; Morning</button>
-  <button id="btn-skip-week" title="Skip one week">&#187;&#187; Week</button>
-  <div class="sep-bar"></div>
-  <button id="btn-rel-overlay" title="Toggle relationship lines">&#10084; Relations</button>
-  <button id="btn-culture" title="View shared town beliefs">&#127758; Beliefs</button>
-  <div class="sep-bar"></div>
-  <select id="event-inject-select" title="Trigger a town event">
-    <option value="">&#127914; Trigger event…</option>
-    <option value="festival">&#127881; Festival</option>
-    <option value="surprise_visitor">&#128100; Visitor</option>
-    <option value="weather_sunny">&#9728; Sunny day</option>
-    <option value="weather_rain">&#9928; Rain</option>
-    <option value="animal_encounter">&#128054; Animal</option>
-    <option value="gossip">&#128172; Gossip</option>
-    <option value="found_item">&#10024; Found item</option>
-    <option value="illness_mild">&#129298; Illness</option>
-    <option value="power_outage">&#9889; Power outage</option>
-  </select>
-</div>
 
-<!-- Toolbar -->
-<div id="toolbar" class="toolbar"></div>
-<div id="petition-panel" class="petition-panel" style="display:none;"></div>
-<div id="petition-badge" class="petition-badge" style="display:none;"></div>
-<div id="economy-display" class="economy-display" style="display:none;"></div>
-
-<!-- Tooltip (for hover) -->
-<div id="tooltip"></div>
-
-<!-- Toast notifications -->
-<div id="toast-container"></div>
-
-<!-- Generating overlay (shown while LLM builds the world) -->
-<div id="generating-overlay" class="generating-overlay hidden">
-  <div class="generating-card">
-    <div class="generating-spinner"></div>
-    <div id="gen-message" class="generating-message">Generating world…</div>
-    <div id="gen-hint" class="generating-hint"></div>
+  <div id="ui-generating" class="ui-overlay hidden">
+    <div class="overlay-card">
+      <div id="generating-spinner" class="spinner"></div>
+      <p id="generating-message">Generating world...</p>
+      <p id="generating-hint" class="hint-text"></p>
+    </div>
   </div>
-</div>
 
-<!-- Game Container (Phaser renders here) -->
-<div id="game-container"></div>
+  <!-- Phaser 3 -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.80.1/dist/phaser.min.js"></script>
 
-<!-- Phaser 3 CDN -->
-<script src="https://cdn.jsdelivr.net/npm/phaser@3.87.0/dist/phaser.min.js"></script>
-
-<!-- Load order: constants -> state -> rendering -> ui -> tick -> ws -> scenes -> demo -> app -->
-<script src="js/constants.js"></script>
-<script src="js/state.js"></script>
-<script src="js/rendering/buildings.js"></script>
-<script src="js/rendering/agents.js"></script>
-<script src="js/rendering/speech.js"></script>
-<script src="js/rendering/particles.js"></script>
-<script src="js/rendering/daynight.js"></script>
-<script src="js/ui/topbar.js"></script>
-<script src="js/ui/sidebar.js"></script>
-<script src="js/ui/eventlog.js"></script>
-<script src="js/ui/controls.js"></script>
-<script src="js/ui/settings.js"></script>
-<script src="js/tick/processor.js"></script>
-<script src="js/ws.js"></script>
-<script src="js/scenes/TownScene.js"></script>
-<script src="js/demo/demo.js"></script>
-<script src="js/ui/toolbar.js"></script>
-<script src="js/ui/petitions.js"></script>
-<script src="js/ui/economy.js"></script>
-<script src="js/app.js"></script>
+  <!-- Game scripts (order matters) -->
+  <script src="js/constants.js"></script>
+  <script src="js/state.js"></script>
+  <script src="js/plugins/IsometricPlugin.js"></script>
+  <script src="js/rendering/terrain.js"></script>
+  <script src="js/rendering/buildings.js"></script>
+  <script src="js/rendering/agents.js"></script>
+  <script src="js/rendering/daynight.js"></script>
+  <script src="js/rendering/particles.js"></script>
+  <script src="js/rendering/speech.js"></script>
+  <script src="js/ui/topbar.js"></script>
+  <script src="js/ui/sidebar.js"></script>
+  <script src="js/ui/eventlog.js"></script>
+  <script src="js/ui/controls.js"></script>
+  <script src="js/ui/toolbar.js"></script>
+  <script src="js/ui/petitions.js"></script>
+  <script src="js/ui/economy.js"></script>
+  <script src="js/ui/council.js"></script>
+  <script src="js/ui/settings.js"></script>
+  <script src="js/tick/processor.js"></script>
+  <script src="js/ws.js"></script>
+  <script src="js/scenes/BootScene.js"></script>
+  <script src="js/scenes/OpeningScene.js"></script>
+  <script src="js/scenes/TownScene.js"></script>
+  <script src="js/scenes/GameOverScene.js"></script>
+  <script src="js/app.js"></script>
 </body>
 </html>

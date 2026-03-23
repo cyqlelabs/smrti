@@ -1,19 +1,16 @@
-"""Relationship gating, reproduction, aging, death, agent archival."""
+"""Lifecycle — death, reproduction, relationship progression/regression."""
 
 from __future__ import annotations
 
+import math
 import random
-from dataclasses import dataclass
-from typing import TYPE_CHECKING
-
-from smrti.personality.params import PersonalityProfile, load_preset
 
 from smrti_town.config import (
     DEATH_LOW_ENERGY_MULT,
     ELDER_DEATH_PROB_PER_TICK,
     HOURS_PER_YEAR,
     LIFE_STAGES,
-    MAX_POPULATION,
+    NEED_MAX,
     PARAM_BOUNDS,
     PERSONALITY_PARAMS,
     PRESET_TRAITS,
@@ -26,567 +23,297 @@ from smrti_town.config import (
     TRAIT_NAMES,
 )
 
-if TYPE_CHECKING:
-    from smrti_town.agent import Agent
-    from smrti_town.calendar import SimCalendar
 
+# ── Death ───────────────────────────────────────────────────────────────
 
-@dataclass
-class RelationshipTransition:
-    agent_name: str
-    target_name: str
-    from_state: str
-    to_state: str
-    detail: str = ""
+def check_death(citizen, delta_hours: float) -> bool:
+    """Check if a citizen dies this tick.
 
+    Elder death: base probability scaled by delta_hours, increased if
+    health/hunger are critical.
 
-def compute_life_stage(age_years: float) -> str:
-    for stage, info in LIFE_STAGES.items():
-        lo, hi = info["age_range"]
-        if lo <= age_years < hi:
-            return stage
-    return "elder"
+    Starvation: any citizen with max hunger for STARVATION_HOURS dies.
 
-
-# ── Death ────────────────────────────────────────────────────────────
-
-def check_death(agent: Agent, cal: SimCalendar, delta_hours: float) -> bool:
-    """Return True if the agent should die this tick."""
-    if not agent.alive:
+    Returns True if the citizen should die.
+    """
+    if not getattr(citizen, "alive", True):
         return False
-    age_years = cal.to_years(agent.age_hours)
 
-    # Old age — probability increases each year past 65
-    if age_years >= 65:
-        years_past_elder = age_years - 65
-        death_prob = ELDER_DEATH_PROB_PER_TICK * years_past_elder
-        if agent.drives.energy < 20:
-            death_prob *= DEATH_LOW_ENERGY_MULT
-        # Scale by delta to keep probability consistent across tick sizes
-        death_prob *= (delta_hours / 2.0)  # normalised to routine tick
-        if random.random() < death_prob:
-            return True
+    stage = getattr(citizen, "life_stage", "adult")
+    needs = getattr(citizen, "needs", None)
+    age = getattr(citizen, "age_years", 30.0)
 
-    # Starvation
-    if agent.drives.energy <= 0:
-        agent.starvation_hours += delta_hours
-        if agent.starvation_hours > STARVATION_HOURS:
+    # Starvation check: hunger at max for extended period.
+    if needs:
+        hunger = getattr(needs, "hunger", 0.0)
+        if hunger >= NEED_MAX:
+            # Approximate: citizen is at max hunger, apply starvation chance
+            # proportional to how long they've been starving.
+            # Since we can't track cumulative starvation time here, use a
+            # probability per tick that accumulates to near-certainty over
+            # STARVATION_HOURS.
+            # P(survive N hours) = (1-p)^N = 0.01 when N = STARVATION_HOURS
+            # => p = 1 - 0.01^(1/STARVATION_HOURS)
+            p_per_hour = 1.0 - math.pow(0.01, 1.0 / STARVATION_HOURS)
+            p_this_tick = 1.0 - math.pow(1.0 - p_per_hour, delta_hours)
+            if random.random() < p_this_tick:
+                return True
+
+    # Elder death: age-based probability.
+    if stage == "elder":
+        base_prob = ELDER_DEATH_PROB_PER_TICK * delta_hours
+        # Increase probability with age beyond 65.
+        age_factor = 1.0 + max(0.0, age - 65) * 0.02
+        # Low energy (high hunger) multiplier.
+        energy_mult = 1.0
+        if needs:
+            hunger = getattr(needs, "hunger", 0.0)
+            if hunger > 70:
+                energy_mult = DEATH_LOW_ENERGY_MULT
+            health = getattr(needs, "health", 0.0)
+            if health > 70:
+                energy_mult *= 1.5
+        prob = base_prob * age_factor * energy_mult
+        if random.random() < prob:
             return True
-    else:
-        agent.starvation_hours = 0.0
 
     return False
 
 
-def archive_agent(agent: Agent, all_agents: list[Agent]) -> list[str]:
-    """Mark agent as dead and notify kin. Returns list of narrative strings."""
-    agent.alive = False
-    narratives: list[str] = []
-    death_text = f"{agent.name} has passed away."
-    narratives.append(death_text)
+# ── Reproduction ────────────────────────────────────────────────────────
 
-    # Write death to the agent's own space
-    agent.smrti.remember(
-        content=death_text,
-        type="episode",
-        valence=-0.9,
-        metadata={"event": "death"},
-    )
+def check_reproduction_eligibility(citizen_a, citizen_b) -> bool:
+    """Check REPRODUCTION_GATE requirements for a pair of citizens.
 
-    # Notify survivors who knew this agent
-    for other in all_agents:
-        if other.name == agent.name or not other.alive:
-            continue
-        interaction_count = other.get_interaction_count(agent.name)
-        if interaction_count > 0 or (agent.parents and other.name in agent.parents):
-            grief_text = f"{agent.name} has passed away."
-            other.smrti.remember(
-                content=grief_text,
-                type="episode",
-                valence=-0.8,
-                metadata={"event": "death_notification", "deceased": agent.name},
-            )
-
-    # Notify children
-    for other in all_agents:
-        if not other.alive:
-            continue
-        if other.parents and agent.name in other.parents:
-            grief_text = f"My parent {agent.name} has passed away."
-            other.smrti.remember(
-                content=grief_text,
-                type="episode",
-                valence=-0.9,
-                metadata={"event": "parent_death", "deceased": agent.name},
-            )
-
-    return narratives
-
-
-# ── Reproduction ─────────────────────────────────────────────────────
-
-def check_reproduction_gate(
-    agent_a: Agent,
-    agent_b: Agent,
-    cal: SimCalendar,
-    total_population: int,
-) -> bool:
-    """Check if two agents can reproduce.
-
-    No marriage requirement. Romantic relationship OR close_friend + romance
-    drive is sufficient.
+    Assumes both are already identified as being in an eligible relationship
+    (checked by PopulationManager.check_natural_growth).
     """
-    # Population cap — reduce fertility
-    if total_population >= MAX_POPULATION:
-        if random.random() > 0.1:  # 90% chance to block if over cap
+    gate = REPRODUCTION_GATE
+    required_stage = gate.get("life_stage", "adult")
+
+    for c in (citizen_a, citizen_b):
+        if not getattr(c, "alive", True):
+            return False
+        if getattr(c, "life_stage", "") != required_stage:
             return False
 
-    # Both must be alive adults
-    if not agent_a.alive or not agent_b.alive:
+    # Energy check (inverse of hunger).
+    both_energy = gate.get("both_energy", 70)
+    for c in (citizen_a, citizen_b):
+        needs = getattr(c, "needs", None)
+        if needs:
+            hunger = getattr(needs, "hunger", NEED_MAX)
+            energy = NEED_MAX - hunger
+            if energy < both_energy:
+                return False
+
+    # Relationship type check.
+    min_rel = gate.get("min_relationship", "romantic")
+    allow_close = gate.get("also_allow_close_friend", True)
+    allowed = {min_rel, "married"}
+    if allow_close:
+        allowed.add("close_friend")
+
+    name_a = getattr(citizen_a, "name", "")
+    name_b = getattr(citizen_b, "name", "")
+    rels_a = getattr(citizen_a, "relationships", {})
+    rel_type = rels_a.get(name_b)
+    if rel_type not in allowed:
         return False
-    if agent_a.life_stage != "adult" or agent_b.life_stage != "adult":
-        return False
 
-    # Energy check
-    min_energy = REPRODUCTION_GATE["both_energy"]
-    if agent_a.drives.energy < min_energy or agent_b.drives.energy < min_energy:
-        return False
-
-    # Relationship check — need mutual high interaction count
-    a_count = agent_a.get_interaction_count(agent_b.name)
-    b_count = agent_b.get_interaction_count(agent_a.name)
-
-    # Either romantic-level bond (high interaction) or close_friend + romance drive
-    romantic_threshold = 20  # substantial interaction history
-    friend_threshold = 10
-    if a_count >= romantic_threshold and b_count >= romantic_threshold:
-        return True
-    if (
-        a_count >= friend_threshold
-        and b_count >= friend_threshold
-        and agent_a.drives.romance >= 40
-        and agent_b.drives.romance >= 40
-    ):
-        return True
-
-    return False
+    return True
 
 
-def inherit_personality(
-    parent_a: PersonalityProfile,
-    parent_b: PersonalityProfile,
-    stress_level: float = 0.0,
-) -> PersonalityProfile:
-    """Create child personality from parent distributions.
+def create_child(
+    parent_a,
+    parent_b,
+    existing_names: set[str] | None = None,
+) -> dict:
+    """Generate child spec with inherited personality and traits.
 
-    stress_level: 0.0 (calm) to 1.0 (severe stress). Higher stress increases
-    variance in inherited parameters.
+    Personality params: blend both parents with stress-boosted Gaussian mutation.
+    Traits: average with random jitter.
+
+    Returns dict: {name, age, personality, skills, traits, personality_params,
+                   parents: [name_a, name_b]}.
     """
-    stress = max(0.0, min(1.0, stress_level))
-    variance_mult = STRESS_VARIANCE_BASE + stress * (STRESS_VARIANCE_MAX_MULT - STRESS_VARIANCE_BASE)
+    from smrti_town.population import _pick_name, _pick_personality
 
-    child = PersonalityProfile()
+    name_a = getattr(parent_a, "name", "Unknown")
+    name_b = getattr(parent_b, "name", "Unknown")
+    existing = set(existing_names or [])
+    child_name = _pick_name(existing)
+
+    # Inherit personality preset from one parent randomly.
+    preset_a = getattr(parent_a, "personality_preset", "balanced")
+    preset_b = getattr(parent_b, "personality_preset", "balanced")
+    child_preset = random.choice([preset_a, preset_b])
+
+    # Blend personality hyperparameters.
+    params_a = getattr(parent_a, "personality_params", None) or {}
+    params_b = getattr(parent_b, "personality_params", None) or {}
+
+    # Compute stress as average unmet needs of parents (0-1 scale).
+    stress = 0.0
+    stress_count = 0
+    for parent in (parent_a, parent_b):
+        needs = getattr(parent, "needs", None)
+        if needs:
+            for need_name in ("hunger", "shelter", "health", "safety"):
+                val = getattr(needs, need_name, 0.0)
+                stress += val / NEED_MAX
+                stress_count += 1
+    if stress_count > 0:
+        stress /= stress_count
+    stress_variance = STRESS_VARIANCE_BASE * (1.0 + stress * (STRESS_VARIANCE_MAX_MULT - 1.0))
+
+    child_params: dict[str, float] = {}
     for param in PERSONALITY_PARAMS:
-        val_a = getattr(parent_a, param)
-        val_b = getattr(parent_b, param)
-        mean = (val_a + val_b) / 2.0
-        variance = abs(val_a - val_b) * 0.3 * variance_mult
-        child_val = random.gauss(mean, max(variance, 0.001))
         lo, hi = PARAM_BOUNDS.get(param, (0.0, 1.0))
-        child_val = max(lo, min(hi, child_val))
-        setattr(child, param, round(child_val, 4))
+        val_a = params_a.get(param, (lo + hi) / 2)
+        val_b = params_b.get(param, (lo + hi) / 2)
+        blended = (val_a + val_b) / 2.0
+        mutated = blended + random.gauss(0, 0.05 * stress_variance)
+        child_params[param] = max(lo, min(hi, mutated))
 
-    child.preset_name = "inherited"
-    return child
-
-
-def inherit_traits(
-    parent_a_traits: dict[str, float],
-    parent_b_traits: dict[str, float],
-    stress_level: float = 0.0,
-) -> dict[str, float]:
-    """Create child behavioural traits from parent trait distributions.
-
-    Same Gaussian blend as personality inheritance: mean of parents,
-    variance proportional to parental divergence and stress.
-    """
-    stress = max(0.0, min(1.0, stress_level))
-    variance_mult = STRESS_VARIANCE_BASE + stress * (STRESS_VARIANCE_MAX_MULT - STRESS_VARIANCE_BASE)
-
+    # Blend behavioural traits.
+    traits_a = getattr(parent_a, "traits", PRESET_TRAITS.get(preset_a, {}))
+    traits_b = getattr(parent_b, "traits", PRESET_TRAITS.get(preset_b, {}))
     child_traits: dict[str, float] = {}
     for trait in TRAIT_NAMES:
-        val_a = parent_a_traits.get(trait, 0.5)
-        val_b = parent_b_traits.get(trait, 0.5)
-        mean = (val_a + val_b) / 2.0
-        variance = abs(val_a - val_b) * 0.3 * variance_mult
-        child_val = random.gauss(mean, max(variance, 0.01))
         lo, hi = TRAIT_BOUNDS.get(trait, (0.0, 1.0))
-        child_traits[trait] = round(max(lo, min(hi, child_val)), 4)
-    return child_traits
+        va = traits_a.get(trait, 0.5)
+        vb = traits_b.get(trait, 0.5)
+        blended = (va + vb) / 2.0
+        mutated = blended + random.gauss(0, 0.08 * stress_variance)
+        child_traits[trait] = max(lo, min(hi, mutated))
+
+    return {
+        "name": child_name,
+        "age": 0,
+        "personality": child_preset,
+        "skills": {},
+        "traits": child_traits,
+        "personality_params": child_params,
+        "life_stage": "infant",
+        "parents": [name_a, name_b],
+    }
 
 
-def spawn_child(
-    parent_a: Agent,
-    parent_b: Agent,
-    all_agents: list[Agent],
-    db_path: str,
-    tenant_id: str,
-) -> Agent:
-    """Create a new infant agent from two parents."""
-    from smrti_town.agent import Agent as AgentClass
+# ── Relationship progression ───────────────────────────────────────────
 
-    # Generate name
-    child_number = sum(
-        1 for a in all_agents
-        if a.parents and (parent_a.name in a.parents or parent_b.name in a.parents)
-    ) + 1
-    # Use a combination of parent name fragments
-    name_pool = _generate_child_names(parent_a.name, parent_b.name)
-    existing_names = {a.name for a in all_agents}
-    child_name = None
-    for candidate in name_pool:
-        if candidate not in existing_names:
-            child_name = candidate
-            break
-    if not child_name:
-        child_name = f"Child_{parent_a.name[:3]}_{parent_b.name[:3]}_{child_number}"
-
-    # Compute stress from parent valence
-    stress_a = _get_avg_valence(parent_a)
-    stress_b = _get_avg_valence(parent_b)
-    stress = max(0.0, -(stress_a + stress_b) / 2.0)
-
-    # Inherit personality hyperparameters (smrti engine tuning)
-    pa_profile = load_preset(parent_a.personality_preset) if parent_a.personality_preset != "inherited" else _extract_profile(parent_a)
-    pb_profile = load_preset(parent_b.personality_preset) if parent_b.personality_preset != "inherited" else _extract_profile(parent_b)
-    child_profile = inherit_personality(pa_profile, pb_profile, stress)
-
-    # Inherit behavioural traits
-    child_traits = inherit_traits(parent_a.traits, parent_b.traits, stress)
-
-    child = AgentClass(
-        name=child_name,
-        personality="balanced",  # placeholder, overridden below
-        location=parent_a.location,
-        age_years=0.0,
-        db_path=db_path,
-        tenant_id=tenant_id,
-        parents=(parent_a.name, parent_b.name),
-        traits=child_traits,
-    )
-    child.personality_preset = "inherited"
-    # Apply inherited personality to smrti
-    _apply_profile_to_agent(child, child_profile)
-
-    # Pre-install family bonds
-    child.smrti.remember(
-        content=f"My parents are {parent_a.name} and {parent_b.name}.",
-        type="belief",
-        probability=1.0,
-        valence=0.6,
-        metadata={"relation": "parent", "targets": [parent_a.name, parent_b.name]},
-    )
-
-    # Parent gets memory of child
-    for parent in (parent_a, parent_b):
-        parent.smrti.remember(
-            content=f"My child {child_name} was born.",
-            type="episode",
-            valence=0.8,
-            metadata={"event": "child_birth", "child": child_name},
-        )
-
-    # Sibling bonds
-    for other in all_agents:
-        if (
-            other.alive
-            and other.parents
-            and other.name != child_name
-            and set(other.parents) == {parent_a.name, parent_b.name}
-        ):
-            child.smrti.remember(
-                content=f"My sibling is {other.name}.",
-                type="belief",
-                probability=1.0,
-                valence=0.5,
-                metadata={"relation": "sibling", "target": other.name},
-            )
-            other.smrti.remember(
-                content=f"My new sibling {child_name} was born.",
-                type="episode",
-                valence=0.5,
-                metadata={"event": "sibling_birth", "sibling": child_name},
-            )
-
-    return child
+# Ordered relationship tiers for progression/regression.
+_REL_TIERS = ["acquaintance", "friend", "close_friend", "romantic", "married"]
+_REL_INDEX = {r: i for i, r in enumerate(_REL_TIERS)}
 
 
-def _generate_child_names(parent_a: str, parent_b: str) -> list[str]:
-    """Generate candidate child names from parent names."""
-    # Simple name generation — blend syllables
-    names = [
-        f"{parent_a[:2]}{parent_b[-2:]}a",
-        f"{parent_b[:2]}{parent_a[-2:]}o",
-        f"{parent_a[:3]}el",
-        f"{parent_b[:3]}ia",
-        f"Li{parent_a[-2:]}",
-        f"Ma{parent_b[-2:]}",
-        f"{parent_a[:2]}ra",
-        f"{parent_b[:2]}na",
-    ]
-    # Capitalize and deduplicate
-    seen: set[str] = set()
-    result: list[str] = []
-    for n in names:
-        n = n.capitalize()
-        if n not in seen:
-            seen.add(n)
-            result.append(n)
-    return result
-
-
-def _get_avg_valence(agent: Agent) -> float:
-    """Get average valence from agent's recent memories."""
-    try:
-        results = agent.smrti.recall(query="how do I feel", top_k=5)
-        if not results:
-            return 0.0
-        total = sum(r.atom.valence.valence for r in results if r.atom.valence)
-        return total / len(results)
-    except Exception:
-        return 0.0
-
-
-def _extract_profile(agent: Agent) -> PersonalityProfile:
-    """Extract current personality profile from an agent's smrti DB."""
-    try:
-        status = agent.smrti.status()
-        personality = status.get("personality", {})
-        profile = PersonalityProfile()
-        for param in PERSONALITY_PARAMS:
-            if param in personality:
-                setattr(profile, param, personality[param])
-        return profile
-    except Exception:
-        return PersonalityProfile()
-
-
-def _apply_profile_to_agent(agent: Agent, profile: PersonalityProfile) -> None:
-    """Write a custom personality profile to the agent's smrti space."""
-    agent.smrti.set_personality_profile(profile, preset_name="inherited")
-
-
-# ── Relationship gates ───────────────────────────────────────────────
-
-def check_relationship_gates(
-    agent: Agent,
-    all_agents: list[Agent],
-) -> list[RelationshipTransition]:
-    """Check whether any relationships should transition based on gates."""
-    transitions: list[RelationshipTransition] = []
-    if not agent.alive or not agent.can_talk:
-        return transitions
-
-    for other in all_agents:
-        if other.name == agent.name or not other.alive or not other.can_talk:
-            continue
-
-        count = agent.get_interaction_count(other.name)
-        mutual_count = other.get_interaction_count(agent.name)
-        min_count = min(count, mutual_count)
-
-        current_state = _infer_relationship_state(agent, other)
-        next_state = _next_relationship_state(current_state, min_count, agent, other)
-
-        if next_state and next_state != current_state:
-            transitions.append(RelationshipTransition(
-                agent_name=agent.name,
-                target_name=other.name,
-                from_state=current_state,
-                to_state=next_state,
-                detail=f"{agent.name} and {other.name}: {current_state} -> {next_state}",
-            ))
-
-    return transitions
-
-
-def _infer_relationship_state(agent: Agent, other: Agent) -> str:
-    """Infer current relationship state from interaction count."""
-    count = agent.get_interaction_count(other.name)
-    mutual = other.get_interaction_count(agent.name)
-    min_c = min(count, mutual)
-
-    if min_c >= 20:
-        return "romantic"
-    if min_c >= 10:
-        return "close_friend"
-    if min_c >= 5:
-        return "friend"
-    if min_c >= 1:
-        return "acquaintance"
-    return "stranger"
-
-
-def _next_relationship_state(
-    current: str,
-    min_count: int,
-    agent: Agent,
-    other: Agent,
+def check_relationship_progression(
+    citizen_a,
+    citizen_b,
+    interaction_count: int,
+    shared_valence: float,
 ) -> str | None:
-    """Determine if a relationship should advance."""
-    progression = ["stranger", "acquaintance", "friend", "close_friend", "romantic", "married"]
-    try:
-        idx = progression.index(current)
-    except ValueError:
-        return None
+    """Check RELATIONSHIP_GATES to see if a pair should progress.
 
-    if idx >= len(progression) - 1:
-        return None
+    *interaction_count* — total interactions between the pair.
+    *shared_valence* — average valence of shared memories (-1 to 1).
 
-    next_state = progression[idx + 1]
-    gate = RELATIONSHIP_GATES.get(next_state, {})
+    Returns the new relationship type if progression is warranted, else None.
+    """
+    name_a = getattr(citizen_a, "name", "")
+    name_b = getattr(citizen_b, "name", "")
+    rels_a = getattr(citizen_a, "relationships", {})
+    current_rel = rels_a.get(name_b, "acquaintance")
+    current_idx = _REL_INDEX.get(current_rel, 0)
 
-    if next_state == "acquaintance":
-        return "acquaintance" if min_count >= 1 else None
+    if current_idx >= len(_REL_TIERS) - 1:
+        return None  # Already at max tier.
 
-    if next_state == "friend":
-        needed = gate.get("interaction_count", 5)
-        if min_count >= needed:
-            return "friend"
+    next_tier = _REL_TIERS[current_idx + 1]
+    gate = RELATIONSHIP_GATES.get(next_tier, {})
 
-    if next_state == "close_friend":
-        needed_lti = gate.get("friend_lti", 0.5)
-        needed_episodes = gate.get("shared_episodes", 3)
-        if min_count >= max(needed_episodes, 8):
-            return "close_friend"
+    # Check interaction count.
+    if "interaction_count" in gate:
+        if interaction_count < gate["interaction_count"]:
+            return None
 
-    if next_state == "romantic":
-        needed_drive = gate.get("romance_drive", 50)
-        if (
-            min_count >= 15
-            and agent.drives.romance >= needed_drive * 0.5
-            and other.drives.romance >= needed_drive * 0.5
-            and agent.life_stage == "adult"
-            and other.life_stage == "adult"
-        ):
-            return "romantic"
+    # Check valence thresholds.
+    if "valence" in gate:
+        if shared_valence < gate["valence"]:
+            return None
+    if "mutual_valence" in gate:
+        if shared_valence < gate["mutual_valence"]:
+            return None
 
-    if next_state == "married":
-        if min_count >= 25 and agent.life_stage == "adult" and other.life_stage == "adult":
-            return "married"
+    # Friendship LTI checks — we approximate LTI as a function of
+    # interaction count and valence, since the actual LTI is in the
+    # Smrti memory graph. Gate values are thresholds on 0-1 scale.
+    if "friend_lti" in gate:
+        approx_lti = min(1.0, interaction_count / 20.0 * max(0, shared_valence))
+        if approx_lti < gate["friend_lti"]:
+            return None
+    if "close_friend_lti" in gate:
+        approx_lti = min(1.0, interaction_count / 30.0 * max(0, shared_valence))
+        if approx_lti < gate["close_friend_lti"]:
+            return None
+    if "romantic_lti" in gate:
+        approx_lti = min(1.0, interaction_count / 40.0 * max(0, shared_valence))
+        if approx_lti < gate["romantic_lti"]:
+            return None
 
-    return None
+    # Shared episodes check.
+    if "shared_episodes" in gate:
+        # Approximate: each positive interaction is roughly a shared episode.
+        est_shared = int(interaction_count * max(0, shared_valence))
+        if est_shared < gate["shared_episodes"]:
+            return None
+
+    # Cohabitation check — requires both living in the same home.
+    if "cohabitation_years" in gate:
+        home_a = getattr(citizen_a, "home", None)
+        home_b = getattr(citizen_b, "home", None)
+        if not home_a or home_a != home_b:
+            return None
+        # Approximate cohabitation time from interaction count
+        # (assumes ~1 interaction per tick period).
+        # This is a rough heuristic; the engine should track actual cohabitation.
+
+    return next_tier
 
 
 def check_relationship_regression(
-    agent: Agent,
-    all_agents: list[Agent],
-) -> list[RelationshipTransition]:
-    """Check if any relationships should regress due to accumulated negative memories."""
-    transitions: list[RelationshipTransition] = []
-    if not agent.alive or not agent.can_talk:
-        return transitions
+    citizen_a,
+    citizen_b,
+    negative_episodes: int,
+) -> str | None:
+    """Regress relationship if too many negative episodes accumulate.
 
-    _PROGRESSION = ["stranger", "acquaintance", "friend", "close_friend", "romantic", "married"]
-    _THRESHOLD = {"married": 10, "romantic": 7, "close_friend": 5, "friend": 3}
+    Regression thresholds:
+        married -> romantic: 10 negative episodes
+        romantic -> close_friend: 7
+        close_friend -> friend: 5
+        friend -> acquaintance: 3
 
-    for other in all_agents:
-        if other.name == agent.name or not other.alive or not other.can_talk:
-            continue
-        current = _infer_relationship_state(agent, other)
-        if current in ("stranger", "acquaintance"):
-            continue
-        try:
-            db = agent.smrti.db
-            rows = db.fetchall(
-                "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ? "
-                "AND type = 'episode' AND valence < -0.4 AND content LIKE ?",
-                (agent._tenant_id, f"Agent_Space_{agent.name}", f"%{other.name}%"),
-            )
-            neg_count = rows[0]["n"] if rows else 0
-        except Exception:
-            continue
-        threshold = _THRESHOLD.get(current, 999)
-        if neg_count < threshold:
-            # Below threshold — clear any cooldown so regression can fire again if it worsens
-            agent._regression_cooldown.pop(other.name, None)
-            continue
-        # Skip if already regressed this cycle (prevent per-epoch spam)
-        if agent._regression_cooldown.get(other.name):
-            continue
-        try:
-            idx = _PROGRESSION.index(current)
-        except ValueError:
-            continue
-        if idx == 0:
-            continue
-        regressed = _PROGRESSION[idx - 1]
-        agent._regression_cooldown[other.name] = True
-        transitions.append(RelationshipTransition(
-            agent_name=agent.name,
-            target_name=other.name,
-            from_state=current,
-            to_state=regressed,
-            detail=f"{agent.name} and {other.name}'s relationship has grown strained ({current} → {regressed}).",
-        ))
-    return transitions
+    Returns the new (lower) relationship type, or None if no regression.
+    """
+    name_a = getattr(citizen_a, "name", "")
+    name_b = getattr(citizen_b, "name", "")
+    rels_a = getattr(citizen_a, "relationships", {})
+    current_rel = rels_a.get(name_b, "acquaintance")
+    current_idx = _REL_INDEX.get(current_rel, 0)
 
+    if current_idx <= 0:
+        return None  # Already at lowest tier.
 
-def apply_relationship_regression(
-    transition: RelationshipTransition,
-    agents_by_name: dict[str, Agent],
-) -> list[str]:
-    """Apply a relationship regression and write memories."""
-    narratives: list[str] = []
-    agent = agents_by_name.get(transition.agent_name)
-    target = agents_by_name.get(transition.target_name)
-    if not agent or not target:
-        return narratives
-    text_a = f"My relationship with {transition.target_name} has grown strained. We are now {transition.to_state}s."
-    text_b = f"My relationship with {transition.agent_name} has grown strained. We are now {transition.to_state}s."
-    agent.smrti.remember(
-        content=text_a, type="episode", probability=0.7, valence=-0.3,
-        metadata={"relation_change": "regression", "target": transition.target_name},
-    )
-    target.smrti.remember(
-        content=text_b, type="episode", probability=0.7, valence=-0.3,
-        metadata={"relation_change": "regression", "target": transition.agent_name},
-    )
-    narratives.append(transition.detail)
-    return narratives
+    regression_thresholds = {
+        "married": 10,
+        "romantic": 7,
+        "close_friend": 5,
+        "friend": 3,
+    }
 
+    threshold = regression_thresholds.get(current_rel, 5)
+    if negative_episodes >= threshold:
+        return _REL_TIERS[current_idx - 1]
 
-def apply_relationship_transition(
-    transition: RelationshipTransition,
-    agents_by_name: dict[str, Agent],
-) -> list[str]:
-    """Apply a relationship transition and write memories."""
-    narratives: list[str] = []
-    agent = agents_by_name.get(transition.agent_name)
-    target = agents_by_name.get(transition.target_name)
-    if not agent or not target:
-        return narratives
-
-    text_a = f"My relationship with {transition.target_name} has deepened. We are now {transition.to_state}s."
-    text_b = f"My relationship with {transition.agent_name} has deepened. We are now {transition.to_state}s."
-
-    if transition.to_state == "married":
-        text_a = f"I married {transition.target_name}."
-        text_b = f"I married {transition.agent_name}."
-
-    agent.smrti.remember(
-        content=text_a,
-        type="belief" if transition.to_state == "married" else "episode",
-        probability=1.0 if transition.to_state == "married" else 0.8,
-        valence=0.6,
-        metadata={"relation": transition.to_state, "target": transition.target_name},
-    )
-    target.smrti.remember(
-        content=text_b,
-        type="belief" if transition.to_state == "married" else "episode",
-        probability=1.0 if transition.to_state == "married" else 0.8,
-        valence=0.6,
-        metadata={"relation": transition.to_state, "target": transition.agent_name},
-    )
-    narratives.append(transition.detail)
-    return narratives
+    return None

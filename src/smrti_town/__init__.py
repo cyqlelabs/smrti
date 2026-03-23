@@ -1,5 +1,1 @@
-"""smrti-town: Town life simulation built on the Smrti memory engine."""
-
-from smrti_town.engine import SimEngine
-
-__all__ = ["SimEngine"]
+"""Smrti-Town: isometric city-builder simulation powered by Smrti memory."""

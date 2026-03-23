@@ -1,26 +1,63 @@
-/* ================================================================
-   eventlog.js — addLogEntry(), log management
-   ================================================================ */
-window.TOWN = window.TOWN || {};
+/**
+ * Bottom-left scrolling event log.
+ */
 
-TOWN.addLogEntry = function(type, text) {
-  var log = document.getElementById('event-log');
-  var entry = document.createElement('div');
-  entry.className = 'log-entry ' + (TOWN.LOG_COLORS[type] || 'log-system');
+var EventLog = {
+  el: null,
+  entriesEl: null,
+  _maxEntries: 80,
 
-  var c = TOWN.state.calendar;
-  var h = Math.floor(c.hour || 6);
-  var m = String(Math.floor(((c.hour || 6) % 1) * 60)).padStart(2, '0');
-  var timeStr = String(h).padStart(2, '0') + ':' + m;
+  init: function() {
+    this.el = document.getElementById('ui-eventlog');
+    this.entriesEl = document.getElementById('eventlog-entries');
+  },
 
-  entry.innerHTML = '<span class="log-time">' + timeStr + '</span>' + TOWN.escapeHtml(text);
-  log.appendChild(entry);
+  show: function() {
+    this.el.classList.remove('hidden');
+  },
 
-  /* Keep max 80 entries */
-  while (log.children.length > 80) {
-    log.removeChild(log.firstChild);
-  }
-  log.scrollTop = log.scrollHeight;
+  hide: function() {
+    this.el.classList.add('hidden');
+  },
 
-  TOWN.state.eventLog.push({ type: type, text: text, time: timeStr });
+  /**
+   * Add an event entry.
+   * @param {string} text
+   * @param {string} [type='event'] - 'event', 'crisis', 'milestone', 'dialogue'
+   */
+  add: function(text, type) {
+    var cls = 'event-entry';
+    if (type === 'crisis') cls += ' event-crisis';
+    else if (type === 'milestone') cls += ' event-milestone';
+    else if (type === 'dialogue') cls += ' event-dialogue';
+
+    var cal = GameState.calendar;
+    var timeStr = 'D' + (cal.day || 1) + ' ' +
+      (cal.hour < 10 ? '0' : '') + Math.floor(cal.hour || 0) + ':00';
+
+    var entry = document.createElement('div');
+    entry.className = cls;
+    entry.innerHTML = '<span class="event-time">' + _esc(timeStr) + '</span>' + _esc(text);
+
+    this.entriesEl.appendChild(entry);
+
+    // Store in GameState for persistence
+    GameState.events.push({ text: text, type: type || 'event', time: timeStr });
+    if (GameState.events.length > this._maxEntries) {
+      GameState.events.shift();
+    }
+
+    // Trim DOM
+    while (this.entriesEl.children.length > this._maxEntries) {
+      this.entriesEl.removeChild(this.entriesEl.firstChild);
+    }
+
+    // Auto-scroll to bottom
+    this.el.scrollTop = this.el.scrollHeight;
+  },
+
+  clear: function() {
+    this.entriesEl.innerHTML = '';
+    GameState.events = [];
+  },
 };

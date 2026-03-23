@@ -129,15 +129,11 @@ def serve_town(
     tenant_id: str = typer.Option("millbrook", help="Tenant ID for the town"),
     no_browser: bool = typer.Option(False, "--no-browser", help="Don't open browser automatically"),
 ) -> None:
-    """Start the smrti-town simulation engine and open the game in a browser.
+    """Start the smrti-town isometric city-builder and open it in a browser.
 
-    Launches the Millbrook town simulation with 6 agents, a full topology,
-    sporadic events, and the Phaser game frontend. The simulation auto-starts
-    when the browser connects via WebSocket.
-
-    Smrti (proxy/rest/mcp) should already be running separately if you need
-    LLM-backed extraction — the town engine uses its own Smrti instances
-    with the given DB path.
+    An empty field appears. Place the Town Hall, choose a mayor, and watch
+    your council debate what to build next.  The simulation uses its own
+    Smrti instances with the given DB path.
     """
     import threading
     import time

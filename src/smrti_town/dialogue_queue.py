@@ -1,185 +1,169 @@
-"""Bounded single-worker dialogue queue with batch LLM calls and per-agent deduplication.
-
-Architecture
-------------
-Producer (engine tick loop)  →  asyncio.Queue(maxsize)  →  single Worker coroutine
-                                                               │
-                                         ┌─────────────────────┘
-                                         │  drain up to batch_size requests
-                                         │  send ONE LLM call (batch prompt)
-                                         │  broadcast dialogue_patch per result
-                                         └─────────────────────────────────────
-
-Backpressure guarantees
-- Queue full → new requests are dropped silently (template fallback stays).
-- Agent already in-flight → request dropped (per-agent deduplication).
-- Request tick > _STALE_TICKS behind current tick → patch not broadcast.
-"""
+"""Bounded async dialogue queue — enriches agent dialogue via LLM without blocking ticks."""
 
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import logging
-from typing import TYPE_CHECKING, Any, Callable, Coroutine
+from dataclasses import dataclass, field
+from typing import Any, Callable, Coroutine
 
-if TYPE_CHECKING:
-    from smrti_town.llm import LLMClient
+from smrti_town.llm import LLMClient
 
-logger = logging.getLogger("smrti_town.dialogue_queue")
-
-# Patches for ticks this far in the past are not broadcast;
-# the frontend event-log entry is already gone.
-_STALE_TICKS = 10
+log = logging.getLogger(__name__)
 
 
-@dataclasses.dataclass
+@dataclass
 class DialogueRequest:
     speaker: str
-    target: str
+    target: str | None
     location: str
     time_of_day: str
     season: str
     personality: str
-    urgent_drive: str | None
-    memories: list[dict]   # each dict: {content, salience, valence}
+    urgent_need: str | None
+    memories: list[dict]
     fallback: str
     tick_number: int
 
 
 class DialogueQueue:
-    """Single-worker, bounded queue for LLM dialogue enrichment.
+    """Bounded async queue that drains dialogue requests in batches and
+    broadcasts enriched dialogue lines back to connected clients.
 
-    Parameters
-    ----------
-    llm_client:
-        LLMClient used to call the model.
-    maxsize:
-        Maximum number of pending requests before new ones are dropped.
-    batch_size:
-        Maximum requests drained into a single batched LLM call.
+    Prevents unbounded LLM task accumulation by:
+    - Capping the queue to *queue_size* entries (oldest are dropped).
+    - Tracking in-flight speakers to avoid duplicate requests.
+    - Discarding stale requests (older than *stale_ticks* behind current).
     """
 
     def __init__(
         self,
         llm_client: LLMClient,
-        maxsize: int = 8,
-        batch_size: int = 3,
+        broadcast_fn: Callable[[dict], Coroutine[Any, Any, None]],
+        queue_size: int = 20,
+        batch_size: int = 5,
+        stale_ticks: int = 3,
     ) -> None:
+        self._queue: asyncio.Queue[DialogueRequest] = asyncio.Queue(maxsize=queue_size)
         self._llm = llm_client
+        self._broadcast = broadcast_fn
         self._batch_size = batch_size
-        self._queue: asyncio.Queue[DialogueRequest] = asyncio.Queue(maxsize=maxsize)
-        self._inflight: set[str] = set()
-        self._worker_task: asyncio.Task | None = None
-        self._broadcast: Callable[[dict], Coroutine[Any, Any, None]] | None = None
+        self._stale_ticks = stale_ticks
+        self._in_flight: set[str] = set()
+        self._worker_task: asyncio.Task[None] | None = None
         self._current_tick: int = 0
+        self._running = False
 
-    # ── Lifecycle ────────────────────────────────────────────────────
-
-    def set_broadcast(self, fn: Callable[[dict], Coroutine[Any, Any, None]] | None) -> None:
-        self._broadcast = fn
-
-    def update_tick(self, tick_number: int) -> None:
-        self._current_tick = tick_number
+    # ── lifecycle ───────────────────────────────────────────────────────
 
     def start(self) -> None:
-        if self._worker_task is None or self._worker_task.done():
-            self._worker_task = asyncio.create_task(self._worker())
-            self._worker_task.add_done_callback(
-                lambda t: logger.debug("Dialogue worker stopped: %s", t.exception() if not t.cancelled() else "cancelled")
-            )
+        """Start the background worker coroutine."""
+        if self._worker_task is not None and not self._worker_task.done():
+            return
+        self._running = True
+        self._worker_task = asyncio.create_task(self._worker())
 
     async def stop(self) -> None:
-        if self._worker_task and not self._worker_task.done():
+        """Stop the worker and drain remaining items."""
+        self._running = False
+        if self._worker_task is not None:
             self._worker_task.cancel()
             try:
                 await self._worker_task
             except asyncio.CancelledError:
                 pass
-        self._worker_task = None
-        self._inflight.clear()
+            self._worker_task = None
+        self._in_flight.clear()
 
-    # ── Producer API ─────────────────────────────────────────────────
+    # ── submit ──────────────────────────────────────────────────────────
 
-    def enqueue(self, req: DialogueRequest) -> bool:
-        """Try to add a request.
+    def submit(self, request: DialogueRequest) -> bool:
+        """Submit a dialogue request.
 
-        Returns True if accepted, False if dropped (agent in-flight or queue full).
-        Never blocks — the caller's tick must not be delayed.
+        Returns ``False`` if the queue is full or the speaker already has
+        an in-flight request.
         """
-        if req.speaker in self._inflight:
+        if request.speaker in self._in_flight:
             return False
         try:
-            self._queue.put_nowait(req)
-            self._inflight.add(req.speaker)
+            self._queue.put_nowait(request)
+            self._in_flight.add(request.speaker)
+            self._current_tick = max(self._current_tick, request.tick_number)
             return True
         except asyncio.QueueFull:
+            log.debug("Dialogue queue full, dropping request for %s", request.speaker)
             return False
 
-    # ── Worker ───────────────────────────────────────────────────────
+    # ── worker ──────────────────────────────────────────────────────────
 
     async def _worker(self) -> None:
-        while True:
+        """Background loop: drain up to batch_size, call LLM, broadcast results."""
+        while self._running:
+            batch: list[DialogueRequest] = []
+
+            # Block on first item
             try:
-                first = await self._queue.get()
+                first = await asyncio.wait_for(self._queue.get(), timeout=2.0)
+                batch.append(first)
+            except asyncio.TimeoutError:
+                continue
             except asyncio.CancelledError:
                 return
 
-            # Drain additional requests that arrived while we were waiting.
-            batch = [first]
-            for _ in range(self._batch_size - 1):
+            # Drain remaining up to batch_size
+            while len(batch) < self._batch_size:
                 try:
-                    batch.append(self._queue.get_nowait())
+                    item = self._queue.get_nowait()
+                    batch.append(item)
                 except asyncio.QueueEmpty:
                     break
 
-            try:
-                await self._process_batch(batch)
-            except Exception as exc:
-                logger.debug("Dialogue batch error: %s", exc)
-            finally:
-                for req in batch:
-                    self._inflight.discard(req.speaker)
-                    self._queue.task_done()
+            # Filter stale requests
+            fresh: list[DialogueRequest] = []
+            for req in batch:
+                if self._current_tick - req.tick_number > self._stale_ticks:
+                    self._in_flight.discard(req.speaker)
+                    log.debug("Discarding stale dialogue request for %s (tick %d)", req.speaker, req.tick_number)
+                    continue
+                fresh.append(req)
 
-    async def _process_batch(self, batch: list[DialogueRequest]) -> None:
-        if len(batch) == 1:
-            req = batch[0]
-            text = await self._llm.generate_dialogue(
-                speaker=req.speaker,
-                target=req.target,
-                location=req.location,
-                time_of_day=req.time_of_day,
-                season=req.season,
-                personality=req.personality,
-                urgent_drive=req.urgent_drive,
-                memories=req.memories,
-                fallback=req.fallback,
-            )
-            await self._maybe_broadcast(req, text)
-        else:
-            texts = await self._llm.generate_dialogue_batch(batch)
-            for req, text in zip(batch, texts):
-                await self._maybe_broadcast(req, text)
+            if not fresh:
+                continue
 
-    async def _maybe_broadcast(self, req: DialogueRequest, text: str) -> None:
-        if text == req.fallback:
-            return
-        age = self._current_tick - req.tick_number
-        if age > _STALE_TICKS:
-            logger.debug(
-                "Dropping stale dialogue_patch (age=%d ticks, speaker=%s)",
-                age, req.speaker,
-            )
-            return
-        if self._broadcast:
-            try:
-                await self._broadcast({
-                    "type": "dialogue_patch",
-                    "tick": req.tick_number,
+            # Build LLM batch request
+            llm_requests = [
+                {
                     "speaker": req.speaker,
                     "target": req.target,
-                    "content": text,
-                })
-            except Exception as exc:
-                logger.debug("Broadcast dialogue_patch failed: %s", exc)
+                    "location": req.location,
+                    "time_of_day": req.time_of_day,
+                    "season": req.season,
+                    "personality": req.personality,
+                    "urgent_need": req.urgent_need,
+                    "memories": req.memories,
+                    "fallback": req.fallback,
+                }
+                for req in fresh
+            ]
+
+            try:
+                lines = await self._llm.generate_dialogue_batch(llm_requests)
+            except Exception:
+                log.exception("Dialogue batch LLM call failed")
+                lines = [req.fallback for req in fresh]
+
+            # Broadcast results
+            for req, line in zip(fresh, lines):
+                self._in_flight.discard(req.speaker)
+                patch = {
+                    "type": "dialogue_patch",
+                    "speaker": req.speaker,
+                    "target": req.target,
+                    "location": req.location,
+                    "line": line,
+                    "tick": req.tick_number,
+                }
+                try:
+                    await self._broadcast(patch)
+                except Exception:
+                    log.debug("Failed to broadcast dialogue patch for %s", req.speaker, exc_info=True)

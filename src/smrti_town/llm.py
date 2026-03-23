@@ -1,428 +1,596 @@
-"""Async OpenAI-compatible LLM client for world generation and dialogue."""
+"""LLM client for smrti-town — world generation, dialogue, council meetings."""
 
 from __future__ import annotations
 
-import asyncio
-import dataclasses
 import json
 import logging
+import random
+from dataclasses import asdict, dataclass, field
+from typing import Any
 
 import httpx
 
-logger = logging.getLogger("smrti_town.llm")
+from smrti_town.config import (
+    BUILDING_CATALOG,
+    COUNCIL_ROLES,
+    HOUSING_IMMIGRANT_PROFILES,
+    PRESET_TRAITS,
+    SKILL_CATEGORIES,
+)
 
-# Sentinel used to distinguish "caller passed None" from "use default"
-_SENTINEL = object()
+log = logging.getLogger(__name__)
 
-DEFAULT_BASE_URL = "http://0.0.0.0:8421/v1"
-DEFAULT_MODEL = "Qwen3.5-9B-Q8_0.gguf"
 
-# Schema example injected into the world-gen few-shot prompt.
-_WORLD_SCHEMA_EXAMPLE = {
-    "town_name": "Millbrook",
-    "description": "A quiet riverside town where everyone knows everyone.",
-    "places": [
-        {
-            "name": "Town_Square",
-            "label": "Town Square",
-            "description": "The beating heart of civic life, ringed by old oaks.",
-            "type": "outdoor",
-            "icon": "🌳",
-            "personality": "empathetic",
-            "is_outdoor": True,
-            "has_space": True,
-            "connects_to": ["Main_Street", "Bakery"],
-        },
-        {
-            "name": "Main_Street",
-            "label": "Main Street",
-            "description": "The central artery connecting all public buildings.",
-            "type": "street",
-            "icon": "",
-            "personality": "balanced",
-            "is_outdoor": True,
-            "has_space": False,
-            "connects_to": ["Town_Square", "Bakery", "Library"],
-        },
-        {
-            "name": "Bakery",
-            "label": "Elena's Bakery",
-            "description": "Smells of fresh bread from 5am. A gossip hub.",
-            "type": "public",
-            "icon": "🥖",
-            "personality": "empathetic",
-            "is_outdoor": False,
-            "has_space": True,
-            "connects_to": ["Main_Street", "Town_Square"],
-        },
-        {
-            "name": "Elena_Home",
-            "label": "Elena's Home",
-            "description": "A tidy cottage on the edge of town.",
-            "type": "home",
-            "icon": "🏠",
-            "personality": "balanced",
-            "is_outdoor": False,
-            "has_space": True,
-            "connects_to": ["Main_Street"],
-        },
+# ── Settings ────────────────────────────────────────────────────────────────
+
+@dataclass
+class LLMSettings:
+    base_url: str = "http://0.0.0.0:8421/v1"
+    model: str = "Qwen3.5-9B-Q8_0.gguf"
+    temperature: float = 0.8
+    top_p: float = 0.95
+    max_tokens: int = 1024
+    worldgen_max_tokens: int = 4096
+    dialogue_timeout: float = 30.0
+    worldgen_timeout: float = 120.0
+    enabled: bool = True
+    world_theme: str = ""
+    tick_interval_ms: int = 2000
+    dialogue_queue_size: int = 20
+    dialogue_batch_size: int = 5
+
+    def to_dict(self) -> dict:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, data: dict) -> LLMSettings:
+        known = {f.name for f in cls.__dataclass_fields__.values()}
+        return cls(**{k: v for k, v in data.items() if k in known})
+
+
+# ── Fallback data ───────────────────────────────────────────────────────────
+
+_FALLBACK_CANDIDATES = [
+    {
+        "name": "Eleanor Blackwood",
+        "bio": "A pragmatic administrator who built her career mediating disputes between farmers and merchants. Believes in steady, measured growth.",
+        "personality": "balanced",
+        "governing_style": "moderate",
+        "traits": {"shyness": 0.2, "proactivity": 0.6, "leadership": 0.8, "laziness": 0.1,
+                   "adventurous": 0.3, "nurturing": 0.5, "stubbornness": 0.4, "creativity": 0.5},
+    },
+    {
+        "name": "Silas Thornton",
+        "bio": "A former military captain turned civic planner. Favors order, strong infrastructure, and clear laws above all else.",
+        "personality": "deterministic",
+        "governing_style": "authoritarian",
+        "traits": {"shyness": 0.1, "proactivity": 0.7, "leadership": 0.9, "laziness": 0.1,
+                   "adventurous": 0.2, "nurturing": 0.2, "stubbornness": 0.8, "creativity": 0.3},
+    },
+    {
+        "name": "Mirabel Osei",
+        "bio": "A visionary artist and community organizer. Champions culture, education, and the creative spirit of the people.",
+        "personality": "curious",
+        "governing_style": "progressive",
+        "traits": {"shyness": 0.2, "proactivity": 0.8, "leadership": 0.6, "laziness": 0.3,
+                   "adventurous": 0.7, "nurturing": 0.6, "stubbornness": 0.3, "creativity": 0.9},
+    },
+]
+
+_FALLBACK_FAMILIES = {
+    "cottage": [
+        {"name": "Thomas Reed", "age": 28, "personality": "balanced",
+         "skills": {"craftsmanship": 0.3, "agriculture": 0.2}, "bio": "A quiet carpenter seeking a fresh start."},
+        {"name": "Clara Reed", "age": 26, "personality": "empathetic",
+         "skills": {"commerce": 0.2, "literacy": 0.3}, "bio": "A cheerful teacher who loves the countryside."},
     ],
-    "agents": [
-        {
-            "name": "Elena",
-            "age": 42,
-            "personality": "empathetic",
-            "starting_location": "Bakery",
-            "backstory": "Runs the bakery her mother left her. Knows every family secret in town.",
-            "initial_beliefs": [
-                {
-                    "content": "I bake every morning — it is my meditation.",
-                    "probability": 1.0,
-                    "valence": 0.5,
-                },
-                {
-                    "content": "Marco and I have been close friends for twenty years.",
-                    "probability": 1.0,
-                    "valence": 0.6,
-                },
-            ],
-            "relationships": [
-                {"target": "Marco", "type": "close_friend", "valence": 0.6}
-            ],
-        },
-        {
-            "name": "Marco",
-            "age": 45,
-            "personality": "analytical",
-            "starting_location": "Town_Square",
-            "backstory": "Retired engineer who now restores old clocks. Quiet but razor-sharp.",
-            "initial_beliefs": [
-                {
-                    "content": "I find peace in the precision of mechanical things.",
-                    "probability": 0.9,
-                    "valence": 0.4,
-                }
-            ],
-            "relationships": [
-                {"target": "Elena", "type": "close_friend", "valence": 0.6}
-            ],
-        },
+    "house": [
+        {"name": "Henrik Vasquez", "age": 35, "personality": "analytical",
+         "skills": {"commerce": 0.4, "literacy": 0.3}, "bio": "A merchant looking for new trade opportunities."},
+        {"name": "Ingrid Vasquez", "age": 33, "personality": "empathetic",
+         "skills": {"medicine": 0.3, "teaching": 0.2}, "bio": "A nurse who wants a safe place for her family."},
+        {"name": "Luca Vasquez", "age": 8, "personality": "curious",
+         "skills": {}, "bio": "A bright child full of questions."},
     ],
-    "cultural_facts": [
-        {
-            "content": "The Town Square hosts a farmers market every Saturday morning.",
-            "probability": 0.95,
-            "valence": 0.3,
-        },
-        {
-            "content": "Elena's Bakery is famous for its sourdough and its gossip.",
-            "probability": 0.9,
-            "valence": 0.4,
-        },
+    "apartment": [
+        {"name": "Yuki Tanaka", "age": 24, "personality": "maverick",
+         "skills": {"arts": 0.3, "commerce": 0.2}, "bio": "An aspiring artist drawn by the town's charm."},
+    ],
+    "manor": [
+        {"name": "Lord Ashworth", "age": 52, "personality": "analytical",
+         "skills": {"commerce": 0.6, "leadership": 0.4}, "bio": "A wealthy patron with an eye for investment."},
+        {"name": "Lady Ashworth", "age": 49, "personality": "empathetic",
+         "skills": {"arts": 0.5, "literacy": 0.4}, "bio": "A cultured philanthropist."},
+    ],
+    "inn": [
+        {"name": "Finn Decker", "age": 30, "personality": "maverick",
+         "skills": {"craftsmanship": 0.3, "commerce": 0.2}, "bio": "A wandering journeyman testing the waters."},
     ],
 }
 
-_WORLD_GEN_SYSTEM = """\
-You are a narrative world designer for a life simulation game. Generate believable \
-small-town scenarios with grounded, specific characters and real social dynamics.
-
-OUTPUT RULES — strictly enforced:
-- Place names: CamelCase_with_underscores, no spaces (e.g. Town_Square, Old_Mill)
-- Agent names: single word, capitalised, no spaces (e.g. Elena, Marco, Yuki)
-- personality: exactly one of: balanced, analytical, curious, empathetic, maverick, deterministic
-- starting_location: must match a name in your places list
-- relationship.target: must match an agent name in your agents list
-- has_space: true for homes and socially significant buildings; false for streets and paths
-- type: exactly one of: home, public, outdoor, street
-- icon: single emoji for the place (e.g. ☕ for cafe, 📚 for library, 🌳 for park, 🏠 for home); use empty string for streets
-- All place names in connects_to must exist in your places list
-- Respond with ONLY valid JSON. No markdown, no code fences, no commentary.\
-"""
+_DIALOGUE_TEMPLATES = [
+    "{speaker} nods at {target}.",
+    "\"Good {time_of_day},\" says {speaker}.",
+    "{speaker} shares a thought about the town.",
+    "{speaker} sighs, gazing at the {season} sky.",
+    "\"I wonder what tomorrow brings,\" {speaker} murmurs.",
+]
 
 
-@dataclasses.dataclass
-class LLMSettings:
-    base_url: str = DEFAULT_BASE_URL
-    model: str = DEFAULT_MODEL
-    temperature: float = 0.8        # dialogue generation
-    top_p: float = 0.9
-    max_tokens: int = 80            # dialogue generation
-    worldgen_max_tokens: int = 3000
-    # Separate timeouts: dialogue is fire-and-forget so it can be generous;
-    # worldgen blocks server startup so 0 = wait indefinitely (llama.cpp may need minutes).
-    dialogue_timeout: float = 60.0      # seconds; 0 = no timeout
-    worldgen_timeout: float = 300.0     # seconds; 0 = no timeout
-    enabled: bool = True
-    world_theme: str = ""           # e.g. "coastal fishing village, 1950s"
-    tick_interval_ms: int = 2000     # wall-clock ms to sleep between ticks
-    dialogue_queue_size: int = 8     # max pending requests before dropping
-    dialogue_batch_size: int = 3     # max requests merged into one LLM call
+# ── Helpers ─────────────────────────────────────────────────────────────────
 
-    def to_dict(self) -> dict:
-        return dataclasses.asdict(self)
+def _available_buildings(pop: int, built_keys: set[str]) -> list[dict]:
+    """Return catalog entries unlocked for the given population and existing buildings."""
+    out = []
+    for key, bdef in BUILDING_CATALOG.items():
+        if bdef.unlock_population > pop:
+            continue
+        if bdef.unlock_buildings and not all(b in built_keys for b in bdef.unlock_buildings):
+            continue
+        out.append({
+            "key": key,
+            "category": bdef.category,
+            "cost": bdef.cost,
+            "description": bdef.description,
+        })
+    return out
 
-    @classmethod
-    def from_dict(cls, d: dict) -> "LLMSettings":
-        valid = {f.name for f in dataclasses.fields(cls)}
-        return cls(**{k: v for k, v in d.items() if k in valid})
 
+def _parse_json(text: str) -> Any:
+    """Best-effort JSON extraction from LLM output."""
+    # Strip markdown fences
+    text = text.strip()
+    if text.startswith("```"):
+        lines = text.split("\n")
+        lines = lines[1:]  # remove opening fence
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+
+    # Try direct parse
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # Try to find JSON object/array in the text
+    for start_char, end_char in [("{", "}"), ("[", "]")]:
+        start = text.find(start_char)
+        if start == -1:
+            continue
+        depth = 0
+        for i in range(start, len(text)):
+            if text[i] == start_char:
+                depth += 1
+            elif text[i] == end_char:
+                depth -= 1
+                if depth == 0:
+                    try:
+                        return json.loads(text[start:i + 1])
+                    except json.JSONDecodeError:
+                        break
+    raise ValueError(f"Could not parse JSON from LLM response: {text[:200]}")
+
+
+def _clamp_traits(traits: dict) -> dict:
+    return {k: max(0.0, min(1.0, float(v))) for k, v in traits.items()
+            if k in PRESET_TRAITS.get("balanced", {})}
+
+
+def _validate_personality(p: str) -> str:
+    return p if p in PRESET_TRAITS else "balanced"
+
+
+def _validate_skills(skills: dict) -> dict:
+    return {k: max(0.0, min(1.0, float(v))) for k, v in skills.items()
+            if k in SKILL_CATEGORIES}
+
+
+# ── LLM Client ──────────────────────────────────────────────────────────────
 
 class LLMClient:
-    """Reusable async httpx client wrapping an OpenAI-compatible endpoint."""
+    """Async LLM client for town simulation enrichment."""
 
-    def __init__(self, settings: LLMSettings | None = None) -> None:
-        self.settings = settings or LLMSettings()
+    def __init__(self, settings: LLMSettings) -> None:
+        self.settings = settings
         self._client: httpx.AsyncClient | None = None
 
-    def update_settings(self, settings: LLMSettings) -> None:
-        old_url = self.settings.base_url
-        self.settings = settings
-        if settings.base_url != old_url and self._client and not self._client.is_closed:
-            asyncio.ensure_future(self._client.aclose())
-            self._client = None
-
-    def _get_client(self) -> httpx.AsyncClient:
+    async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
-            # Read timeout must cover the slowest expected operation (world gen).
-            # Use 0 (None) for truly unbounded if worldgen_timeout is 0.
-            wt = self.settings.worldgen_timeout
-            dt = self.settings.dialogue_timeout
-            max_timeout = max(wt or 0, dt or 0)
-            read_timeout = (max_timeout + 10.0) if max_timeout > 0 else None
             self._client = httpx.AsyncClient(
                 base_url=self.settings.base_url,
                 timeout=httpx.Timeout(
                     connect=10.0,
-                    read=read_timeout,
-                    write=30.0,
-                    pool=5.0,
+                    read=self.settings.worldgen_timeout,
+                    write=10.0,
+                    pool=10.0,
                 ),
             )
         return self._client
 
-    async def close(self) -> None:
-        if self._client and not self._client.is_closed:
-            await self._client.aclose()
-        self._client = None
-
-    # ── Low-level chat call ───────────────────────────────────────────
-
     async def _chat(
         self,
-        messages: list[dict],
-        max_tokens: int,
+        messages: list[dict[str, str]],
+        max_tokens: int | None = None,
         temperature: float | None = None,
-        timeout: float | None = _SENTINEL,  # type: ignore[assignment]
+        timeout: float | None = None,
     ) -> str:
-        """POST to /chat/completions, return content string.
-
-        timeout: seconds for asyncio.wait_for (None = no timeout, _SENTINEL = use caller default).
-        """
-        client = self._get_client()
-        payload = {
+        """Send a chat completion request and return the assistant content."""
+        client = await self._ensure_client()
+        payload: dict[str, Any] = {
             "model": self.settings.model,
             "messages": messages,
             "temperature": temperature if temperature is not None else self.settings.temperature,
             "top_p": self.settings.top_p,
-            "max_tokens": max_tokens,
-            "stream": False,
+            "max_tokens": max_tokens or self.settings.max_tokens,
         }
-        coro = client.post("/chat/completions", json=payload)
-        # Apply asyncio-level timeout only when explicitly non-zero
-        effective = timeout if timeout is not _SENTINEL else None  # type: ignore[comparison-overlap]
-        if effective and effective > 0:
-            resp = await asyncio.wait_for(coro, timeout=effective)
-        else:
-            resp = await coro
+        resp = await client.post(
+            "/chat/completions",
+            json=payload,
+            timeout=timeout or self.settings.worldgen_timeout,
+        )
         resp.raise_for_status()
         data = resp.json()
-        content = data["choices"][0]["message"].get("content", "") or ""
-        # Some thinking models emit content in reasoning_content when content is empty
+        choices = data.get("choices", [])
+        if not choices:
+            raise ValueError("LLM returned no choices")
+        msg = choices[0].get("message", {})
+        content = msg.get("content", "")
+        # Fallback for thinking models
         if not content:
-            content = data["choices"][0]["message"].get("reasoning_content", "") or ""
+            content = msg.get("reasoning_content", "")
         return content.strip()
 
-    # ── Dialogue generation ───────────────────────────────────────────
+    # ── Mayor candidates ────────────────────────────────────────────────
+
+    async def generate_mayor_candidates(self, theme: str = "") -> list[dict]:
+        """Generate 3 mayor candidates with distinct governing styles."""
+        if not self.settings.enabled:
+            return list(_FALLBACK_CANDIDATES)
+
+        roles_desc = ", ".join(f"{r['title']} ({r['domain']})" for r in COUNCIL_ROLES.values())
+        personality_options = ", ".join(PRESET_TRAITS.keys())
+        trait_names = ", ".join(PRESET_TRAITS["balanced"].keys())
+
+        theme_line = f"\nTown theme/setting: {theme}" if theme else ""
+
+        prompt = f"""Generate 3 mayor candidates for a new town. Each should have a distinct governing philosophy.{theme_line}
+
+The town council has these roles: {roles_desc}
+Available personality presets: {personality_options}
+Trait axes (each 0.0-1.0): {trait_names}
+
+Return a JSON array of 3 objects, each with:
+- "name": full name (string)
+- "bio": 2-3 sentence backstory (string)
+- "personality": one of the preset names (string)
+- "governing_style": one of "moderate", "authoritarian", "progressive", "libertarian", "traditionalist" (string)
+- "traits": object mapping trait names to float values 0.0-1.0
+
+Example:
+[{{"name":"Jane Doe","bio":"A former teacher turned administrator.","personality":"balanced","governing_style":"moderate","traits":{{"shyness":0.2,"proactivity":0.6,"leadership":0.8,"laziness":0.1,"adventurous":0.3,"nurturing":0.5,"stubbornness":0.4,"creativity":0.5}}}}]
+
+Return ONLY the JSON array, no other text."""
+
+        try:
+            raw = await self._chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=self.settings.worldgen_max_tokens,
+                timeout=self.settings.worldgen_timeout,
+            )
+            candidates = _parse_json(raw)
+            if not isinstance(candidates, list) or len(candidates) < 3:
+                log.warning("LLM returned %d candidates, falling back", len(candidates) if isinstance(candidates, list) else 0)
+                return list(_FALLBACK_CANDIDATES)
+
+            result = []
+            for c in candidates[:3]:
+                result.append({
+                    "name": str(c.get("name", f"Candidate {len(result)+1}")),
+                    "bio": str(c.get("bio", "")),
+                    "personality": _validate_personality(c.get("personality", "balanced")),
+                    "governing_style": str(c.get("governing_style", "moderate")),
+                    "traits": _clamp_traits(c.get("traits", PRESET_TRAITS["balanced"])),
+                })
+            return result
+
+        except Exception:
+            log.exception("Failed to generate mayor candidates via LLM")
+            return list(_FALLBACK_CANDIDATES)
+
+    # ── Council meeting ─────────────────────────────────────────────────
+
+    async def generate_council_meeting(
+        self,
+        town_state: dict,
+        building_catalog: list[dict] | None = None,
+    ) -> dict:
+        """Generate a council debate and building proposal given the current town state."""
+        if not self.settings.enabled:
+            return self._fallback_meeting(town_state, building_catalog)
+
+        pop = town_state.get("population", 0)
+        built = set(town_state.get("built_keys", []))
+        available = building_catalog or _available_buildings(pop, built)
+
+        council_members = town_state.get("council", [])
+        council_desc = "\n".join(
+            f"- {m.get('name', '?')} ({m.get('role', '?')}): personality={m.get('personality', '?')}"
+            for m in council_members
+        )
+        treasury = town_state.get("treasury", 0)
+        needs_summary = town_state.get("needs_summary", "No critical needs.")
+
+        buildings_desc = "\n".join(
+            f"- {b['key']}: {b['description']} (cost: {b['cost']})"
+            for b in available[:15]
+        )
+
+        prompt = f"""You are generating a town council meeting for a city-builder simulation.
+
+Town state:
+- Population: {pop}
+- Treasury: {treasury} gold
+- Urgent needs: {needs_summary}
+
+Council members:
+{council_desc}
+
+Available buildings to propose:
+{buildings_desc}
+
+Generate a council debate where each member argues from their domain perspective, then a final proposal.
+
+Return JSON with:
+- "debate": array of {{"role": "mayor"|"sheriff"|etc, "name": "member name", "argument": "1-2 sentence argument"}}
+- "proposal": {{"action_type": "build", "building_key": "key from available list", "description": "why this building", "cost": integer cost from catalog}}
+
+Return ONLY the JSON object."""
+
+        try:
+            raw = await self._chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=self.settings.max_tokens,
+                timeout=self.settings.dialogue_timeout,
+            )
+            meeting = _parse_json(raw)
+            if not isinstance(meeting, dict):
+                return self._fallback_meeting(town_state, building_catalog)
+
+            # Validate debate entries
+            debate = meeting.get("debate", [])
+            if not isinstance(debate, list):
+                debate = []
+            validated_debate = []
+            for entry in debate:
+                if isinstance(entry, dict) and "argument" in entry:
+                    validated_debate.append({
+                        "role": str(entry.get("role", "mayor")),
+                        "name": str(entry.get("name", "")),
+                        "argument": str(entry["argument"]),
+                    })
+
+            # Validate proposal
+            proposal = meeting.get("proposal", {})
+            if not isinstance(proposal, dict) or "building_key" not in proposal:
+                return self._fallback_meeting(town_state, building_catalog)
+
+            bkey = proposal["building_key"]
+            bdef = BUILDING_CATALOG.get(bkey)
+            if not bdef:
+                return self._fallback_meeting(town_state, building_catalog)
+
+            return {
+                "debate": validated_debate,
+                "proposal": {
+                    "action_type": str(proposal.get("action_type", "build")),
+                    "building_key": bkey,
+                    "description": str(proposal.get("description", bdef.description)),
+                    "cost": bdef.cost,
+                },
+            }
+
+        except Exception:
+            log.exception("Failed to generate council meeting via LLM")
+            return self._fallback_meeting(town_state, building_catalog)
+
+    def _fallback_meeting(self, town_state: dict, building_catalog: list[dict] | None = None) -> dict:
+        """Rule-based fallback: pick the cheapest affordable unlocked building."""
+        pop = town_state.get("population", 0)
+        built = set(town_state.get("built_keys", []))
+        treasury = town_state.get("treasury", 0)
+        available = building_catalog or _available_buildings(pop, built)
+
+        # Priority: housing if low, then civic, then commercial
+        affordable = [b for b in available if b["cost"] <= treasury]
+        if not affordable:
+            affordable = available[:1] if available else [{"key": "cottage", "cost": 2000, "description": "Basic housing"}]
+
+        # Prefer housing if population is growing
+        housing = [b for b in affordable if BUILDING_CATALOG.get(b["key"], None) and
+                   BUILDING_CATALOG[b["key"]].provides_housing]
+        pick = housing[0] if housing else affordable[0]
+        bdef = BUILDING_CATALOG.get(pick["key"])
+
+        council_members = town_state.get("council", [])
+        debate = []
+        for m in council_members:
+            role = m.get("role", "mayor")
+            name = m.get("name", "Unknown")
+            domain = COUNCIL_ROLES.get(role, {}).get("domain", "governance")
+            debate.append({
+                "role": role,
+                "name": name,
+                "argument": f"From a {domain} perspective, {pick['key'].replace('_', ' ')} would serve the town well.",
+            })
+
+        return {
+            "debate": debate,
+            "proposal": {
+                "action_type": "build",
+                "building_key": pick["key"],
+                "description": bdef.description if bdef else pick.get("description", ""),
+                "cost": bdef.cost if bdef else pick.get("cost", 0),
+            },
+        }
+
+    # ── Immigrants ──────────────────────────────────────────────────────
+
+    async def generate_immigrants(
+        self,
+        housing_type: str,
+        town_context: str = "",
+    ) -> list[dict]:
+        """Generate a family/group for a given housing type."""
+        if not self.settings.enabled:
+            return self._fallback_immigrants(housing_type)
+
+        profile = HOUSING_IMMIGRANT_PROFILES.get(housing_type, HOUSING_IMMIGRANT_PROFILES["cottage"])
+        personality_options = ", ".join(PRESET_TRAITS.keys())
+        skill_names = ", ".join(SKILL_CATEGORIES.keys())
+
+        context_line = f"\nTown context: {town_context}" if town_context else ""
+
+        prompt = f"""Generate immigrants for a city-builder simulation.{context_line}
+
+Housing type: {housing_type}
+Expected profile: {profile['description']}
+Adults expected: {profile['adults']}, Children expected: {profile.get('children', 0)}
+
+Available personality presets: {personality_options}
+Available skills (each 0.0-1.0): {skill_names}
+
+Return a JSON array of people, each with:
+- "name": full name
+- "age": integer (adults 18-65, children 5-17)
+- "personality": one of the preset names
+- "skills": object mapping skill names to float levels
+- "bio": 1 sentence backstory
+
+Return ONLY the JSON array."""
+
+        try:
+            raw = await self._chat(
+                [{"role": "user", "content": prompt}],
+                max_tokens=self.settings.max_tokens,
+                timeout=self.settings.dialogue_timeout,
+            )
+            people = _parse_json(raw)
+            if not isinstance(people, list) or not people:
+                return self._fallback_immigrants(housing_type)
+
+            result = []
+            for p in people:
+                age = int(p.get("age", 25))
+                age = max(0, min(100, age))
+                result.append({
+                    "name": str(p.get("name", f"Immigrant {len(result)+1}")),
+                    "age": age,
+                    "personality": _validate_personality(p.get("personality", "balanced")),
+                    "skills": _validate_skills(p.get("skills", {})),
+                    "bio": str(p.get("bio", "")),
+                })
+            return result
+
+        except Exception:
+            log.exception("Failed to generate immigrants via LLM")
+            return self._fallback_immigrants(housing_type)
+
+    def _fallback_immigrants(self, housing_type: str) -> list[dict]:
+        template = _FALLBACK_FAMILIES.get(housing_type, _FALLBACK_FAMILIES["cottage"])
+        return [dict(p) for p in template]
+
+    # ── Dialogue ────────────────────────────────────────────────────────
 
     async def generate_dialogue(
         self,
         speaker: str,
-        target: str,
+        target: str | None,
         location: str,
         time_of_day: str,
         season: str,
         personality: str,
-        urgent_drive: str | None,
+        urgent_need: str | None,
         memories: list[dict],
         fallback: str,
     ) -> str:
-        """Generate one line of in-character dialogue. Returns fallback on error."""
+        """Generate a single in-character dialogue line."""
         if not self.settings.enabled:
-            return fallback
+            return self._format_fallback(speaker, target, time_of_day, season, fallback)
 
-        mem_lines = ""
-        relevant = [m for m in memories[:3] if m.get("content")]
-        if relevant:
-            mem_lines = "\nYour recent memories:\n" + "\n".join(
-                f"- {m['content']}" for m in relevant
-            )
+        memory_lines = ""
+        if memories:
+            memory_items = [f"- {m.get('content', m.get('label', ''))}" for m in memories[:5]]
+            memory_lines = "\nRecent memories:\n" + "\n".join(memory_items)
 
-        drive_note = (
-            f" You feel a strong {urgent_drive} urge right now." if urgent_drive else ""
-        )
+        target_line = f" speaking to {target}" if target else ""
+        need_line = f"\nUrgent need: {urgent_need}" if urgent_need else ""
 
-        prompt = (
-            f"You are {speaker}, a {personality} person living in a small town. "
-            f"You are speaking to {target} at {location.replace('_', ' ')}. "
-            f"It is {time_of_day}, {season}.{drive_note}"
-            f"{mem_lines}\n\n"
-            f"Write exactly one natural sentence that {speaker} says to {target}. "
-            f"Be specific, personal, and true to your character — avoid clichés and generic greetings. "
-            f"Reply with ONLY the sentence, no quotes, no attribution."
-        )
+        prompt = f"""Generate ONE short dialogue line (max 20 words) for a character in a town simulation.
 
-        try:
-            text = await self._chat(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.settings.max_tokens,
-                timeout=self.settings.dialogue_timeout or None,
-            )
-            # Strip surrounding quotes some models add despite instructions
-            if len(text) >= 2 and text[0] in ('"', "'") and text[-1] == text[0]:
-                text = text[1:-1]
-            return text or fallback
-        except Exception as exc:
-            logger.debug("Dialogue generation failed (%s → %s): %s", speaker, target, exc)
-            return fallback
+Character: {speaker}{target_line}
+Location: {location}
+Time: {time_of_day}, Season: {season}
+Personality: {personality}{need_line}{memory_lines}
 
-    # ── Batched dialogue generation ───────────────────────────────────
-
-    async def generate_dialogue_batch(self, requests: list) -> list[str]:
-        """Generate one dialogue line per request in a single LLM call.
-
-        Returns a list of strings parallel to ``requests``.  Falls back to each
-        request's ``fallback`` string on any error or length mismatch so the
-        caller never has to special-case failures.
-        """
-        fallbacks = [r.fallback for r in requests]
-        if not self.settings.enabled or not requests:
-            return fallbacks
-
-        chars = []
-        for i, r in enumerate(requests):
-            mem_lines = [m["content"] for m in r.memories[:3] if m.get("content")]
-            entry: dict = {
-                "index": i,
-                "speaker": r.speaker,
-                "target": r.target,
-                "location": r.location.replace("_", " "),
-                "time_of_day": r.time_of_day,
-                "season": r.season,
-                "personality": r.personality,
-            }
-            if r.urgent_drive:
-                entry["urgent_drive"] = r.urgent_drive
-            if mem_lines:
-                entry["memories"] = mem_lines
-            chars.append(entry)
-
-        import json as _json
-        prompt = (
-            "You are a narrator for a life simulation. "
-            "Generate exactly one in-character dialogue line for each character below.\n"
-            "Return ONLY a JSON array of strings, one per character, in index order.\n"
-            "No markdown, no code fences, no commentary — only the JSON array.\n\n"
-            "Rules for each line:\n"
-            "- One natural sentence only — no continuation, no monologue.\n"
-            "- Specific, personal, in-character — no clichés, no generic greetings.\n"
-            "- No speaker attribution, no surrounding quotes.\n\n"
-            f"Characters:\n{_json.dumps(chars, ensure_ascii=False)}\n\n"
-            f'Respond with ONLY the JSON array, e.g.: {_json.dumps(["line for index 0"] * len(requests))}'
-        )
-
-        n = len(requests)
-        max_tokens = self.settings.max_tokens * n + 100
-        timeout = (self.settings.dialogue_timeout * n) if self.settings.dialogue_timeout else None
+Return ONLY the dialogue line in quotes, nothing else. Keep it natural and in-character."""
 
         try:
             raw = await self._chat(
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=max_tokens,
-                timeout=timeout,
+                [{"role": "user", "content": prompt}],
+                max_tokens=128,
+                temperature=self.settings.temperature,
+                timeout=self.settings.dialogue_timeout,
             )
-            # Strip markdown fences if model ignores instruction
-            if "```" in raw:
-                for part in raw.split("```")[1:]:
-                    part = part.lstrip("json").strip()
-                    if part.startswith("["):
-                        raw = part
-                        break
-            parsed = _json.loads(raw)
-            if not isinstance(parsed, list):
-                return fallbacks
-            # Merge parsed entries with fallbacks for any missing indices
-            result = list(fallbacks)
-            for idx, text in enumerate(parsed):
-                if idx < n and isinstance(text, str) and text.strip():
-                    t = text.strip()
-                    if len(t) >= 2 and t[0] in ('"', "'") and t[-1] == t[0]:
-                        t = t[1:-1]
-                    result[idx] = t or fallbacks[idx]
-            return result
-        except Exception as exc:
-            logger.debug("Batch dialogue generation failed: %s", exc)
-            return fallbacks
+            # Strip surrounding quotes if present
+            line = raw.strip().strip('"').strip("'")
+            if not line:
+                return self._format_fallback(speaker, target, time_of_day, season, fallback)
+            return line
 
-    # ── World generation ──────────────────────────────────────────────
+        except Exception:
+            log.debug("Dialogue LLM call failed for %s", speaker, exc_info=True)
+            return self._format_fallback(speaker, target, time_of_day, season, fallback)
 
-    async def generate_world(self, theme: str = "") -> dict | None:
-        """Generate a full town scenario as a validated dict. Returns None on failure."""
-        if not self.settings.enabled:
-            return None
+    async def generate_dialogue_batch(self, requests: list[dict]) -> list[str]:
+        """Generate dialogue for multiple requests. Falls back per-request on failure."""
+        results = []
+        for req in requests:
+            line = await self.generate_dialogue(
+                speaker=req["speaker"],
+                target=req.get("target"),
+                location=req["location"],
+                time_of_day=req["time_of_day"],
+                season=req["season"],
+                personality=req["personality"],
+                urgent_need=req.get("urgent_need"),
+                memories=req.get("memories", []),
+                fallback=req.get("fallback", "..."),
+            )
+            results.append(line)
+        return results
 
-        theme_clause = f" Setting/theme: {theme}." if theme else ""
-
-        user_msg = (
-            f"Generate a complete small-town life simulation scenario.{theme_clause}\n\n"
-            f"Requirements:\n"
-            f"- 5-9 places: at least 1 home per couple/group, 2-3 public buildings, "
-            f"1 outdoor space, 1-2 streets connecting them\n"
-            f"- 4-6 agents: distinct personalities, ages 18-70, varied occupations\n"
-            f"- At least one established romantic pair and one close friendship\n"
-            f"- 3-6 cultural_facts that capture the town's character\n"
-            f"- Characters must feel grounded: concrete jobs, specific interests, real tensions\n\n"
-            f"Follow this JSON structure exactly:\n"
-            f"{json.dumps(_WORLD_SCHEMA_EXAMPLE, indent=2)}\n\n"
-            f"Now generate a completely NEW and ORIGINAL scenario — do not copy the example."
+    def _format_fallback(
+        self,
+        speaker: str,
+        target: str | None,
+        time_of_day: str,
+        season: str,
+        fallback: str,
+    ) -> str:
+        if fallback and fallback != "...":
+            return fallback
+        template = random.choice(_DIALOGUE_TEMPLATES)
+        return template.format(
+            speaker=speaker,
+            target=target or "someone",
+            time_of_day=time_of_day,
+            season=season,
         )
 
-        try:
-            raw = await self._chat(
-                messages=[
-                    {"role": "system", "content": _WORLD_GEN_SYSTEM},
-                    {"role": "user", "content": user_msg},
-                ],
-                max_tokens=self.settings.worldgen_max_tokens,
-                temperature=0.85,
-                timeout=self.settings.worldgen_timeout or None,
-            )
-            # Strip markdown fences if model ignores instruction
-            if "```" in raw:
-                parts = raw.split("```")
-                # Take first non-empty fenced block
-                for part in parts[1:]:
-                    part = part.lstrip("json").strip()
-                    if part.startswith("{"):
-                        raw = part
-                        break
-            world = json.loads(raw)
-            logger.info(
-                "World generated: %s (%d places, %d agents)",
-                world.get("town_name", "?"),
-                len(world.get("places", [])),
-                len(world.get("agents", [])),
-            )
-            return world
-        except Exception as exc:
-            logger.warning("World generation failed: %s", exc)
-            return None
+    # ── lifecycle ───────────────────────────────────────────────────────
+
+    async def close(self) -> None:
+        if self._client is not None and not self._client.is_closed:
+            await self._client.aclose()
+            self._client = None

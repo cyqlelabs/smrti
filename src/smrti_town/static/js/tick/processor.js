@@ -1,344 +1,435 @@
-/* ================================================================
-   processor.js — processTick(), processInit()
-   ================================================================ */
-window.TOWN = window.TOWN || {};
+/**
+ * Processes incoming WebSocket messages, updates GameState,
+ * and triggers UI/Phaser updates.
+ */
 
-TOWN.processTick = function(scene, data) {
-  if (data.type === 'state' || data.type === 'init') {
-    TOWN._hideGenerating();
-    TOWN.processInit(scene, data);
-    return Promise.resolve();
-  }
+var TickProcessor = {
+  /**
+   * Handle a parsed WS message.
+   * @param {object} msg
+   */
+  handle: function(msg) {
+    var type = msg.type;
 
-  if (data.type === 'generating') {
-    TOWN._showGenerating(data.message || 'Generating world…', data.hint || '');
-    return Promise.resolve();
-  }
+    switch (type) {
+      case 'state':
+        this._handleState(msg.data || msg);
+        break;
 
-  if (data.type === 'dialogue_patch') {
-    TOWN._applyDialoguePatch(scene, data);
-    return Promise.resolve();
-  }
+      case 'tick':
+        this._handleTick(msg);
+        break;
 
-  if (data.type === 'error') {
-    TOWN._hideGenerating();
-    TOWN.addLogEntry('system', '\u26A0\uFE0F ' + (data.message || 'Server error'));
-    return Promise.resolve();
-  }
+      case 'dialogue_patch':
+        this._handleDialoguePatch(msg);
+        break;
 
-  if (data.type === 'building_placed') {
-    if (TOWN.state.scene) {
-      TOWN.drawTown(TOWN.state.scene, TOWN.state.town);
+      case 'phase':
+        this._handlePhase(msg);
+        break;
+
+      case 'game_phase':
+        this._handleGamePhase(msg);
+        break;
+
+      case 'mayor_candidates':
+        this._handleMayorCandidates(msg);
+        break;
+
+      case 'council_formed':
+        this._handleCouncilFormed(msg);
+        break;
+
+      case 'council_meeting':
+        this._handleCouncilMeeting(msg);
+        break;
+
+      case 'building_placed':
+        this._handleBuildingPlaced(msg);
+        break;
+
+      case 'building_demolished':
+        EventLog.add('Building demolished: ' + (msg.place_name || ''), 'event');
+        break;
+
+      case 'petition_approved':
+        EventLog.add('Petition approved: ' + (msg.building_type || ''), 'milestone');
+        Petitions.render();
+        break;
+
+      case 'petition_update':
+        EventLog.add('Petition ' + (msg.status || 'updated'), 'event');
+        Petitions.render();
+        break;
+
+      case 'council_result':
+        if (msg.approved && msg.building_key) {
+          GameState.selectedBuilding = msg.building_key;
+          EventLog.add('Council approved: place ' + msg.building_key.replace(/_/g, ' '), 'milestone');
+          Council.hide();
+          if (typeof Toolbar !== 'undefined') Toolbar.render();
+        } else {
+          EventLog.add('Council proposal rejected.', 'event');
+          Council.hide();
+        }
+        break;
+
+      case 'immigration':
+        this._handleImmigration(msg);
+        break;
+
+      case 'event':
+        EventLog.add(msg.description || msg.event_type || 'Event', 'event');
+        break;
+
+      case 'milestone':
+        EventLog.add((msg.name || '') + ': ' + (msg.description || ''), 'milestone');
+        this._celebrateOnScreen();
+        break;
+
+      case 'crisis':
+        EventLog.add('CRISIS: ' + (msg.description || msg.crisis_type || ''), 'crisis');
+        break;
+
+      case 'game_over':
+        GameState.phase = PHASES.GAME_OVER;
+        GameState.gameOverReason = msg.reason || 'Unknown';
+        this._switchScene('GameOverScene');
+        break;
+
+      case 'generating':
+        GameState.phase = PHASES.GENERATING;
+        GameState.generatingMessage = msg.message || 'Generating...';
+        GameState.generatingHint = msg.hint || '';
+        this._showGenerating();
+        break;
+
+      case 'reset':
+        this._handleReset();
+        break;
+
+      case 'error':
+        EventLog.add('Error: ' + (msg.message || ''), 'crisis');
+        console.error('Server error:', msg.message);
+        break;
+
+      case 'paused':
+        GameState.paused = true;
+        Controls.updateButtons();
+        break;
+
+      case 'resumed':
+        GameState.paused = false;
+        Controls.updateButtons();
+        break;
+
+      case 'ack':
+        this._handleAck(msg);
+        break;
+
+      case 'ping':
+        // keep-alive, no action needed
+        break;
+
+      default:
+        console.log('Unknown WS message type:', type, msg);
     }
-    TOWN.addLogEntry('system', '\uD83C\uDFD7\uFE0F ' + data.building_type + ' placed at (' + data.grid_origin[0] + ', ' + data.grid_origin[1] + ')');
-    return Promise.resolve();
-  }
+  },
 
-  if (data.type === 'petition') {
-    TOWN.addLogEntry('event', '\uD83D\uDCDC ' + data.description);
-    TOWN.updatePetitionBadge();
-    return Promise.resolve();
-  }
+  _handleState: function(data) {
+    GameState.tick = data.tick || data.tick_number || 0;
+    if (data.calendar) GameState.calendar = data.calendar;
+    if (data.agents) GameState.agents = data.agents;
+    if (data.places) GameState.places = data.places;
+    if (data.grid) GameState.grid = data.grid;
+    if (data.economy) GameState.economy = data.economy;
+    if (data.petitions) GameState.petitions = data.petitions;
+    if (data.director_mode) GameState.directorMode = data.director_mode;
 
-  if (data.type === 'petition_approved') {
-    TOWN.addLogEntry('system', '\u2705 Petition approved: ' + data.building_type);
-    return Promise.resolve();
-  }
-
-  if (data.type === 'road_placed') {
-    if (TOWN.state.scene) {
-      TOWN.drawTown(TOWN.state.scene, TOWN.state.town);
+    // Route to correct scene/UI based on server phase
+    var phase = data.phase;
+    if (phase === 'gameplay') {
+      GameState.phase = PHASES.GAMEPLAY;
+      this._switchScene('TownScene');
+    } else if (phase === 'opening_place_hall') {
+      GameState.phase = PHASES.OPENING_PLACE_HALL;
+      this._switchScene('OpeningScene');
+    } else if (phase === 'opening_choose_mayor') {
+      GameState.phase = PHASES.OPENING_CHOOSE_MAYOR;
+      this._switchScene('OpeningScene');
+      if (data.candidates) this._showMayorSelect({ candidates: data.candidates });
+    } else if (phase === 'opening_council') {
+      GameState.phase = PHASES.OPENING_COUNCIL;
+      this._switchScene('OpeningScene');
+      if (data.council_specs) {
+        GameState.council.members = data.council_specs;
+        this._showCouncilReveal();
+      }
     }
-    return Promise.resolve();
-  }
 
-  if (data.type === 'building_demolished') {
-    if (TOWN.state.scene) {
-      TOWN.drawTown(TOWN.state.scene, TOWN.state.town);
+    this._updateAllUI();
+  },
+
+  _handleTick: function(msg) {
+    GameState.tick = msg.tick || msg.tick_number || GameState.tick + 1;
+    if (msg.calendar) GameState.calendar = msg.calendar;
+    if (msg.citizens) GameState.agents = msg.citizens;
+    else if (msg.agents) GameState.agents = msg.agents;
+    if (msg.economy) GameState.economy = msg.economy;
+    if (msg.topology) GameState.places = msg.topology.places || GameState.places;
+    if (msg.gridmap) GameState.grid = msg.gridmap;
+    if (msg.director_mode) GameState.directorMode = msg.director_mode;
+
+    // Process tick events
+    var events = msg.events || [];
+    for (var i = 0; i < events.length; i++) {
+      var e = events[i];
+      EventLog.add(e.description || e.text || JSON.stringify(e), 'event');
     }
-    TOWN.addLogEntry('system', '\uD83D\uDD28 ' + data.place_name + ' demolished');
-    return Promise.resolve();
-  }
 
-  if (data.type === 'encounter') {
-    TOWN.addLogEntry('event', '\uD83D\uDC4B ' + data.description);
-    return Promise.resolve();
-  }
+    // Deaths
+    var deaths = msg.deaths || [];
+    for (var d = 0; d < deaths.length; d++) {
+      EventLog.add(deaths[d] + ' has died.', 'crisis');
+    }
 
-  if (data.type !== 'tick') return Promise.resolve();
+    // Births
+    var births = msg.births || [];
+    for (var b = 0; b < births.length; b++) {
+      var birth = births[b];
+      EventLog.add('A child is born: ' + (birth.name || 'Unknown'), 'milestone');
+    }
 
-  /* ── Calendar ────────────────────────────────────────────────── */
-  if (data.calendar) {
-    TOWN.state.calendar = data.calendar;
-    TOWN.updateClockUI();
-  }
+    // Conversations
+    var convos = msg.conversations || [];
+    for (var c = 0; c < convos.length; c++) {
+      var conv = convos[c];
+      if (conv.speaker && conv.dialogue) {
+        SpeechBubbles.show(conv.speaker, conv.dialogue, 5000);
+      }
+    }
 
-  /* ── Director mode ───────────────────────────────────────────── */
-  if (data.director_mode) {
-    TOWN.state.directorMode = data.director_mode;
-    TOWN.updateDirectorBadge();
-  }
+    this._updateAllUI();
+  },
 
-  /* ── Tick number ─────────────────────────────────────────────── */
-  if (data.tick_number !== undefined) {
-    TOWN.state.tickNumber = data.tick_number;
-  }
+  _handleDialoguePatch: function(msg) {
+    // Server sends a single patch per message: {speaker, line, target, location, tick}
+    var line = msg.line || msg.dialogue;
+    if (msg.speaker && line) {
+      SpeechBubbles.show(msg.speaker, line, 5000);
+      EventLog.add(msg.speaker + ': "' + line + '"', 'dialogue');
+    }
+  },
 
-  /* ── Agents ──────────────────────────────────────────────────── */
-  if (data.agents) {
-    for (var i = 0; i < data.agents.length; i++) {
-      var a = data.agents[i];
-      /* Merge into existing agent data */
-      if (!TOWN.state.agents[a.name]) {
-        TOWN.state.agents[a.name] = a;
-      } else {
-        var existing = TOWN.state.agents[a.name];
-        for (var key in a) {
-          existing[key] = a[key];
+  _handlePhase: function(msg) {
+    var phase = msg.phase;
+    if (phase === 'opening_choose_mayor' && msg.candidates) {
+      this._handleMayorCandidates(msg);
+    } else if (phase === 'opening_council') {
+      // council_specs from server, council members array may be in council_specs
+      if (msg.council_specs && !msg.council) {
+        msg.council = msg.council_specs;
+      }
+      this._handleCouncilFormed(msg);
+    } else {
+      this._handleGamePhase(msg);
+    }
+  },
+
+  _handleGamePhase: function(msg) {
+    var phase = msg.phase;
+    if (phase === 'opening_place_hall') {
+      GameState.phase = PHASES.OPENING_PLACE_HALL;
+      this._switchScene('OpeningScene');
+    } else if (phase === 'opening_choose_mayor') {
+      GameState.phase = PHASES.OPENING_CHOOSE_MAYOR;
+    } else if (phase === 'opening_council') {
+      GameState.phase = PHASES.OPENING_COUNCIL;
+    } else if (phase === 'gameplay') {
+      GameState.phase = PHASES.GAMEPLAY;
+      this._switchScene('TownScene');
+    }
+  },
+
+  _handleMayorCandidates: function(msg) {
+    GameState.mayorCandidates = msg.candidates || [];
+    GameState.phase = PHASES.OPENING_CHOOSE_MAYOR;
+    this._showMayorSelect();
+  },
+
+  _handleCouncilFormed: function(msg) {
+    GameState.council.members = msg.council || [];
+    GameState.phase = PHASES.OPENING_COUNCIL;
+    this._showCouncilReveal();
+  },
+
+  _handleCouncilMeeting: function(msg) {
+    Council.showMeeting(msg.meeting || msg);
+  },
+
+  _handleBuildingPlaced: function(msg) {
+    var building = msg.building || msg;
+    // Add to grid if not already there
+    var found = false;
+    var buildings = GameState.grid.buildings || [];
+    for (var i = 0; i < buildings.length; i++) {
+      if (buildings[i].grid_x === building.grid_x && buildings[i].grid_y === building.grid_y) {
+        found = true;
+        break;
+      }
+    }
+    if (!found) {
+      buildings.push(building);
+    }
+    EventLog.add('New building: ' + (building.building_key || building.type || ''), 'event');
+    BuildingRenderer.sync();
+  },
+
+  _handleImmigration: function(msg) {
+    var citizens = msg.citizens || [];
+    for (var i = 0; i < citizens.length; i++) {
+      EventLog.add('New citizen arrives: ' + (citizens[i].name || ''), 'milestone');
+    }
+  },
+
+  _handleReset: function() {
+    GameState.phase = PHASES.BOOT;
+    GameState.agents = [];
+    GameState.places = [];
+    GameState.grid = { buildings: [] };
+    GameState.economy = {};
+    GameState.petitions = [];
+    GameState.council = { members: [], pending_meeting: null };
+    GameState.events = [];
+    EventLog.clear();
+  },
+
+  _handleAck: function(msg) {
+    if (msg.action === 'pause') {
+      GameState.paused = true;
+      Controls.updateButtons();
+    } else if (msg.action === 'resume' || msg.action === 'start') {
+      GameState.paused = false;
+      Controls.updateButtons();
+    }
+  },
+
+  _updateAllUI: function() {
+    Topbar.update();
+    AgentRenderer.sync();
+    BuildingRenderer.sync();
+
+    // Update sidebar if something is selected
+    if (GameState.selectedAgent) {
+      var agents = GameState.agents || [];
+      for (var i = 0; i < agents.length; i++) {
+        if (agents[i].name === GameState.selectedAgent) {
+          Sidebar.showAgent(agents[i]);
+          break;
         }
       }
-      TOWN.updateAgentSprite(scene, TOWN.state.agents[a.name]);
     }
-  }
+  },
 
-  /* ── Occupant counts ─────────────────────────────────────────── */
-  TOWN.updateOccupantCounts();
+  _switchScene: function(sceneKey) {
+    if (!GameState.phaserGame) return;
+    var sm = GameState.phaserGame.scene;
 
-  /* ── Conversations (staggered for visual pacing) ─────────────── */
-  if (data.conversations) {
-    for (var ci = 0; ci < data.conversations.length; ci++) {
-      (function(conv, delay) {
-        setTimeout(function() {
-          TOWN.showSpeechBubble(scene, conv.speaker, conv.content);
-          TOWN.addLogEntry('talk', conv.speaker + ' to ' + conv.listener + ': \u201C' + conv.content + '\u201D');
-        }, delay);
-      })(data.conversations[ci], ci * 400);
-    }
-  }
-
-  /* ── Events ──────────────────────────────────────────────────── */
-  if (data.events) {
-    for (var ei = 0; ei < data.events.length; ei++) {
-      var evt = data.events[ei];
-      var evtIcon = evt.icon || '\u2726';
-      TOWN.addLogEntry('event', evtIcon + ' ' + evt.description);
-    }
-  }
-
-  /* ── Births ──────────────────────────────────────────────────── */
-  if (data.births) {
-    for (var bi = 0; bi < data.births.length; bi++) {
-      var b = data.births[bi];
-      var birthName = b.child || b.name || 'Baby';
-      var parents = b.parents || (b.parent_a && b.parent_b ? [b.parent_a, b.parent_b] : []);
-      TOWN.addLogEntry('birth', '\uD83C\uDF1F ' + birthName + ' was born' + (parents.length ? ' to ' + parents.join(' & ') : '') + '!');
-      /* Particles at parent location */
-      var parentAgent = parents[0] ? TOWN.state.agents[parents[0]] : null;
-      if (parentAgent) {
-        var pos = TOWN.getPlaceCenter(parentAgent.location);
-        TOWN.spawnParticles(scene, pos.x, pos.y, 'birth');
+    // Stop all gameplay scenes
+    var scenes = ['BootScene', 'OpeningScene', 'TownScene', 'GameOverScene'];
+    for (var i = 0; i < scenes.length; i++) {
+      if (sm.isActive(scenes[i]) && scenes[i] !== sceneKey) {
+        sm.stop(scenes[i]);
       }
     }
-  }
 
-  /* ── Deaths ──────────────────────────────────────────────────── */
-  if (data.deaths) {
-    for (var di = 0; di < data.deaths.length; di++) {
-      var d = data.deaths[di];
-      var dName = d.name || d;
-      var dAge = d.age || (TOWN.state.agents[dName] ? Math.floor(TOWN.state.agents[dName].age_years) : '?');
-      TOWN.addLogEntry('death', '\u271E ' + dName + ' passed away at age ' + dAge);
-      var sp = TOWN.state.agentSprites[dName];
-      if (sp) {
-        TOWN.spawnParticles(scene, sp.x, sp.y, 'death');
-      }
-      if (TOWN.state.agents[dName]) {
-        TOWN.state.agents[dName].alive = false;
-      }
+    if (!sm.isActive(sceneKey)) {
+      sm.start(sceneKey);
     }
-  }
+  },
 
-  /* ── Update sidebar if relevant ──────────────────────────────── */
-  if (TOWN.state.selectedAgent && TOWN.state.agents[TOWN.state.selectedAgent]) {
-    TOWN.renderAgentSidebar(TOWN.state.agents[TOWN.state.selectedAgent]);
-  } else if (TOWN.state.selectedPlace) {
-    TOWN.renderPlaceSidebar(TOWN.state.selectedPlace);
-  }
+  _showGenerating: function() {
+    var el = document.getElementById('ui-generating');
+    document.getElementById('generating-message').textContent = GameState.generatingMessage;
+    document.getElementById('generating-hint').textContent = GameState.generatingHint;
+    el.classList.remove('hidden');
+  },
 
-  /* ── Town Health ─────────────────────────────────────────────── */
-  TOWN.updateTownHealth();
+  _showMayorSelect: function() {
+    var el = document.getElementById('ui-mayor-select');
+    var container = document.getElementById('mayor-candidates');
+    var candidates = GameState.mayorCandidates;
 
-  /* ── Milestones ──────────────────────────────────────────────── */
-  TOWN._checkMilestones(data);
-
-  return TOWN.sleep(50);
-};
-
-/* ── Milestone checker ───────────────────────────────────────────── */
-TOWN._checkMilestones = function(data) {
-  var ms = TOWN.state.milestones;
-
-  if (data.births && data.births.length && !ms.has('first_birth')) {
-    ms.add('first_birth');
-    TOWN.showToast('\uD83C\uDF7C', 'First birth in town!');
-  }
-
-  if (data.deaths && data.deaths.length && !ms.has('first_death')) {
-    ms.add('first_death');
-    TOWN.showToast('\u271E', 'The first soul passes from the town');
-  }
-
-  /* First marriage — scan relationships */
-  if (!ms.has('first_marriage')) {
-    var agents = TOWN.state.agents;
-    outer:
-    for (var n in agents) {
-      var rels = agents[n].relationships;
-      if (!rels) continue;
-      for (var r = 0; r < rels.length; r++) {
-        if (rels[r].state === 'married') {
-          ms.add('first_marriage');
-          TOWN.showToast('\uD83D\uDC8D', 'First wedding in town!');
-          break outer;
-        }
+    var html = '';
+    for (var i = 0; i < candidates.length; i++) {
+      var c = candidates[i];
+      html += '<div class="mayor-card" data-candidate="' + i + '">';
+      html += '<h3>' + _esc(c.name) + '</h3>';
+      html += '<div class="mayor-bio">' + _esc(c.bio || '') + '</div>';
+      if (c.personality) {
+        html += '<div class="mayor-style">Personality: ' + _esc(c.personality) + '</div>';
       }
+      if (c.governing_style) {
+        html += '<div class="mayor-style">Style: ' + _esc(c.governing_style) + '</div>';
+      }
+      html += '</div>';
     }
-  }
+    container.innerHTML = html;
 
-  /* Population milestones */
-  var alive = 0;
-  for (var k in TOWN.state.agents) {
-    if (TOWN.state.agents[k].alive) alive++;
-  }
-  if (alive >= 10 && !ms.has('pop_10')) {
-    ms.add('pop_10');
-    TOWN.showToast('\uD83D\uDCC8', 'Population reaches 10!');
-  }
+    // Attach click handlers
+    var cards = container.querySelectorAll('.mayor-card');
+    for (var j = 0; j < cards.length; j++) {
+      cards[j].addEventListener('click', function() {
+        var idx = parseInt(this.getAttribute('data-candidate'), 10);
+        fetch('/opening/choose-mayor', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ candidate_index: idx }),
+        });
+        el.classList.add('hidden');
+      });
+    }
 
-  /* Year milestones */
-  var year = TOWN.state.calendar.year || 1;
-  if (year >= 5 && !ms.has('year_5')) {
-    ms.add('year_5');
-    TOWN.showToast('\uD83C\uDF82', 'Five years have passed!');
-  }
-  if (year >= 10 && !ms.has('year_10')) {
-    ms.add('year_10');
-    TOWN.showToast('\uD83C\uDFC6', 'A decade in this town!');
-  }
-};
+    el.classList.remove('hidden');
+  },
 
-/* ── Toast notifications ─────────────────────────────────────────── */
-TOWN.showToast = function(icon, message) {
-  var container = document.getElementById('toast-container');
-  if (!container) return;
-  var el = document.createElement('div');
-  el.className = 'toast';
-  el.textContent = icon + ' ' + message;
-  container.appendChild(el);
-  setTimeout(function() {
-    if (el.parentNode) el.parentNode.removeChild(el);
-  }, 4200);
-};
+  _showCouncilReveal: function() {
+    var el = document.getElementById('ui-council-reveal');
+    var container = document.getElementById('council-members');
+    var members = GameState.council.members;
 
-TOWN.processInit = function(scene, data) {
-  /* Stop demo mode if it was running */
-  TOWN.state.demoMode = false;
-  if (TOWN.state.demoInterval) {
-    clearInterval(TOWN.state.demoInterval);
-    TOWN.state.demoInterval = null;
-  }
-  /* Reset milestones and health for new world */
-  TOWN.state.milestones = new Set();
-  TOWN.state.townHealth  = 50;
-  /* Reset window lighting on new world */
-  TOWN._lastWindowTod  = null;
-  TOWN._lastSeasonTint = null;
+    var html = '';
+    for (var i = 0; i < members.length; i++) {
+      var m = members[i];
+      html += '<div class="council-card">';
+      html += '<h4>' + _esc(m.name) + '</h4>';
+      html += '<div class="council-role">' + _esc(m.role || '') + '</div>';
+      html += '<div class="council-domain">' + _esc(m.domain || '') + '</div>';
+      if (m.personality) {
+        html += '<div style="font-size:11px;color:var(--text-dim);margin-top:4px;">' +
+          _esc(m.personality) + '</div>';
+      }
+      html += '</div>';
+    }
+    container.innerHTML = html;
 
-  var townData = data.town || data.data || data;
-
-  /* ── Rebuild town from server data ───────────────────────────── */
-  if (townData.places) {
-    var newTown = {
-      places: {},
-      connections: townData.connections || TOWN.CONNECTIONS,
+    document.getElementById('council-begin').onclick = function() {
+      fetch('/opening/begin', { method: 'POST' });
+      el.classList.add('hidden');
     };
-    var placeNames = Object.keys(townData.places);
-    for (var i = 0; i < placeNames.length; i++) {
-      var key = placeNames[i];
-      var p = townData.places[key];
-      newTown.places[key] = {
-        x: p.x || 400, y: p.y || 300,
-        w: p.w || 130, h: p.h || 100,
-        color: p.color || '#888888',
-        icon: p.icon || '',
-        label: p.label || key.replace(/_/g, ' '),
-        place_type: p.place_type || 'other',
-      };
+
+    el.classList.remove('hidden');
+  },
+
+  _celebrateOnScreen: function() {
+    if (!GameState.phaserGame) return;
+    var scene = GameState.phaserGame.scene.getScene('TownScene');
+    if (scene && scene.sys.isActive()) {
+      var cam = scene.cameras.main;
+      Particles.celebrate(scene,
+        cam.scrollX + cam.width / 2,
+        cam.scrollY + cam.height / 2
+      );
     }
-    /* Clear and redraw */
-    scene.buildingLayer.removeAll(true);
-    TOWN.state.placeSprites = {};
-    scene.roadLayer.clear();
-    TOWN.state.town = newTown;
-    TOWN.drawTown(scene, newTown);
-  }
-
-  /* ── Spawn agents from init ──────────────────────────────────── */
-  var agents = data.agents || townData.agents;
-  if (agents) {
-    for (var j = 0; j < agents.length; j++) {
-      var a = agents[j];
-      TOWN.state.agents[a.name] = a;
-      TOWN.createAgentSprite(scene, a);
-      if (a.drives && TOWN.state.agentSprites[a.name]) {
-        TOWN.drawDriveBars(
-          TOWN.state.agentSprites[a.name].driveBarContainer,
-          TOWN.state.agentSprites[a.name].radius,
-          a.drives
-        );
-      }
-    }
-    TOWN.updateOccupantCounts();
-  }
-
-  TOWN.addLogEntry('system', 'Connected to Smrti Town simulation');
-
-  /* Refresh petition badge with seeded petitions */
-  TOWN.updatePetitionBadge();
-};
-
-/* ── Generating overlay ──────────────────────────────────────────── */
-
-TOWN._showGenerating = function(msg, hint) {
-  var el = document.getElementById('generating-overlay');
-  if (!el) return;
-  var msgEl = document.getElementById('gen-message');
-  var hintEl = document.getElementById('gen-hint');
-  if (msgEl) msgEl.textContent = msg;
-  if (hintEl) hintEl.textContent = hint;
-  el.classList.remove('hidden');
-};
-
-TOWN._hideGenerating = function() {
-  var el = document.getElementById('generating-overlay');
-  if (el) el.classList.add('hidden');
-};
-
-/* ── Dialogue patch ──────────────────────────────────────────────── */
-
-TOWN._applyDialoguePatch = function(scene, data) {
-  /* Update speech bubble if agent is still visible */
-  var speaker = data.speaker;
-  var content = data.content;
-  if (!speaker || !content) return;
-
-  /* Show updated speech bubble */
-  if (scene) TOWN.showSpeechBubble(scene, speaker, content);
-
-  /* Append enriched line to event log with a visual marker */
-  var target = data.target || '';
-  var label = target
-    ? speaker + ' \u2192 ' + target + ': \u201C' + content + '\u201D'
-    : speaker + ': \u201C' + content + '\u201D';
-  TOWN.addLogEntry('talk', '\u2728 ' + label);
+  },
 };

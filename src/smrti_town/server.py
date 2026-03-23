@@ -174,7 +174,6 @@ async def _tick_loop() -> None:
             # This is the core feedback loop: action → need satisfaction + economic effect.
             if economy:
                 citizen_map = {c.name: c for c in alive_citizens}
-                economy.register_citizen  # ensure method exists (it does)
                 for entry in actions:
                     cname = entry["citizen"]
                     act = entry["action"]
@@ -448,13 +447,14 @@ async def _tick_loop() -> None:
                     spec = pop_manager.check_immigration(pull_factors, available_housing)
                     if spec:
                         housing_type = spec["housing_type"]
-                        existing_names = {c.name for c in citizens}
+                        existing_names = {c.name for c in alive_citizens}
                         town_context = (
                             f"Population: {len(alive_citizens)}, "
                             f"treasury: {economy.treasury}, "
                             f"season: {calendar.season}, "
                             f"theme: {_llm_settings.world_theme}"
                         )
+                        newcomer_specs: list[dict] = []
                         try:
                             newcomer_specs = await _llm_client.generate_immigrants(housing_type, town_context)
                         except Exception:

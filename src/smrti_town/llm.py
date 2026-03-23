@@ -393,23 +393,36 @@ Return ONLY the JSON object."""
 
             # Validate proposal
             proposal = meeting.get("proposal", {})
-            if not isinstance(proposal, dict) or "building_key" not in proposal:
+            if not isinstance(proposal, dict):
                 return self._fallback_meeting(town_state, building_catalog)
 
-            bkey = proposal["building_key"]
-            bdef = BUILDING_CATALOG.get(bkey)
-            if not bdef:
-                return self._fallback_meeting(town_state, building_catalog)
+            action_type = str(proposal.get("action_type", "build"))
+            bkey = proposal.get("building_key")
 
-            return {
-                "debate": validated_debate,
-                "proposal": {
-                    "action_type": str(proposal.get("action_type", "build")),
-                    "building_key": bkey,
-                    "description": str(proposal.get("description", bdef.description)),
-                    "cost": bdef.cost,
-                },
-            }
+            if action_type == "build":
+                bdef = BUILDING_CATALOG.get(bkey) if bkey else None
+                if not bdef:
+                    return self._fallback_meeting(town_state, building_catalog)
+                return {
+                    "debate": validated_debate,
+                    "proposal": {
+                        "action_type": action_type,
+                        "building_key": bkey,
+                        "description": str(proposal.get("description", bdef.description)),
+                        "cost": bdef.cost,
+                    },
+                }
+            else:
+                # Non-build proposal (tax_change, event, policy) — pass through as-is
+                return {
+                    "debate": validated_debate,
+                    "proposal": {
+                        "action_type": action_type,
+                        "building_key": None,
+                        "description": str(proposal.get("description", action_type)),
+                        "cost": int(proposal.get("cost", 0)),
+                    },
+                }
 
         except Exception:
             log.exception("Failed to generate council meeting via LLM")

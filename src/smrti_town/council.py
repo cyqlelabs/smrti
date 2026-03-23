@@ -105,10 +105,11 @@ class Council:
     # ── scheduling ──────────────────────────────────────────────────────
 
     def should_convene(self, tick_number: int) -> bool:
-        """Returns True if enough time has passed since the last meeting and
-        there are no unresolved pending meetings."""
-        if self.get_pending_meeting() is not None:
-            return False
+        """Returns True if enough sim-time has passed since the last meeting.
+
+        Pending-meeting guard is handled externally by the tick loop checking
+        _game["pending_meeting"] so we don't maintain two sources of truth.
+        """
         elapsed = tick_number - self.last_meeting_tick
         return elapsed >= COUNCIL_MEETING_INTERVAL_HOURS
 

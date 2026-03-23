@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -32,10 +33,12 @@ from smrti_town.culture import promote_bridges_to_culture, run_bridge_discovery
 from smrti_town.director import Chronos, Director, SystemEvent
 from smrti_town.drives import _clamp
 from smrti_town.lifecycle import (
+    apply_relationship_regression,
     apply_relationship_transition,
     archive_agent,
     check_death,
     check_relationship_gates,
+    check_relationship_regression,
     check_reproduction_gate,
     compute_life_stage,
     spawn_child,
@@ -144,6 +147,8 @@ class SimEngine:
         # Agents by name for fast lookup
         self._agents_by_name: dict[str, Agent] = {a.name: a for a in agents}
         self._agent_last_location: dict[str, str] = {}
+        self._injected_events: list[dict] = []
+        self._pending_moves: dict[str, str] = {}
 
     def set_broadcast(self, callback: Callable[[dict], Any]) -> None:
         self._broadcast = callback
@@ -269,6 +274,13 @@ class SimEngine:
             if agent.name not in agent_contexts:
                 agent_actions[agent.name] = Action(type=ACTION_WAIT)
                 continue
+            # Gathering override — move agent to celebration hub
+            if agent.name in self._pending_moves:
+                agent._place_types = place_types
+                target = self._pending_moves.pop(agent.name)
+                if target != agent.location:
+                    agent_actions[agent.name] = Action(type=ACTION_MOVE, target=target)
+                    continue
             ctx = agent_contexts[agent.name]
             action = agent.decide(ctx, available_places, place_agents, place_types)
             agent_actions[agent.name] = action
@@ -297,7 +309,6 @@ class SimEngine:
                     agent, target_agent, self.calendar, len(alive_agents)
                 ):
                     # Small probability per interaction when gate is met
-                    import random
                     if random.random() < 0.005:
                         child = spawn_child(
                             agent, target_agent, self.agents, self.db_path, self.tenant_id
@@ -397,6 +408,20 @@ class SimEngine:
                 "content": action.dialogue,
             })
 
+        # ── Injected player events ───────────────────────────────────
+        if self._injected_events:
+            injected = list(self._injected_events)
+            self._injected_events.clear()
+            for inj in injected:
+                sevt = self._create_injected_sporadic(inj, alive_agents)
+                if sevt:
+                    sporadic_ep_ids = apply_sporadic_effects(sevt, self._agents_by_name)
+                    for agent_name, ep_id in sporadic_ep_ids.items():
+                        agent = self._agents_by_name.get(agent_name)
+                        if agent and agent.alive:
+                            fire_extraction(ep_id, sevt.description, agent.smrti, self.llm_client, self._bg_tasks)
+                    events.append(sevt.to_dict())
+
         # ── Sporadic events ──────────────────────────────────────────
         sporadic_events = generate_sporadic_events(
             alive_agents, self.topology, delta, self.calendar.season
@@ -415,7 +440,7 @@ class SimEngine:
             await asyncio.to_thread(self._run_epoch)
             self._last_epoch_hours = self.calendar.total_hours
 
-            # Relationship gate checks (deduplicate pairs)
+            # Relationship gate checks (forward progression)
             seen_pairs: set[tuple[str, str]] = set()
             for agent in alive_agents:
                 transitions = check_relationship_gates(agent, self.agents)
@@ -425,6 +450,23 @@ class SimEngine:
                         continue
                     seen_pairs.add(pair)
                     narratives = apply_relationship_transition(t, self._agents_by_name)
+                    relationship_changes.extend(narratives)
+                    events.append({
+                        "type": "relationship",
+                        "description": t.detail,
+                        "agents": [t.agent_name, t.target_name],
+                    })
+
+            # Relationship regression checks (strain / fallback)
+            reg_seen: set[tuple[str, str]] = set()
+            for agent in alive_agents:
+                regressions = check_relationship_regression(agent, self.agents)
+                for t in regressions:
+                    pair = tuple(sorted([t.agent_name, t.target_name]))
+                    if pair in reg_seen:
+                        continue
+                    reg_seen.add(pair)
+                    narratives = apply_relationship_regression(t, self._agents_by_name)
                     relationship_changes.extend(narratives)
                     events.append({
                         "type": "relationship",
@@ -533,6 +575,8 @@ class SimEngine:
             )
         except Exception:
             pass
+        # Trigger a gathering: agent + friends converge on a social hub
+        self._trigger_gathering(agent)
 
     # ── Epoch ────────────────────────────────────────────────────────
 
@@ -540,7 +584,7 @@ class SimEngine:
         """Run epoch consolidation on all active spaces."""
         self._epoch_count += 1
 
-        # Run reflect on alive agent spaces + persist interaction counts
+        # Run reflect on alive agent spaces + persist interaction counts + cache relationships
         for agent in self.agents:
             if not agent.alive:
                 continue
@@ -549,6 +593,7 @@ class SimEngine:
             except Exception:
                 pass
             agent.persist_interactions()
+            agent.update_relationships(self.agents)
 
         # Run reflect on occupied place spaces
         for place_name, place_smrti in self._place_smrtis.items():
@@ -586,6 +631,94 @@ class SimEngine:
                 (self.tenant_id,),
             )
             return [r["space"] for r in rows]
+        except Exception:
+            return []
+
+    # ── Milestone gatherings & player injection ──────────────────────
+
+    def _trigger_gathering(self, agent: Agent) -> None:
+        """Queue moves sending agent + friends to a social hub for a milestone."""
+        social_hubs = [
+            name for name, place in self.topology.places.items()
+            if place.place_type in ("public", "outdoor")
+        ]
+        if not social_hubs:
+            return
+        hub = random.choice(social_hubs[:3])
+        self._pending_moves[agent.name] = hub
+        for other in self.agents:
+            if not other.alive or other.name == agent.name:
+                continue
+            if other.get_interaction_count(agent.name) >= 3:
+                self._pending_moves[other.name] = hub
+
+    def _create_injected_sporadic(
+        self, inj: dict, alive_agents: list[Agent]
+    ) -> SporadicEvent | None:
+        """Build a SporadicEvent from a player injection request."""
+        from smrti_town.config import SPORADIC_EVENTS
+        from smrti_town.sporadic import _EVENT_VALENCE, _FOUND_ITEMS, _pretty_location
+        event_def = inj.get("event_def")
+        if not event_def:
+            return None
+        # Pick location
+        location = inj.get("location")
+        if not location or location not in self.topology.places:
+            candidates = [a.location for a in alive_agents]
+            if not candidates:
+                return None
+            location = random.choice(candidates)
+        agents_here = [a.name for a in alive_agents if a.location == location]
+        if not agents_here:
+            agents_here = [alive_agents[0].name] if alive_agents else []
+        affected = agents_here if event_def.get("affects_all") else [random.choice(agents_here)] if agents_here else []
+        template = random.choice(event_def["templates"])
+        agent_name = affected[0] if affected else "Someone"
+        description = template.format(agent=agent_name, location=_pretty_location(location))
+        metadata = {}
+        if event_def["id"] == "found_item":
+            metadata["item"] = random.choice(_FOUND_ITEMS)
+        return SporadicEvent(
+            event_id=event_def["id"],
+            description=description,
+            location=location,
+            affected_agents=affected,
+            valence=_EVENT_VALENCE.get(event_def["id"], 0.0),
+            metadata=metadata,
+        )
+
+    def inject_sporadic(self, event_id: str, location: str | None = None) -> bool:
+        """Queue a player-triggered sporadic event for the next tick."""
+        from smrti_town.config import SPORADIC_EVENTS
+        event_def = next((e for e in SPORADIC_EVENTS if e["id"] == event_id), None)
+        if not event_def:
+            return False
+        self._injected_events.append({"event_def": event_def, "location": location})
+        return True
+
+    def get_culture_atoms(self, top_k: int = 10) -> list[dict]:
+        """Return top atoms from Space_Culture for the Town Beliefs panel."""
+        try:
+            from smrti.core.db import get_database
+            db = get_database(self.db_path)
+            rows = db.fetchall(
+                """SELECT label, content, type, probability, confidence, valence
+                   FROM atoms WHERE tenant_id = ? AND space = 'Space_Culture'
+                   AND type IN ('belief', 'concept') AND confidence > 0.1
+                   ORDER BY confidence DESC, sti DESC LIMIT ?""",
+                (self.tenant_id, top_k),
+            )
+            return [
+                {
+                    "label": r["label"],
+                    "content": r["content"] or r["label"],
+                    "type": r["type"],
+                    "probability": round(r["probability"], 2),
+                    "confidence": round(r["confidence"], 2),
+                    "valence": round(r["valence"], 2),
+                }
+                for r in rows
+            ]
         except Exception:
             return []
 

@@ -66,12 +66,29 @@ TOWN.getPlaceCenter = function(placeName) {
   return { x: p.x + w / 2, y: p.y + h / 2 };
 };
 
-TOWN.getAgentOffset = function(agentName, placeName) {
-  var agents = [];
+/* Location → alive agents cache, rebuilt once per tick number */
+TOWN._locAgentsCache = {};
+TOWN._locAgentsCacheTick = -1;
+
+TOWN._rebuildLocCache = function() {
+  var cache = {};
   var all = TOWN.state.agents;
   for (var n in all) {
-    if (all[n].location === placeName && all[n].alive) agents.push(n);
+    if (all[n].alive) {
+      var loc = all[n].location;
+      if (!cache[loc]) cache[loc] = [];
+      cache[loc].push(n);
+    }
   }
+  TOWN._locAgentsCache = cache;
+  TOWN._locAgentsCacheTick = TOWN.state.tickNumber;
+};
+
+TOWN.getAgentOffset = function(agentName, placeName) {
+  if (TOWN._locAgentsCacheTick !== TOWN.state.tickNumber) {
+    TOWN._rebuildLocCache();
+  }
+  var agents = TOWN._locAgentsCache[placeName] || [];
   var idx = agents.indexOf(agentName);
   var total = agents.length;
   if (total <= 1) return { dx: 0, dy: 0 };

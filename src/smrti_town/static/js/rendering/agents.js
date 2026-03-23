@@ -14,7 +14,7 @@ TOWN.createAgentSprite = function(scene, agent) {
 
   /* Agent body circle */
   var circle = scene.add.graphics();
-  TOWN.drawAgentCircle(circle, 0, 0, radius, color, agent.life_stage, agent.alive, 0, 0);
+  TOWN.drawAgentCircle(circle, 0, 0, radius, color, agent.life_stage, agent.alive, 0, 0, agent.mood_valence || 0);
   circle.setPosition(x, y);
   circle.setDepth(11);
 
@@ -107,7 +107,7 @@ TOWN.createAgentSprite = function(scene, agent) {
   return sprite;
 };
 
-TOWN.drawAgentCircle = function(gfx, x, y, radius, color, lifeStage, alive, dx, dy) {
+TOWN.drawAgentCircle = function(gfx, x, y, radius, color, lifeStage, alive, dx, dy, moodValence) {
   gfx.clear();
 
   if (!alive) {
@@ -126,6 +126,14 @@ TOWN.drawAgentCircle = function(gfx, x, y, radius, color, lifeStage, alive, dx, 
   /* Body */
   gfx.fillStyle(color, 1.0);
   gfx.fillCircle(x, y, radius);
+
+  /* Mood tint — green for positive memories, red for negative */
+  if (moodValence !== undefined && Math.abs(moodValence) > 0.15) {
+    var tintColor = moodValence > 0 ? 0x44EE88 : 0xFF5555;
+    var tintAlpha = Math.min(0.22, Math.abs(moodValence) * 0.3);
+    gfx.fillStyle(tintColor, tintAlpha);
+    gfx.fillCircle(x, y, radius);
+  }
 
   /* Highlight (specular) */
   gfx.fillStyle(0xFFFFFF, 0.3);
@@ -225,8 +233,8 @@ TOWN.updateAgentSprite = function(scene, agent) {
   var dx = tx - sprite.x;
   var dy = ty - sprite.y;
 
-  /* Redraw circle with eye direction */
-  TOWN.drawAgentCircle(sprite.circle, 0, 0, radius, color, agent.life_stage, agent.alive, dx, dy);
+  /* Redraw circle with eye direction and mood tint */
+  TOWN.drawAgentCircle(sprite.circle, 0, 0, radius, color, agent.life_stage, agent.alive, dx, dy, agent.mood_valence || 0);
 
   /* Redraw drive bars */
   TOWN.drawDriveBars(sprite.driveBarContainer, radius, agent.drives);
@@ -320,6 +328,54 @@ TOWN.stopTalkBounce = function(scene, agentName) {
     sprite._talkTween = null;
   }
   sprite.circle.setScale(1, 1);
+};
+
+/* Relationship state → line color */
+TOWN._REL_COLORS = {
+  married:      0xFFD700,  /* gold */
+  romantic:     0xFF69B4,  /* pink */
+  close_friend: 0x6BCB77,  /* green */
+  friend:       0x87CEEB,  /* sky blue */
+  acquaintance: 0xBBBBBB,  /* light gray */
+};
+
+TOWN.drawRelationshipOverlay = function(scene) {
+  var gfx = TOWN._relOverlayGfx;
+  if (!gfx) return;
+  gfx.clear();
+  if (!TOWN.state.showRelOverlay) return;
+
+  var agents = TOWN.state.agents;
+  var sprites = TOWN.state.agentSprites;
+  var drawn = {};
+
+  for (var nameA in agents) {
+    var a = agents[nameA];
+    if (!a.alive || !a.relationships || !a.relationships.length) continue;
+    var spA = sprites[nameA];
+    if (!spA) continue;
+
+    for (var r = 0; r < a.relationships.length; r++) {
+      var rel = a.relationships[r];
+      var nameB = rel.name;
+      if (!nameB) continue;
+      var pairKey = nameA < nameB ? nameA + ':' + nameB : nameB + ':' + nameA;
+      if (drawn[pairKey]) continue;
+      drawn[pairKey] = true;
+
+      var spB = sprites[nameB];
+      var agentB = agents[nameB];
+      if (!spB || !agentB || !agentB.alive) continue;
+
+      var lineColor = TOWN._REL_COLORS[rel.state] || 0xAAAAAA;
+      var alpha = rel.state === 'acquaintance' ? 0.2 : 0.45;
+      gfx.lineStyle(rel.state === 'married' || rel.state === 'romantic' ? 2.5 : 1.5, lineColor, alpha);
+      gfx.beginPath();
+      gfx.moveTo(spA.x, spA.y);
+      gfx.lineTo(spB.x, spB.y);
+      gfx.strokePath();
+    }
+  }
 };
 
 TOWN.highlightAgent = function(scene, name) {

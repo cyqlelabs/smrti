@@ -478,6 +478,84 @@ def _next_relationship_state(
     return None
 
 
+def check_relationship_regression(
+    agent: Agent,
+    all_agents: list[Agent],
+) -> list[RelationshipTransition]:
+    """Check if any relationships should regress due to accumulated negative memories."""
+    transitions: list[RelationshipTransition] = []
+    if not agent.alive or not agent.can_talk:
+        return transitions
+
+    _PROGRESSION = ["stranger", "acquaintance", "friend", "close_friend", "romantic", "married"]
+    _THRESHOLD = {"married": 10, "romantic": 7, "close_friend": 5, "friend": 3}
+
+    for other in all_agents:
+        if other.name == agent.name or not other.alive or not other.can_talk:
+            continue
+        current = _infer_relationship_state(agent, other)
+        if current in ("stranger", "acquaintance"):
+            continue
+        try:
+            db = agent.smrti.db
+            rows = db.fetchall(
+                "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ? "
+                "AND type = 'episode' AND valence < -0.4 AND content LIKE ?",
+                (agent._tenant_id, f"Agent_Space_{agent.name}", f"%{other.name}%"),
+            )
+            neg_count = rows[0]["n"] if rows else 0
+        except Exception:
+            continue
+        threshold = _THRESHOLD.get(current, 999)
+        if neg_count < threshold:
+            # Below threshold — clear any cooldown so regression can fire again if it worsens
+            agent._regression_cooldown.pop(other.name, None)
+            continue
+        # Skip if already regressed this cycle (prevent per-epoch spam)
+        if agent._regression_cooldown.get(other.name):
+            continue
+        try:
+            idx = _PROGRESSION.index(current)
+        except ValueError:
+            continue
+        if idx == 0:
+            continue
+        regressed = _PROGRESSION[idx - 1]
+        agent._regression_cooldown[other.name] = True
+        transitions.append(RelationshipTransition(
+            agent_name=agent.name,
+            target_name=other.name,
+            from_state=current,
+            to_state=regressed,
+            detail=f"{agent.name} and {other.name}'s relationship has grown strained ({current} → {regressed}).",
+        ))
+    return transitions
+
+
+def apply_relationship_regression(
+    transition: RelationshipTransition,
+    agents_by_name: dict[str, Agent],
+) -> list[str]:
+    """Apply a relationship regression and write memories."""
+    narratives: list[str] = []
+    agent = agents_by_name.get(transition.agent_name)
+    target = agents_by_name.get(transition.target_name)
+    if not agent or not target:
+        return narratives
+    text_a = f"My relationship with {transition.target_name} has grown strained. We are now {transition.to_state}s."
+    text_b = f"My relationship with {transition.agent_name} has grown strained. We are now {transition.to_state}s."
+    agent.smrti.remember(
+        content=text_a, type="episode", probability=0.7, valence=-0.3,
+        metadata={"relation_change": "regression", "target": transition.target_name},
+    )
+    target.smrti.remember(
+        content=text_b, type="episode", probability=0.7, valence=-0.3,
+        metadata={"relation_change": "regression", "target": transition.agent_name},
+    )
+    narratives.append(transition.detail)
+    return narratives
+
+
 def apply_relationship_transition(
     transition: RelationshipTransition,
     agents_by_name: dict[str, Agent],

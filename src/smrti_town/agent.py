@@ -102,6 +102,9 @@ class Agent:
         self._db_path = db_path
         self._tenant_id = tenant_id
         self._place_types: dict[str, str] = {}
+        self.mood_valence: float = 0.0
+        self._relationships: list[dict] = []
+        self._regression_cooldown: dict[str, bool] = {}  # target_name → True while cooling
         self.traits: dict[str, float] = (
             traits if traits is not None
             else dict(PRESET_TRAITS.get(personality, PRESET_TRAITS["balanced"]))
@@ -211,23 +214,48 @@ class Agent:
         return None
 
     def persist_interactions(self) -> None:
-        """Save interaction counts directly to the Smrti DB."""
+        """Save interaction counts directly to the Smrti DB (single transaction)."""
         import json
         label = f"__interactions__{self.name}"
         data = json.dumps(self._interaction_counts)
         try:
             db = self.smrti.db
-            db.execute(
-                "DELETE FROM atoms WHERE label = ? AND tenant_id = ? AND space = ?",
-                (label, self._tenant_id, f"Agent_Space_{self.name}"),
-            )
-            db.execute(
-                "INSERT INTO atoms (id, type, label, content, tenant_id, space, probability, confidence) "
-                "VALUES (?, 'belief', ?, ?, ?, ?, 1.0, 1.0)",
-                (label, label, data, self._tenant_id, f"Agent_Space_{self.name}"),
-            )
+            db.execute_batch([
+                (
+                    "DELETE FROM atoms WHERE label = ? AND tenant_id = ? AND space = ?",
+                    (label, self._tenant_id, f"Agent_Space_{self.name}"),
+                ),
+                (
+                    "INSERT INTO atoms (id, type, label, content, tenant_id, space, probability, confidence) "
+                    "VALUES (?, 'belief', ?, ?, ?, ?, 1.0, 1.0)",
+                    (label, label, data, self._tenant_id, f"Agent_Space_{self.name}"),
+                ),
+            ])
         except Exception:
             pass
+
+    def update_relationships(self, all_agents: list[Agent]) -> None:
+        """Cache relationship states for all known agents (called at epoch time)."""
+        from smrti_town.lifecycle import _infer_relationship_state
+        _STATE_VALENCE = {
+            "married": 0.8, "romantic": 0.7, "close_friend": 0.5,
+            "friend": 0.3, "acquaintance": 0.1,
+        }
+        rels = []
+        for other in all_agents:
+            if other.name == self.name or not other.alive:
+                continue
+            count = self.get_interaction_count(other.name)
+            if count == 0:
+                continue
+            state = _infer_relationship_state(self, other)
+            rels.append({
+                "name": other.name,
+                "state": state,
+                "count": count,
+                "valence": _STATE_VALENCE.get(state, 0.0),
+            })
+        self._relationships = rels
 
     def restore_interactions(self) -> None:
         """Load interaction counts directly from the Smrti DB."""
@@ -284,6 +312,8 @@ class Agent:
                     "salience": r.salience,
                     "valence": r.atom.valence.valence if r.atom.valence else 0.0,
                 })
+            if memories:
+                self.mood_valence = sum(m["valence"] for m in memories) / len(memories)
         except Exception:
             pass
 
@@ -563,4 +593,6 @@ class Agent:
             "drives": self.drives.to_dict(),
             "inventory": self.inventory,
             "parents": list(self.parents) if self.parents else None,
+            "mood_valence": round(self.mood_valence, 2),
+            "relationships": self._relationships,
         }

@@ -201,6 +201,34 @@ async def get_agent_memories(
     return memories
 
 
+# ── REST: Town Beliefs & Event Injection ─────────────────────────
+
+@app.get("/culture")
+async def get_culture(top_k: int = Query(default=10, ge=1, le=50)):
+    """Return top atoms from Space_Culture for the Town Beliefs panel."""
+    engine = await _ensure_engine()
+    return engine.get_culture_atoms(top_k=top_k)
+
+
+@app.post("/events/inject")
+async def inject_event(body: dict):
+    """Queue a player-triggered sporadic event for the next tick.
+
+    Body: {"event_id": "<id>", "location": "<optional place name>"}
+    Valid event_ids: weather_rain, weather_sunny, festival, surprise_visitor,
+    animal_encounter, found_item, gossip, illness_mild, accident_trip, ...
+    """
+    engine = await _ensure_engine()
+    event_id = body.get("event_id")
+    location = body.get("location")
+    if not event_id:
+        return JSONResponse(status_code=400, content={"error": "event_id required"})
+    ok = engine.inject_sporadic(event_id, location)
+    if not ok:
+        return JSONResponse(status_code=404, content={"error": f"Unknown event_id: {event_id}"})
+    return {"status": "queued", "event_id": event_id}
+
+
 # ── REST: LLM settings ────────────────────────────────────────────────
 
 @app.get("/settings")

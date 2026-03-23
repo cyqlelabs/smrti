@@ -211,7 +211,12 @@ class Citizen:
 
     # ── tick ──────────────────────────────────────────────────────────
 
-    def tick_state(self, delta_hours: float, crime_rate: float = 0.0) -> None:
+    def tick_state(
+        self,
+        delta_hours: float,
+        crime_rate: float = 0.0,
+        nearby_count: int = 0,
+    ) -> None:
         """Update age, needs, starvation tracking, and death checks."""
         if not self.alive:
             return
@@ -228,13 +233,17 @@ class Citizen:
         else:
             self.speed = AGENT_SPEED_DEFAULT
 
-        # Needs
+        # Needs — council roles count as meaningful employment
+        has_job = self.workplace is not None or self.council_role is not None
+        current_action = self.current_action.type if self.current_action else None
         self.needs.tick(
             delta_hours=delta_hours,
             life_stage=stage,
             has_home=self.home is not None,
-            has_job=self.workplace is not None,
+            has_job=has_job,
             crime_rate=crime_rate,
+            current_action=current_action,
+            nearby_count=nearby_count,
         )
 
         # Starvation
@@ -259,6 +268,7 @@ class Citizen:
         calendar: SimCalendar,
         nearby_agents: list[str],
         place: Place | None = None,
+        crime_rate: float = 0.0,
     ) -> PerceptionContext:
         """Build a PerceptionContext from the current environment."""
         # Recall relevant memories for decision-making.
@@ -306,8 +316,8 @@ class Citizen:
             current_hour=calendar.hour,
             place_building_key=building_key,
             has_home=self.home is not None,
-            has_job=self.workplace is not None,
-            crime_rate=0.0,
+            has_job=self.workplace is not None or self.council_role is not None,
+            crime_rate=crime_rate,
         )
 
     # ── decision ──────────────────────────────────────────────────────

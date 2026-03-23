@@ -151,24 +151,23 @@ async def _tick_loop() -> None:
 
             alive_citizens = [c for c in citizens if getattr(c, "alive", True)]
 
-            # Phase 1: Tick each citizen's needs
             crime_rate = 0.0
-            for c in alive_citizens:
-                if hasattr(c, "tick_state"):
-                    c.tick_state(delta, crime_rate=crime_rate)
 
             # Phase 2: Perceive + Decide
+            # Needs are ticked AFTER decide so tick_state uses the current
+            # action (not last tick's) — the drift during a period reflects
+            # what the citizen actually did during that period.
             actions = []
             for c in alive_citizens:
                 ctx = None
                 if hasattr(c, "perceive") and topology:
                     nearby = [
-                        a for a in alive_citizens
+                        a.name for a in alive_citizens
                         if a.name != c.name and getattr(a, "location", None) == getattr(c, "location", None)
                     ]
                     place = topology.places.get(getattr(c, "location", None) or "")
                     try:
-                        ctx = c.perceive(topology, calendar, nearby, place=place)
+                        ctx = c.perceive(topology, calendar, nearby, place=place, crime_rate=crime_rate)
                     except Exception:
                         log.debug("perceive() failed for %s", c.name, exc_info=True)
                 if hasattr(c, "decide") and ctx is not None:
@@ -178,6 +177,20 @@ async def _tick_loop() -> None:
                         actions.append({"citizen": c.name, "action": dataclasses.asdict(action) if dataclasses.is_dataclass(action) else action})
                     except Exception:
                         log.debug("decide() failed for %s", c.name, exc_info=True)
+
+            # Phase 2.1: Tick each citizen's needs using the just-decided action.
+            # Only count citizens with a real location to avoid grouping unlocated
+            # citizens into a phantom social cluster.
+            location_counts: dict[str, int] = {}
+            for c in alive_citizens:
+                loc = getattr(c, "location", None)
+                if loc:
+                    location_counts[loc] = location_counts.get(loc, 0) + 1
+            for c in alive_citizens:
+                if hasattr(c, "tick_state"):
+                    loc = getattr(c, "location", None)
+                    nearby = max(0, location_counts.get(loc, 1) - 1) if loc else 0
+                    c.tick_state(delta, crime_rate=crime_rate, nearby_count=nearby)
 
             # Phase 2.5: Action resolution — execute decided actions
             # This is the core feedback loop: action → need satisfaction + economic effect.

@@ -5,6 +5,16 @@ from __future__ import annotations
 from smrti_town.config import (
     ACTUALIZATION_RATE,
     ACTUALIZATION_THRESHOLD,
+    ACTION_INTERACT,
+    ACTION_MOVE,
+    ACTION_PLAY,
+    ACTION_PRAY,
+    ACTION_SLEEP,
+    ACTION_STUDY,
+    ACTION_TALK,
+    ACTION_WAIT,
+    ACTION_WANDER,
+    ACTION_WORK,
     CULTURE_RATE,
     CULTURE_RESET_AMOUNT,
     CULTURE_THRESHOLD,
@@ -29,6 +39,12 @@ from smrti_town.config import (
     SOCIAL_RESET_AMOUNT,
     SOCIAL_THRESHOLD,
 )
+
+# Actions that count as purposeful work — suppress purpose need rise.
+_PURPOSEFUL_ACTIONS: frozenset[str] = frozenset({ACTION_WORK, ACTION_STUDY})
+# Actions that count as social engagement — suppress social need rise.
+# ACTION_PRAY is intentionally excluded: solitary prayer is not social.
+_SOCIAL_ACTIONS: frozenset[str] = frozenset({ACTION_TALK, ACTION_INTERACT, ACTION_PLAY})
 
 # Maslow priority order (index 0 = highest priority).
 MASLOW_ORDER: list[str] = [
@@ -96,11 +112,14 @@ class CitizenNeeds:
         has_home: bool,
         has_job: bool,
         crime_rate: float = 0.0,
+        current_action: str | None = None,
+        nearby_count: int = 0,
     ) -> None:
         """Advance all needs by *delta_hours*.
 
-        Only needs listed in the life-stage's ``needs`` array are active;
-        others stay at their current value (never decay for irrelevant stages).
+        Rates are reactive to what the citizen is currently doing and their
+        environment — not fixed multipliers.  Only needs listed in the
+        life-stage's ``needs`` array are active.
         """
         stage_info = LIFE_STAGES.get(life_stage, LIFE_STAGES["adult"])
         active_needs: set[str] = set(stage_info["needs"])
@@ -112,20 +131,53 @@ class CitizenNeeds:
 
             rate = _RATES[name]
 
-            # Special-case adjustments
             if name == "shelter":
-                # Shelter need only rises when homeless.
+                # Housed: shelter recovers. Homeless: rises fast.
                 if has_home:
                     self.shelter = _clamp(self.shelter - 2.0 * delta_hours)
                     continue
-                rate = 2.0  # Homeless: shelter need rises fast.
-            elif name == "safety":
-                rate = rate * (1.0 + crime_rate * 4.0)
-            elif name == "purpose":
-                if not has_job:
-                    rate *= 1.5  # Unemployed adults feel purposelessness faster.
+                rate = 2.0
+
             elif name == "hunger":
-                rate *= energy_mult
+                # Exertion burns more energy; rest conserves it.
+                if current_action == ACTION_SLEEP:
+                    rate *= 0.4 * energy_mult
+                elif current_action in (ACTION_MOVE, ACTION_WORK):
+                    rate *= 1.4 * energy_mult
+                else:
+                    rate *= energy_mult
+
+            elif name == "safety":
+                rate *= 1.0 + crime_rate * 4.0
+
+            elif name == "social":
+                # Being around others slows social deprivation; active
+                # social actions essentially freeze it.
+                if current_action in _SOCIAL_ACTIONS:
+                    rate = 0.0
+                else:
+                    # Each additional neighbour reduces rise; 4+ neighbours
+                    # fully suppress the rise (floor at 0.0).
+                    rate *= max(0.0, 1.0 - nearby_count * 0.25)
+
+            elif name == "purpose":
+                # Purposeful work prevents need rise; idle citizens drift
+                # toward purposelessness; civic roles count as meaningful work.
+                if current_action in _PURPOSEFUL_ACTIONS:
+                    rate = -rate * 0.5  # actively building meaning
+                elif has_job:
+                    rate *= 0.2  # employed but not currently working — slow drift
+                elif current_action in (ACTION_WAIT, ACTION_WANDER, None):
+                    rate *= 1.5  # idle and unemployed: fastest purposelessness
+                # else: moving/socialising — neutral drift at base rate
+
+            elif name == "culture":
+                if current_action in (ACTION_PLAY, ACTION_PRAY):
+                    rate = -rate  # cultural activities actively satisfy
+
+            elif name == "education":
+                if current_action == ACTION_STUDY:
+                    rate = -rate  # studying actively satisfies
 
             current = getattr(self, name)
             setattr(self, name, _clamp(current + rate * delta_hours))

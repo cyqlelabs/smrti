@@ -1,56 +1,213 @@
 /* ================================================================
-   agents.js — createAgentSprite(), updateAgentSprite(),
-               drawAgentCircle(), drawDriveBars()
+   agents.js — Isometric person sprites with walk animation
    ================================================================ */
 window.TOWN = window.TOWN || {};
 
+/* ── Color helpers ───────────────────────────────────────────────── */
+TOWN._darkenInt = function(colorInt, amount) {
+  var r = (colorInt >> 16) & 0xFF;
+  var g = (colorInt >> 8)  & 0xFF;
+  var b =  colorInt        & 0xFF;
+  return Phaser.Display.Color.GetColor(
+    Math.max(0, r - amount),
+    Math.max(0, g - amount),
+    Math.max(0, b - amount)
+  );
+};
+TOWN._lightenInt = function(colorInt, amount) {
+  var r = (colorInt >> 16) & 0xFF;
+  var g = (colorInt >> 8)  & 0xFF;
+  var b =  colorInt        & 0xFF;
+  return Phaser.Display.Color.GetColor(
+    Math.min(255, r + amount),
+    Math.min(255, g + amount),
+    Math.min(255, b + amount)
+  );
+};
+
+/* ── Person renderer ─────────────────────────────────────────────── */
+/* Draw a miniature person at canvas pixel position (sx, sy — base feet).
+   Walking: if true, animate limbs based on walkPhase (0–1). */
+TOWN.drawPerson = function(gfx, sx, sy, color, lifeStage, alive, walking, walkPhase, moodValence) {
+  gfx.clear();
+
+  if (!alive) {
+    gfx.fillStyle(0x888888, 0.25);
+    gfx.fillEllipse(sx, sy - 4, 18, 8);
+    return;
+  }
+
+  var s = 1.0;
+  if (lifeStage === 'infant') s = 0.42;
+  else if (lifeStage === 'child')  s = 0.62;
+  else if (lifeStage === 'elder')  s = 0.85;
+
+  var headR = 9  * s;
+  var bodyH = 14 * s;
+  var bodyW = 8  * s;
+  var legLen = 10 * s;
+  var armLen = 8  * s;
+  var fw = 4 * s;  /* foot width */
+
+  /* Walk cycle */
+  var lSwing = walking ? Math.sin(walkPhase * Math.PI * 2) * 5 * s : 0;
+  var aSwing = -lSwing * 0.7;
+
+  /* Base y = sy (feet level) */
+  var feetY  = sy;
+  var bodyY  = feetY - legLen - bodyH;
+  var headY  = bodyY - headR;
+
+  /* Shadow */
+  gfx.fillStyle(0x1A0A00, 0.16);
+  gfx.fillEllipse(sx, feetY + 2, 16 * s, 6 * s);
+
+  /* Legs */
+  var legColor = TOWN._darkenInt(color, 45);
+  gfx.fillStyle(legColor, 1.0);
+  /* Left leg */
+  gfx.fillRect(sx - bodyW * 0.48 - 1, feetY - legLen + lSwing, fw, legLen - Math.abs(lSwing) * 0.4);
+  /* Right leg */
+  gfx.fillRect(sx + bodyW * 0.48 - fw + 1, feetY - legLen - lSwing, fw, legLen - Math.abs(lSwing) * 0.4);
+  /* Feet */
+  gfx.fillStyle(TOWN._darkenInt(color, 65), 1.0);
+  gfx.fillRect(sx - bodyW * 0.48 - 2, feetY + lSwing * 0.3 - 3, fw + 3, 3 * s);
+  gfx.fillRect(sx + bodyW * 0.48 - fw, feetY - lSwing * 0.3 - 3, fw + 3, 3 * s);
+
+  /* Body */
+  gfx.fillStyle(color, 1.0);
+  gfx.fillRoundedRect(sx - bodyW / 2, bodyY, bodyW, bodyH, 3 * s);
+  /* Collar line */
+  gfx.fillStyle(TOWN._lightenInt(color, 30), 0.45);
+  gfx.fillRect(sx - bodyW * 0.28, bodyY, bodyW * 0.56, bodyH * 0.22);
+  /* Mood body tint */
+  if (moodValence && Math.abs(moodValence) > 0.15) {
+    var tint = moodValence > 0 ? 0x44EE88 : 0xFF5555;
+    gfx.fillStyle(tint, Math.min(0.20, Math.abs(moodValence) * 0.28));
+    gfx.fillRoundedRect(sx - bodyW / 2, bodyY, bodyW, bodyH, 3 * s);
+  }
+
+  /* Arms */
+  gfx.lineStyle(2.5 * s, legColor, 1.0);
+  gfx.beginPath();
+  gfx.moveTo(sx - bodyW / 2, bodyY + bodyH * 0.18);
+  gfx.lineTo(sx - bodyW / 2 - armLen * 0.75 + aSwing, bodyY + bodyH * 0.62 + aSwing * 0.4);
+  gfx.strokePath();
+  gfx.beginPath();
+  gfx.moveTo(sx + bodyW / 2, bodyY + bodyH * 0.18);
+  gfx.lineTo(sx + bodyW / 2 + armLen * 0.75 - aSwing, bodyY + bodyH * 0.62 - aSwing * 0.4);
+  gfx.strokePath();
+
+  /* Neck */
+  gfx.fillStyle(0xF5CBA7, 1.0);
+  gfx.fillRect(sx - 1.5 * s, bodyY - 3 * s, 3 * s, 4 * s);
+
+  /* Head */
+  var skinColor = (lifeStage === 'elder') ? 0xE8B898 : 0xF5CBA7;
+  gfx.fillStyle(skinColor, 1.0);
+  gfx.fillCircle(sx, headY + headR, headR);
+
+  /* Hair */
+  var hairColor = TOWN._darkenInt(color, 28);
+  if (lifeStage === 'elder') hairColor = 0xCCCCCC;
+  if (lifeStage === 'child') hairColor = TOWN._darkenInt(color, 10);
+  gfx.fillStyle(hairColor, 1.0);
+  gfx.fillRect(sx - headR * 0.85, headY, headR * 1.7, headR * 0.55);
+  gfx.fillCircle(sx, headY + headR * 0.28, headR * 0.87);
+
+  /* Eyes */
+  gfx.fillStyle(0x1A1A1A, 1.0);
+  gfx.fillCircle(sx - headR * 0.30, headY + headR * 0.88, 1.7 * s);
+  gfx.fillCircle(sx + headR * 0.30, headY + headR * 0.88, 1.7 * s);
+  /* Shine */
+  gfx.fillStyle(0xFFFFFF, 0.8);
+  gfx.fillCircle(sx - headR * 0.22, headY + headR * 0.78, 0.8 * s);
+  gfx.fillCircle(sx + headR * 0.38, headY + headR * 0.78, 0.8 * s);
+
+  /* Expression */
+  gfx.lineStyle(1.4 * s, 0x8B5E3C, 0.85);
+  gfx.beginPath();
+  if (moodValence > 0.12) {
+    gfx.arc(sx, headY + headR * 1.05, headR * 0.28, 0.25, Math.PI - 0.25);
+  } else if (moodValence < -0.12) {
+    gfx.arc(sx, headY + headR * 1.28, headR * 0.28, Math.PI + 0.25, -0.25);
+  } else {
+    gfx.moveTo(sx - headR * 0.22, headY + headR * 1.12);
+    gfx.lineTo(sx + headR * 0.22, headY + headR * 1.12);
+  }
+  gfx.strokePath();
+
+  /* Life stage ring */
+  if (lifeStage === 'child') {
+    gfx.lineStyle(2, 0xFFD93D, 0.75);
+    gfx.strokeCircle(sx, headY + headR, headR + 3);
+  } else if (lifeStage === 'infant') {
+    gfx.lineStyle(2, 0xFF6F91, 0.75);
+    gfx.strokeCircle(sx, headY + headR, headR + 3);
+  } else if (lifeStage === 'elder') {
+    gfx.lineStyle(2, 0xCCCCCC, 0.55);
+    gfx.strokeCircle(sx, headY + headR, headR + 3);
+  }
+};
+
+/* ── Radius / color helpers ─────────────────────────────────────── */
+TOWN.getAgentRadius = function(lifeStage) {
+  switch (lifeStage) {
+    case 'infant': return 9;
+    case 'child':  return 14;
+    case 'elder':  return 20;
+    default:       return 22;
+  }
+};
+
+/* ── Create sprite ───────────────────────────────────────────────── */
 TOWN.createAgentSprite = function(scene, agent) {
-  var name = agent.name;
-  var color = TOWN.getAgentColor(name);
+  var name   = agent.name;
+  var color  = TOWN.getAgentColor(name);
   var radius = TOWN.getAgentRadius(agent.life_stage);
-  var pos = TOWN.getPlaceCenter(agent.location || 'Main_Street');
-  var off = TOWN.getAgentOffset(name, agent.location);
+  var pos    = TOWN.getPlaceCenter(agent.location || 'Main_Street');
+  var off    = TOWN.getAgentOffset(name, agent.location);
   var x = pos.x + off.dx, y = pos.y + off.dy;
 
-  /* Agent body circle */
-  var circle = scene.add.graphics();
-  TOWN.drawAgentCircle(circle, 0, 0, radius, color, agent.life_stage, agent.alive, 0, 0, agent.mood_valence || 0);
-  circle.setPosition(x, y);
-  circle.setDepth(11);
+  /* Graphics */
+  var gfx = scene.add.graphics().setDepth(11);
+  TOWN.drawPerson(gfx, x, y, color, agent.life_stage,
+                  agent.alive !== false, false, 0, agent.mood_valence || 0);
 
-  /* Hitzone for click detection */
-  var hitzone = scene.add.circle(x, y, radius + 6, 0x000000, 0)
+  /* Hitzone centred on the head */
+  var headOffY = radius * 2 + 14;
+  var hitzone  = scene.add.circle(x, y - headOffY, radius + 8, 0x000000, 0)
     .setInteractive({ useHandCursor: true }).setDepth(12);
   hitzone.setData('agentName', name);
 
   /* Name label */
-  var nameText = scene.add.text(x, y - radius - 12, name.replace(/_/g, ' '), {
-    fontSize: '16px',
-    fontFamily: 'Fredoka, sans-serif',
-    fontStyle: 'bold',
-    color: '#FFFFFF',
-    align: 'center',
-    stroke: '#5D3A1A',
-    strokeThickness: 3,
-  }).setOrigin(0.5, 1).setDepth(13);
+  var nameText = scene.add.text(x, y - headOffY - radius - 4,
+    name.replace(/_/g, ' '), {
+      fontSize: '12px',
+      fontFamily: 'Fredoka, sans-serif',
+      fontStyle: 'bold',
+      color: '#FFFFFF',
+      align: 'center',
+      stroke: '#3D2B1F',
+      strokeThickness: 3,
+    }).setOrigin(0.5, 1).setDepth(13);
 
-  /* Drive bars (mini bar under agent) */
+  /* Drive bars */
   var driveBarContainer = scene.add.graphics().setDepth(12);
-  driveBarContainer.setPosition(x, y);
 
-  /* Selection ring (hidden by default) */
+  /* Selection ring */
   var selRing = scene.add.graphics().setDepth(10);
-  selRing.setPosition(x, y);
+  selRing.setPosition(x, y - headOffY);
   selRing.setAlpha(0);
 
-  scene.agentLayer.add(circle);
+  scene.agentLayer.add(gfx);
   scene.agentLayer.add(hitzone);
   scene.agentLayer.add(nameText);
   scene.agentLayer.add(driveBarContainer);
   scene.agentLayer.add(selRing);
 
   var sprite = {
-    circle: circle,
+    gfx: gfx,
     hitzone: hitzone,
     nameText: nameText,
     driveBarContainer: driveBarContainer,
@@ -64,224 +221,112 @@ TOWN.createAgentSprite = function(scene, agent) {
     talking: false,
     _talkTween: null,
     _breatheTween: null,
+    _walkPhase: Math.random(),
+    _walking: false,
   };
   TOWN.state.agentSprites[name] = sprite;
 
-  /* ── Idle breathing animation ─────────────────────────────────── */
-  /* Gentle scale oscillation so agents feel alive even when still.
-     Each agent gets a randomized phase offset and slightly different
-     duration so they don't pulse in unison. */
-  if (agent.alive) {
-    var breatheDur = 2200 + Math.random() * 800;
-    var breatheDelay = Math.random() * breatheDur;
-    sprite._breatheTween = scene.tweens.add({
-      targets: circle,
-      scaleX: { from: 1.0, to: 1.04 },
-      scaleY: { from: 1.0, to: 1.04 },
-      duration: breatheDur,
-      yoyo: true,
-      repeat: -1,
-      delay: breatheDelay,
-      ease: 'Sine.easeInOut',
-    });
-  }
-
-  /* ── Pop-in entrance for newly spawned agents (births) ─────── */
-  circle.setScale(0);
+  /* Pop-in */
+  gfx.setAlpha(0);
   nameText.setAlpha(0);
-  driveBarContainer.setAlpha(0);
-  scene.tweens.add({
-    targets: circle,
-    scaleX: 1, scaleY: 1,
-    duration: 450,
-    ease: 'Back.easeOut',
-  });
-  scene.tweens.add({
-    targets: [nameText, driveBarContainer],
-    alpha: 1,
-    duration: 350,
-    delay: 200,
-    ease: 'Sine.easeOut',
-  });
+  scene.tweens.add({ targets: gfx,  alpha: 1, duration: 450, ease: 'Back.easeOut' });
+  scene.tweens.add({ targets: [nameText, driveBarContainer], alpha: 1, duration: 350, delay: 200 });
 
   return sprite;
 };
 
-TOWN.drawAgentCircle = function(gfx, x, y, radius, color, lifeStage, alive, dx, dy, moodValence) {
-  gfx.clear();
-
-  if (!alive) {
-    /* Ghost / memorial — faded gray */
-    gfx.fillStyle(0x999999, 0.35);
-    gfx.fillCircle(x, y, radius);
-    gfx.lineStyle(2, 0xaaaaaa, 0.25);
-    gfx.strokeCircle(x, y, radius);
-    return;
-  }
-
-  /* Outer glow */
-  gfx.fillStyle(color, 0.12);
-  gfx.fillCircle(x, y, radius + 6);
-
-  /* Body */
-  gfx.fillStyle(color, 1.0);
-  gfx.fillCircle(x, y, radius);
-
-  /* Mood tint — green for positive memories, red for negative */
-  if (moodValence !== undefined && Math.abs(moodValence) > 0.15) {
-    var tintColor = moodValence > 0 ? 0x44EE88 : 0xFF5555;
-    var tintAlpha = Math.min(0.22, Math.abs(moodValence) * 0.3);
-    gfx.fillStyle(tintColor, tintAlpha);
-    gfx.fillCircle(x, y, radius);
-  }
-
-  /* Highlight (specular) */
-  gfx.fillStyle(0xFFFFFF, 0.3);
-  gfx.fillCircle(x - radius * 0.22, y - radius * 0.22, radius * 0.3);
-
-  /* Life stage ring */
-  if (lifeStage === 'elder') {
-    gfx.lineStyle(3, 0xFFFFFF, 0.35);
-    gfx.strokeCircle(x, y, radius + 1);
-  } else if (lifeStage === 'child') {
-    gfx.lineStyle(2, 0xFFD93D, 0.5);
-    gfx.strokeCircle(x, y, radius);
-  } else if (lifeStage === 'infant') {
-    gfx.lineStyle(2, 0xFF6F91, 0.5);
-    gfx.strokeCircle(x, y, radius);
-  } else {
-    gfx.lineStyle(2, 0x3D2B1F, 0.2);
-    gfx.strokeCircle(x, y, radius + 1);
-  }
-
-  /* ── Eyes ──────────────────────────────────────────────────────── */
-  /* Direction: normalize dx/dy so eyes look toward movement */
-  var eyeSpread = radius * 0.32;
-  var eyeY = y - radius * 0.12;
-  var eyeR = Math.max(2.5, radius * 0.16);
-  var pupilR = Math.max(1.5, eyeR * 0.55);
-
-  /* Eye direction offset based on movement */
-  var lookX = 0, lookY = 0;
-  if (dx !== 0 || dy !== 0) {
-    var mag = Math.sqrt(dx * dx + dy * dy);
-    if (mag > 0) {
-      lookX = (dx / mag) * eyeR * 0.35;
-      lookY = (dy / mag) * eyeR * 0.35;
-    }
-  }
-
-  /* Left eye */
-  gfx.fillStyle(0xFFFFFF, 0.95);
-  gfx.fillCircle(x - eyeSpread, eyeY, eyeR);
-  gfx.fillStyle(0x1a1a1a, 1.0);
-  gfx.fillCircle(x - eyeSpread + lookX, eyeY + lookY, pupilR);
-
-  /* Right eye */
-  gfx.fillStyle(0xFFFFFF, 0.95);
-  gfx.fillCircle(x + eyeSpread, eyeY, eyeR);
-  gfx.fillStyle(0x1a1a1a, 1.0);
-  gfx.fillCircle(x + eyeSpread + lookX, eyeY + lookY, pupilR);
-};
-
-TOWN.drawDriveBars = function(gfx, radius, drives) {
+/* ── Drive bars ─────────────────────────────────────────────────── */
+TOWN.drawDriveBars = function(gfx, x, y, bottomOffset, drives) {
   gfx.clear();
   if (!drives) return;
-
   var keys = Object.keys(drives);
-  var barW = 46, barH = 4, gap = 2;
-  var startY = radius + 10;
-  var startX = -barW / 2;
-
+  var barW = 38, barH = 3, gap = 2;
+  var startX = x - barW / 2;
+  var startY = y + bottomOffset;
   for (var i = 0; i < keys.length; i++) {
     var key = keys[i];
     var val = Math.max(0, Math.min(100, drives[key]));
-    var y = startY + i * (barH + gap);
+    var barY = startY + i * (barH + gap);
     var c = Phaser.Display.Color.HexStringToColor(TOWN.DRIVE_COLORS[key] || '#888888').color;
-
-    /* Bar background */
     gfx.fillStyle(0x3D2B1F, 0.2);
-    gfx.fillRoundedRect(startX, y, barW, barH, 2);
-
-    /* Bar fill */
+    gfx.fillRoundedRect(startX, barY, barW, barH, 1);
     if (val > 0) {
       gfx.fillStyle(c, 0.85);
-      gfx.fillRoundedRect(startX, y, barW * (val / 100), barH, 2);
+      gfx.fillRoundedRect(startX, barY, barW * (val / 100), barH, 1);
     }
   }
 };
 
+/* ── Update sprite ───────────────────────────────────────────────── */
 TOWN.updateAgentSprite = function(scene, agent) {
   var name = agent.name;
   var sprite = TOWN.state.agentSprites[name];
-
-  if (!sprite) {
-    sprite = TOWN.createAgentSprite(scene, agent);
-  }
+  if (!sprite) sprite = TOWN.createAgentSprite(scene, agent);
 
   var radius = TOWN.getAgentRadius(agent.life_stage);
-  var color = TOWN.getAgentColor(name);
+  var color  = TOWN.getAgentColor(name);
   sprite.radius = radius;
-  sprite.color = color;
+  sprite.color  = color;
 
-  /* Target position */
+  var headOffY = radius * 2 + 14;
+
+  /* Target iso position */
   var pos = TOWN.getPlaceCenter(agent.location || 'Main_Street');
   var off = TOWN.getAgentOffset(name, agent.location);
   var tx = pos.x + off.dx, ty = pos.y + off.dy;
 
-  /* Movement direction for eye tracking */
-  var dx = tx - sprite.x;
-  var dy = ty - sprite.y;
+  var moving = Math.abs(sprite.x - tx) > 3 || Math.abs(sprite.y - ty) > 3;
 
-  /* Redraw circle with eye direction and mood tint */
-  TOWN.drawAgentCircle(sprite.circle, 0, 0, radius, color, agent.life_stage, agent.alive, dx, dy, agent.mood_valence || 0);
+  if (moving) {
+    /* Animate movement + walk cycle */
+    var fromX = sprite.x, fromY = sprite.y;
+    sprite.x = tx; sprite.y = ty;
+    sprite._walking = true;
 
-  /* Redraw drive bars */
-  TOWN.drawDriveBars(sprite.driveBarContainer, radius, agent.drives);
-
-  /* Tween to new position if moved */
-  if (Math.abs(sprite.x - tx) > 2 || Math.abs(sprite.y - ty) > 2) {
-    var dur = 800;
-    scene.tweens.add({ targets: sprite.circle, x: tx, y: ty, duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.hitzone, x: tx, y: ty, duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.nameText, x: tx, y: ty - radius - 12, duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.driveBarContainer, x: tx, y: ty, duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.selRing, x: tx, y: ty, duration: dur, ease: 'Quad.easeInOut' });
-    sprite.prevX = sprite.x;
-    sprite.prevY = sprite.y;
-    sprite.x = tx;
-    sprite.y = ty;
+    var startPhase = sprite._walkPhase;
+    var dur = 900;
+    var tweenObj = { t: 0 };
+    var _sprite = sprite, _color = color, _agent = agent;
+    scene.tweens.add({
+      targets: tweenObj,
+      t: 1,
+      duration: dur,
+      ease: 'Quad.easeInOut',
+      onUpdate: function() {
+        var cx = fromX + (tx - fromX) * tweenObj.t;
+        var cy = fromY + (ty - fromY) * tweenObj.t;
+        _sprite._walkPhase = (startPhase + tweenObj.t * 1.8) % 1.0;
+        TOWN.drawPerson(_sprite.gfx, cx, cy, _color, _agent.life_stage,
+                        _agent.alive !== false, true, _sprite._walkPhase, _agent.mood_valence || 0);
+        TOWN.drawDriveBars(_sprite.driveBarContainer, cx, cy, 6, _agent.drives);
+        _sprite.hitzone.setPosition(cx, cy - headOffY);
+        _sprite.nameText.setPosition(cx, cy - headOffY - radius - 4);
+        _sprite.selRing.setPosition(cx, cy - headOffY);
+      },
+      onComplete: function() {
+        _sprite._walking = false;
+        TOWN.drawPerson(_sprite.gfx, tx, ty, _color, _agent.life_stage,
+                        _agent.alive !== false, false, _sprite._walkPhase, _agent.mood_valence || 0);
+        TOWN.drawDriveBars(_sprite.driveBarContainer, tx, ty, 6, _agent.drives);
+      },
+    });
+    scene.tweens.add({ targets: sprite.hitzone, x: tx, y: ty - headOffY, duration: dur, ease: 'Quad.easeInOut' });
+    scene.tweens.add({ targets: sprite.nameText, x: tx, y: ty - headOffY - radius - 4, duration: dur, ease: 'Quad.easeInOut' });
+    scene.tweens.add({ targets: sprite.selRing,  x: tx, y: ty - headOffY, duration: dur, ease: 'Quad.easeInOut' });
+  } else {
+    /* Idle — redraw in place */
+    TOWN.drawPerson(sprite.gfx, sprite.x, sprite.y, color, agent.life_stage,
+                    agent.alive !== false, false, sprite._walkPhase, agent.mood_valence || 0);
+    TOWN.drawDriveBars(sprite.driveBarContainer, sprite.x, sprite.y, 6, agent.drives);
   }
 
-  /* Dead agent — float up and fade */
-  if (!agent.alive && sprite.circle.alpha > 0.3) {
-    /* Kill the breathing tween so it doesn't fight the death anim */
-    if (sprite._breatheTween) {
-      sprite._breatheTween.stop();
-      sprite._breatheTween = null;
-    }
-    scene.tweens.add({
-      targets: [sprite.circle, sprite.selRing],
-      alpha: 0.25,
-      scaleX: 0.7, scaleY: 0.7,
-      y: '-=18',
-      duration: 2400,
-      ease: 'Sine.easeInOut',
-    });
-    scene.tweens.add({
-      targets: [sprite.nameText],
-      alpha: 0.2,
-      y: '-=18',
-      duration: 2400,
-      ease: 'Sine.easeInOut',
-    });
-    scene.tweens.add({
-      targets: [sprite.driveBarContainer],
-      alpha: 0, duration: 800,
-    });
+  /* Dead */
+  if (!agent.alive && sprite.gfx.alpha > 0.3) {
+    if (sprite._breatheTween) { sprite._breatheTween.stop(); sprite._breatheTween = null; }
+    scene.tweens.add({ targets: [sprite.gfx, sprite.nameText], alpha: 0.18, y: '-=22', duration: 2400, ease: 'Sine.easeInOut' });
   }
 
-  /* Selection ring update */
+  /* Selection ring */
   if (TOWN.state.selectedAgent === name) {
     TOWN.showSelectionRing(scene, sprite);
   } else if (sprite.selRing.alpha > 0) {
@@ -290,53 +335,40 @@ TOWN.updateAgentSprite = function(scene, agent) {
   }
 };
 
+/* ── Selection ring ─────────────────────────────────────────────── */
 TOWN.showSelectionRing = function(scene, sprite) {
   if (sprite.selRing.alpha > 0) return;
   sprite.selRing.clear();
-  sprite.selRing.lineStyle(3, 0xFFD93D, 0.7);
+  sprite.selRing.lineStyle(3, 0xFFD93D, 0.8);
   sprite.selRing.strokeCircle(0, 0, sprite.radius + 10);
   scene.tweens.add({
     targets: sprite.selRing,
-    alpha: { from: 0.3, to: 0.8 },
-    duration: 800,
-    yoyo: true,
-    repeat: -1,
+    alpha: { from: 0.3, to: 0.85 },
+    duration: 800, yoyo: true, repeat: -1,
     ease: 'Sine.easeInOut',
   });
 };
 
+/* ── Talk bounce ────────────────────────────────────────────────── */
 TOWN.startTalkBounce = function(scene, agentName) {
   var sprite = TOWN.state.agentSprites[agentName];
-  if (!sprite || sprite.talking) return;
+  if (!sprite) return;
   sprite.talking = true;
-  sprite._talkTween = scene.tweens.add({
-    targets: sprite.circle,
-    scaleX: 1.08, scaleY: 1.08,
-    duration: 400,
-    yoyo: true,
-    repeat: -1,
-    ease: 'Sine.easeInOut',
-  });
 };
 
 TOWN.stopTalkBounce = function(scene, agentName) {
   var sprite = TOWN.state.agentSprites[agentName];
-  if (!sprite || !sprite.talking) return;
+  if (!sprite) return;
   sprite.talking = false;
-  if (sprite._talkTween) {
-    sprite._talkTween.stop();
-    sprite._talkTween = null;
-  }
-  sprite.circle.setScale(1, 1);
 };
 
-/* Relationship state → line color */
+/* ── Relationship overlay ────────────────────────────────────────── */
 TOWN._REL_COLORS = {
-  married:      0xFFD700,  /* gold */
-  romantic:     0xFF69B4,  /* pink */
-  close_friend: 0x6BCB77,  /* green */
-  friend:       0x87CEEB,  /* sky blue */
-  acquaintance: 0xBBBBBB,  /* light gray */
+  married:      0xFFD700,
+  romantic:     0xFF69B4,
+  close_friend: 0x6BCB77,
+  friend:       0x87CEEB,
+  acquaintance: 0xBBBBBB,
 };
 
 TOWN.drawRelationshipOverlay = function(scene) {
@@ -344,17 +376,14 @@ TOWN.drawRelationshipOverlay = function(scene) {
   if (!gfx) return;
   gfx.clear();
   if (!TOWN.state.showRelOverlay) return;
-
-  var agents = TOWN.state.agents;
+  var agents  = TOWN.state.agents;
   var sprites = TOWN.state.agentSprites;
-  var drawn = {};
-
+  var drawn   = {};
   for (var nameA in agents) {
     var a = agents[nameA];
     if (!a.alive || !a.relationships || !a.relationships.length) continue;
     var spA = sprites[nameA];
     if (!spA) continue;
-
     for (var r = 0; r < a.relationships.length; r++) {
       var rel = a.relationships[r];
       var nameB = rel.name;
@@ -362,29 +391,22 @@ TOWN.drawRelationshipOverlay = function(scene) {
       var pairKey = nameA < nameB ? nameA + ':' + nameB : nameB + ':' + nameA;
       if (drawn[pairKey]) continue;
       drawn[pairKey] = true;
-
       var spB = sprites[nameB];
-      var agentB = agents[nameB];
-      if (!spB || !agentB || !agentB.alive) continue;
-
-      var lineColor = TOWN._REL_COLORS[rel.state] || 0xAAAAAA;
-      var alpha = rel.state === 'acquaintance' ? 0.2 : 0.45;
-      gfx.lineStyle(rel.state === 'married' || rel.state === 'romantic' ? 2.5 : 1.5, lineColor, alpha);
+      if (!spB || !agents[nameB] || !agents[nameB].alive) continue;
+      var lc = TOWN._REL_COLORS[rel.state] || 0xAAAAAA;
+      var la = rel.state === 'acquaintance' ? 0.2 : 0.45;
+      var lw = (rel.state === 'married' || rel.state === 'romantic') ? 2.5 : 1.5;
+      gfx.lineStyle(lw, lc, la);
       gfx.beginPath();
-      gfx.moveTo(spA.x, spA.y);
-      gfx.lineTo(spB.x, spB.y);
+      gfx.moveTo(spA.x, spA.y); gfx.lineTo(spB.x, spB.y);
       gfx.strokePath();
     }
   }
 };
 
+/* ── Highlight flash ─────────────────────────────────────────────── */
 TOWN.highlightAgent = function(scene, name) {
   var sp = TOWN.state.agentSprites[name];
   if (!sp) return;
-  scene.tweens.add({
-    targets: sp.circle,
-    scaleX: 1.2, scaleY: 1.2,
-    duration: 150, yoyo: true,
-    ease: 'Sine.easeOut',
-  });
+  scene.tweens.add({ targets: sp.gfx, alpha: 0.4, duration: 80, yoyo: true });
 };

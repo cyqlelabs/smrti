@@ -59,11 +59,40 @@ TOWN.getAgentRadius = function(lifeStage) {
   }
 };
 
+/* ── Isometric projection ─────────────────────────────────────────── */
+
+TOWN.ISO = {
+  originX: 580,
+  originY: 120,
+  scaleX: 0.62,
+  scaleY: 0.30,
+};
+
+/* Convert world (wx, wy, wz) → screen {x, y}.
+   wz = height above ground (default 0). */
+TOWN.isoProject = function(wx, wy, wz) {
+  wz = wz || 0;
+  return {
+    x: (wx - wy) * TOWN.ISO.scaleX + TOWN.ISO.originX,
+    y: (wx + wy) * TOWN.ISO.scaleY + TOWN.ISO.originY - wz * 0.9,
+  };
+};
+
+/* Get iso screen position for the center of a place (ground level). */
 TOWN.getPlaceCenter = function(placeName) {
-  var p = TOWN.state.town && TOWN.state.town.places ? TOWN.state.town.places[placeName] : null;
-  if (!p) return { x: 500, y: 350 };
+  var places = TOWN.state.town && TOWN.state.town.places ? TOWN.state.town.places : null;
+  var p = places ? places[placeName] : null;
+  if (!p) {
+    /* Fallback: try Main_Street, then a safe central default */
+    var fallback = places && places['Main_Street'];
+    if (fallback) {
+      var fw = fallback.w || 130, fh = fallback.h || 100;
+      return TOWN.isoProject(fallback.x + fw / 2, fallback.y + fh / 2, 0);
+    }
+    return TOWN.isoProject(440, 290, 0);
+  }
   var w = p.w || 130, h = p.h || 100;
-  return { x: p.x + w / 2, y: p.y + h / 2 };
+  return TOWN.isoProject(p.x + w / 2, p.y + h / 2, 0);
 };
 
 /* Location → alive agents cache, rebuilt once per tick number */

@@ -552,6 +552,16 @@ class Agent:
     ) -> Action:
         bias = self.effective_action_bias()
 
+        # Children: prefer to stay near a parent
+        if self.life_stage == "child" and self.parents:
+            for place, occupants in place_agents.items():
+                if place == self.location:
+                    continue
+                for parent_name in self.parents:
+                    if parent_name and parent_name in occupants and place in available_places:
+                        if random.random() < 0.55:
+                            return Action(type=ACTION_MOVE, target=place)
+
         # Talk to nearby agents if social-leaning personality
         if ctx.nearby_agents and random.random() < bias.get("social", 0.5):
             target = random.choice(ctx.nearby_agents)

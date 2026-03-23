@@ -24,6 +24,24 @@ def get_database(db_path: str) -> "Database":
         return _registry[resolved]
 
 
+def close_database(db_path: str) -> None:
+    """Close and evict a database from the registry. Safe to call even if not registered."""
+    resolved = os.path.expanduser(db_path)
+    with _registry_lock:
+        db = _registry.pop(resolved, None)
+    if db is not None:
+        db.close()
+
+
+def clear_registry() -> None:
+    """Close all databases and empty the registry. Intended for test teardown."""
+    with _registry_lock:
+        entries = list(_registry.items())
+        _registry.clear()
+    for _, db in entries:
+        db.close()
+
+
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS atoms (
     id          TEXT PRIMARY KEY,

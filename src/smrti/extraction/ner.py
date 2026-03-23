@@ -5,6 +5,32 @@ import os
 import threading
 from typing import Optional
 
+# GLiNER transformer context window is ~386–512 sub-word tokens.
+# At UTF-8 encoding rates this maps to roughly 1 500 bytes for mixed-script
+# text — conservative enough for CJK/Arabic while rarely splitting typical
+# conversation turns (< 500 bytes).
+_NER_CHUNK_BYTES: int = 1500
+
+
+def _chunk_text(text: str) -> list[str]:
+    """Return *text* split into NER-safe byte-sized chunks.
+
+    Uses chonkie-core (SIMD-accelerated, splits at sentence boundaries) when
+    available.  Falls back to the full text when the library is not installed
+    or the text already fits within the context window.
+    """
+    if len(text.encode("utf-8")) <= _NER_CHUNK_BYTES:
+        return [text]
+    try:
+        from chonkie_core import Chunker  # type: ignore[import-untyped]
+
+        return [
+            bytes(chunk).decode("utf-8", errors="replace")
+            for chunk in Chunker(text, size=_NER_CHUNK_BYTES)
+        ]
+    except ImportError:
+        return [text]
+
 
 class NERProvider:
     """Wraps GLiNER2 with lazy initialization. Thread-safe singleton."""
@@ -40,39 +66,38 @@ class NERProvider:
     ) -> list[dict]:
         """Extract entity spans from text.
 
+        Long texts are split into NER-safe chunks so that entities near the end
+        of the input are not silently dropped by the transformer context window.
+        Results from all chunks are merged before post-processing.
+
         Returns list of {"name": str, "type": str, "score": float}.
         """
         if labels is None:
             labels = _DEFAULT_LABELS
         model = self._get_model()
-        raw = model.extract_entities(text, labels)
-        # GLiNER2 returns {"entities": {type: [names]}}
-        entities_dict = raw.get("entities", {}) if isinstance(raw, dict) else {}
-        # Track every span GLiNER tagged as "pronoun" before priority deduplication
-        # discards that label. Used to restore the pronoun type afterwards so that
-        # multilingual pronouns ("je", "ich", "yo", …) are not silently promoted to
-        # person atoms by the priority system (person > pronoun).
-        pronoun_tagged: set[str] = {
-            name.lower()
-            for name in entities_dict.get("pronoun", [])
-        }
-        # Deduplicate: keep one entry per name_lower, preferring the
-        # highest-priority (most specific) entity type when a span matches
-        # multiple labels.
+
+        # Collect raw entity dicts across all chunks, merging as we go.
+        # Track every span GLiNER tagged as "pronoun" before priority
+        # deduplication discards that label.  Deduplicate: keep one entry per
+        # name_lower, preferring the highest-priority (most specific) type.
+        pronoun_tagged: set[str] = set()
         best: dict[str, dict] = {}
-        for etype, names in entities_dict.items():
-            for name in names:
-                key = name.lower()
-                priority = _TYPE_PRIORITY.get(etype, len(_DEFAULT_LABELS))
-                existing = best.get(key)
-                if existing is None or priority < _TYPE_PRIORITY.get(existing["type"], len(_DEFAULT_LABELS)):
-                    best[key] = {
-                        "name": name,
-                        "type": etype,
-                        "score": 1.0,
-                    }
-        # Restore pronoun type for any span GLiNER labelled as pronoun, regardless
-        # of what the priority system selected as the winning type.
+
+        for chunk in _chunk_text(text):
+            raw = model.extract_entities(chunk, labels)
+            entities_dict = raw.get("entities", {}) if isinstance(raw, dict) else {}
+            for name in entities_dict.get("pronoun", []):
+                pronoun_tagged.add(name.lower())
+            for etype, names in entities_dict.items():
+                for name in names:
+                    key = name.lower()
+                    priority = _TYPE_PRIORITY.get(etype, len(_DEFAULT_LABELS))
+                    existing = best.get(key)
+                    if existing is None or priority < _TYPE_PRIORITY.get(existing["type"], len(_DEFAULT_LABELS)):
+                        best[key] = {"name": name, "type": etype, "score": 1.0}
+
+        # Restore pronoun type for any span GLiNER labelled as pronoun,
+        # regardless of what the priority system selected as the winning type.
         result = list(best.values())
         for ent in result:
             if ent["name"].lower() in pronoun_tagged:

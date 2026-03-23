@@ -26,7 +26,10 @@
       .then(function(r) { return r.json(); })
       .then(function(petitions) {
         var pending = petitions.filter(function(p) { return p.status === 'pending'; });
-        var html = '<h3>Community Petitions</h3>';
+        var html = '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">'
+          + '<h3 style="margin:0;color:#e0d0c0">Community Petitions</h3>'
+          + '<button onclick="TOWN.hidePetitionPanel()" style="background:none;border:none;color:#a09080;font-size:18px;cursor:pointer;line-height:1">&times;</button>'
+          + '</div>';
         if (pending.length === 0) {
           html += '<p class="empty">No pending petitions.</p>';
         } else {

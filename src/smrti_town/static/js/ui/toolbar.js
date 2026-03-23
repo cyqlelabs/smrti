@@ -22,6 +22,8 @@
     fetch('/buildable')
       .then(function(r) { return r.json(); })
       .then(function(buildings) {
+        if (!buildings || !buildings.length) return;
+        container.style.display = 'flex';
         buildings.forEach(function(b) {
           var btn = document.createElement('button');
           btn.className = 'toolbar-btn';

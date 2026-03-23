@@ -163,103 +163,18 @@ class TownTopology:
 
 
 def build_millbrook_topology() -> TownTopology:
-    """Construct the Millbrook town layout from the plan."""
+    """Founding scenario: a single Town Hall where settlers begin."""
     topo = TownTopology()
-
-    # Root — virtual node, not shown on map
     topo.add_place(Place(
-        name="Town_Millbrook",
-        is_outdoor=True,
-        place_type="other",
-        display=False,
-    ))
-
-    # Streets
-    topo.add_place(Place(
-        name="Elm_Street",
-        parent="Town_Millbrook",
-        is_outdoor=True,
-        has_space=False,
-        place_type="street",
-        x=160, y=290, w=160, h=30,
-        color="#C4B898", icon="", label="Elm St",
-    ))
-    topo.add_place(Place(
-        name="Main_Street",
-        parent="Town_Millbrook",
-        is_outdoor=True,
-        has_space=False,
-        place_type="street",
-        x=440, y=290, w=320, h=36,
-        color="#B8A88A", icon="", label="Main Street",
-    ))
-
-    # Connect streets to town root
-    topo.connect("Town_Millbrook", "Elm_Street")
-    topo.connect("Town_Millbrook", "Main_Street")
-    topo.connect("Elm_Street", "Main_Street")
-
-    # Elm Street — homes
-    topo.add_place(Place(
-        name="Alice_Home",
-        parent="Elm_Street",
+        name="Town_Hall",
         personality="balanced",
-        place_type="home",
-        x=140, y=380, w=130, h=100,
-        color="#D4A03C", icon="🏠", label="Alice's Home",
-    ))
-    topo.add_place(Place(
-        name="Sofia_Home",
-        parent="Elm_Street",
-        personality="balanced",
-        place_type="home",
-        x=140, y=160, w=130, h=100,
-        color="#C4873C", icon="🏡", label="Sofia's Home",
-    ))
-    topo.connect("Elm_Street", "Alice_Home")
-    topo.connect("Elm_Street", "Sofia_Home")
-
-    # Main Street — public buildings
-    topo.add_place(Place(
-        name="Cafe_Rosetta",
-        parent="Main_Street",
-        personality="curious",
+        is_outdoor=False,
+        has_space=True,
         place_type="public",
-        x=320, y=180, w=160, h=110,
-        color="#E8734A", icon="☕", label="Cafe Rosetta",
+        display=True,
+        x=360, y=220, w=200, h=140,
+        color="#5D3A1A",
+        icon="\U0001f3db\ufe0f",
+        label="Town Hall",
     ))
-    topo.add_place(Place(
-        name="Public_Library",
-        parent="Main_Street",
-        personality="analytical",
-        place_type="public",
-        x=560, y=160, w=160, h=110,
-        color="#2A7B7F", icon="📚", label="Library",
-    ))
-    topo.add_place(Place(
-        name="Town_Market",
-        parent="Main_Street",
-        personality="maverick",
-        place_type="public",
-        x=720, y=360, w=160, h=110,
-        color="#8B4C8B", icon="🏪", label="Market",
-    ))
-    topo.connect("Main_Street", "Cafe_Rosetta")
-    topo.connect("Main_Street", "Public_Library")
-    topo.connect("Main_Street", "Town_Market")
-
-    # Central Park connects to Main Street and Elm Street
-    topo.add_place(Place(
-        name="Central_Park",
-        parent="Town_Millbrook",
-        personality="empathetic",
-        is_outdoor=True,
-        place_type="outdoor",
-        x=440, y=400, w=200, h=140,
-        color="#5C9E5C", icon="🌳", label="Central Park",
-    ))
-    topo.connect("Town_Millbrook", "Central_Park")
-    topo.connect("Main_Street", "Central_Park")
-    topo.connect("Elm_Street", "Central_Park")
-
     return topo

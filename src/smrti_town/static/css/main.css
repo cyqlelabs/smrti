@@ -610,7 +610,7 @@ html, body {
   bottom: 20px;
   left: 50%;
   transform: translateX(-50%);
-  display: flex;
+  display: none;
   gap: 8px;
   padding: 8px 16px;
   background: rgba(30, 25, 20, 0.92);

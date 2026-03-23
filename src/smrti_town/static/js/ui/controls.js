@@ -44,6 +44,19 @@ TOWN.initControls = function() {
     TOWN.wsSend({ type: 'command', action: 'skip_week' });
   });
 
+  /* ── Petition badge ──────────────────────────────────────────── */
+  var petitionBadge = document.getElementById('petition-badge');
+  if (petitionBadge) {
+    petitionBadge.addEventListener('click', function() {
+      var panel = document.getElementById('petition-panel');
+      if (panel && panel.style.display !== 'none') {
+        TOWN.hidePetitionPanel();
+      } else {
+        TOWN.showPetitionPanel();
+      }
+    });
+  }
+
   /* ── Sidebar toggle ──────────────────────────────────────────── */
   document.getElementById('sidebar-toggle').addEventListener('click', TOWN.toggleSidebar);
 

@@ -26,6 +26,45 @@ TOWN.processTick = function(scene, data) {
     return Promise.resolve();
   }
 
+  if (data.type === 'building_placed') {
+    if (TOWN.state.scene) {
+      TOWN.drawTown(TOWN.state.scene, TOWN.state.town);
+    }
+    TOWN.addLogEntry('system', '\uD83C\uDFD7\uFE0F ' + data.building_type + ' placed at (' + data.grid_origin[0] + ', ' + data.grid_origin[1] + ')');
+    return Promise.resolve();
+  }
+
+  if (data.type === 'petition') {
+    TOWN.addLogEntry('event', '\uD83D\uDCDC ' + data.description);
+    TOWN.updatePetitionBadge();
+    return Promise.resolve();
+  }
+
+  if (data.type === 'petition_approved') {
+    TOWN.addLogEntry('system', '\u2705 Petition approved: ' + data.building_type);
+    return Promise.resolve();
+  }
+
+  if (data.type === 'road_placed') {
+    if (TOWN.state.scene) {
+      TOWN.drawTown(TOWN.state.scene, TOWN.state.town);
+    }
+    return Promise.resolve();
+  }
+
+  if (data.type === 'building_demolished') {
+    if (TOWN.state.scene) {
+      TOWN.drawTown(TOWN.state.scene, TOWN.state.town);
+    }
+    TOWN.addLogEntry('system', '\uD83D\uDD28 ' + data.place_name + ' demolished');
+    return Promise.resolve();
+  }
+
+  if (data.type === 'encounter') {
+    TOWN.addLogEntry('event', '\uD83D\uDC4B ' + data.description);
+    return Promise.resolve();
+  }
+
   if (data.type !== 'tick') return Promise.resolve();
 
   /* ── Calendar ────────────────────────────────────────────────── */

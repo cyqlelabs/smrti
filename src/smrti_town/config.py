@@ -404,3 +404,28 @@ CULTURE_CONFIDENCE_MIN = 0.5   # only promote bridge atoms above this confidence
 # ── Population cap ───────────────────────────────────────────────────
 MAX_POPULATION = 20            # soft cap — reduces fertility when exceeded
 
+# ── NavGrid / movement ─────────────────────────────────────────────
+CELL_SIZE = 16              # pixels per grid cell
+WORLD_WIDTH = 2400          # world width in pixels
+WORLD_HEIGHT = 1600         # world height in pixels
+GRID_WIDTH = WORLD_WIDTH // CELL_SIZE    # 150
+GRID_HEIGHT = WORLD_HEIGHT // CELL_SIZE  # 100
+
+AGENT_SPEED_DEFAULT = 3.0   # tiles per tick (world coords = speed * CELL_SIZE)
+AGENT_SPEED_CHILD = 2.0
+AGENT_SPEED_ELDER = 1.5
+
+# ── Economy ────────────────────────────────────────────────────────
+STARTING_WALLET = 100
+FOOD_COST = 10
+RENT_COST = 5
+GOODS_COST = 15
+INCOME_EMPLOYED = 8         # per tick-hour
+INCOME_ODD_JOBS = 2         # per tick-hour (unemployed adult)
+INCOME_ELDER = 3            # per tick-hour (retired)
+
+# ── Petition thresholds ────────────────────────────────────────────
+PETITION_SIMILARITY_THRESHOLD = 0.6
+PETITION_CONFIDENCE_THRESHOLD = 0.4
+PETITION_MAX_AGE_HOURS = 720   # 30 sim-days
+

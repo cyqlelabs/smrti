@@ -251,6 +251,129 @@ async def update_settings(body: dict):
         return JSONResponse(status_code=400, content={"error": str(exc)})
 
 
+# ── REST: building placement ─────────────────────────────────────────
+
+@app.post("/place-building")
+async def place_building(body: dict):
+    """Place a building on the grid.
+
+    Body: {"type": str, "grid_x": int, "grid_y": int}
+    """
+    engine = await _ensure_engine()
+    building_type = body.get("type")
+    grid_x = body.get("grid_x")
+    grid_y = body.get("grid_y")
+    if not building_type or grid_x is None or grid_y is None:
+        return JSONResponse(status_code=400, content={"error": "type, grid_x, grid_y required"})
+    try:
+        result = engine.place_building(building_type, int(grid_x), int(grid_y))
+        # Broadcast building placement to all clients
+        await _broadcast({"type": "building_placed", **result})
+        return result
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.post("/place-road")
+async def place_road(body: dict):
+    """Place a road segment.
+
+    Body: {"from": [x, y], "to": [x, y]}
+    """
+    engine = await _ensure_engine()
+    from_pos = body.get("from")
+    to_pos = body.get("to")
+    if not from_pos or not to_pos:
+        return JSONResponse(status_code=400, content={"error": "from and to required"})
+    try:
+        segment = engine.gridmap.place_road(tuple(from_pos), tuple(to_pos))
+        engine.navgrid.bake(engine.topology)
+        await _broadcast({"type": "road_placed", "start": list(segment.start), "end": list(segment.end)})
+        return {"start": list(segment.start), "end": list(segment.end)}
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.delete("/demolish")
+async def demolish(body: dict):
+    """Remove a building.
+
+    Body: {"place_id": str}
+    """
+    engine = await _ensure_engine()
+    place_id = body.get("place_id")
+    if not place_id:
+        return JSONResponse(status_code=400, content={"error": "place_id required"})
+    try:
+        engine.gridmap.demolish(place_id)
+        engine.navgrid.bake(engine.topology)
+        await _broadcast({"type": "building_demolished", "place_name": place_id})
+        return {"status": "demolished", "place_name": place_id}
+    except ValueError as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+
+
+@app.get("/buildable")
+async def get_buildable():
+    """Return list of unlocked building types + placement rules."""
+    engine = await _ensure_engine()
+    return engine.get_buildable()
+
+
+@app.get("/grid")
+async def get_grid():
+    """Return the full grid state for reconnecting clients."""
+    engine = await _ensure_engine()
+    return engine.gridmap.to_dict()
+
+
+# ── REST: petitions ──────────────────────────────────────────────────
+
+@app.get("/petitions")
+async def get_petitions():
+    """Return all petitions."""
+    engine = await _ensure_engine()
+    return engine.petition_manager.to_dict()
+
+
+@app.post("/petitions/{idx}/approve")
+async def approve_petition(idx: int):
+    """Approve a petition — unlocks building type for placement."""
+    engine = await _ensure_engine()
+    pending = engine.petition_manager.pending()
+    for p in pending:
+        petition_idx = next(
+            (i for i, pet in enumerate(engine.petition_manager._petitions) if pet is p),
+            None,
+        )
+        if petition_idx == idx:
+            engine.petition_manager.fulfill(idx)
+            await _broadcast({
+                "type": "petition_approved",
+                "building_type": p.building_type,
+                "idx": idx,
+            })
+            return {"status": "approved", "building_type": p.building_type}
+    return JSONResponse(status_code=404, content={"error": "Petition not found or not pending"})
+
+
+@app.post("/petitions/{idx}/dismiss")
+async def dismiss_petition(idx: int):
+    """Dismiss a petition."""
+    engine = await _ensure_engine()
+    engine.petition_manager.dismiss(idx)
+    return {"status": "dismissed", "idx": idx}
+
+
+# ── REST: economy ────────────────────────────────────────────────────
+
+@app.get("/economy")
+async def get_economy():
+    """Return economy state."""
+    engine = await _ensure_engine()
+    return engine.economy.to_dict()
+
+
 # ── REST: world regeneration ──────────────────────────────────────────
 
 @app.post("/regenerate")

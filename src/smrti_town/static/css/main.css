@@ -565,3 +565,108 @@ html, body {
   border-color: #D4A03C;
 }
 .settings-btn-save:hover { background: #C08C28; border-color: #C08C28; }
+
+/* ── Toolbar ────────────────────────────────────────────────── */
+.toolbar {
+  position: fixed;
+  bottom: 20px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 8px;
+  padding: 8px 16px;
+  background: rgba(30, 25, 20, 0.92);
+  border: 1px solid #5a4a3a;
+  border-radius: 12px;
+  z-index: 100;
+}
+.toolbar-btn {
+  width: 48px;
+  height: 48px;
+  font-size: 24px;
+  border: 1px solid #5a4a3a;
+  border-radius: 8px;
+  background: #2a2420;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.toolbar-btn:hover {
+  background: #3a3430;
+  border-color: #8a7a6a;
+  transform: translateY(-2px);
+}
+.toolbar-btn.locked {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+body.placement-mode { cursor: crosshair; }
+
+/* ── Petition panel ─────────────────────────────────────────── */
+.petition-panel {
+  position: fixed;
+  top: 60px;
+  right: 20px;
+  width: 320px;
+  max-height: 70vh;
+  overflow-y: auto;
+  background: rgba(30, 25, 20, 0.95);
+  border: 1px solid #5a4a3a;
+  border-radius: 10px;
+  padding: 16px;
+  z-index: 90;
+}
+.petition-panel h3 { margin: 0 0 12px; color: #e0d0c0; }
+.petition-card {
+  display: flex;
+  gap: 10px;
+  padding: 10px;
+  margin-bottom: 8px;
+  background: #2a2420;
+  border-radius: 8px;
+  border-left: 3px solid #5a4a3a;
+}
+.petition-card.urgent { border-left-color: #e05040; }
+.petition-card.moderate { border-left-color: #e0a040; }
+.petition-icon { font-size: 28px; }
+.petition-info { flex: 1; font-size: 13px; color: #c0b0a0; }
+.petition-urgency { color: #a09080; font-size: 11px; }
+.petition-evidence { font-style: italic; color: #9a8a7a; margin: 4px 0; }
+.petition-petitioners { font-size: 11px; color: #8a7a6a; }
+.petition-actions { display: flex; flex-direction: column; gap: 4px; }
+.petition-actions button {
+  padding: 4px 10px; font-size: 12px; border-radius: 4px;
+  border: 1px solid #5a4a3a; background: #3a5a3a; color: #e0d0c0; cursor: pointer;
+}
+.petition-actions .dismiss { background: #4a3a3a; }
+.petition-badge {
+  position: fixed;
+  top: 8px;
+  right: 60px;
+  background: #e05040;
+  color: white;
+  border-radius: 50%;
+  width: 22px;
+  height: 22px;
+  font-size: 12px;
+  line-height: 22px;
+  text-align: center;
+  z-index: 101;
+  cursor: pointer;
+}
+
+/* ── Economy display ────────────────────────────────────────── */
+.economy-display {
+  position: fixed;
+  bottom: 80px;
+  right: 20px;
+  padding: 6px 14px;
+  background: rgba(30, 25, 20, 0.9);
+  border: 1px solid #5a4a3a;
+  border-radius: 8px;
+  color: #e0d0c0;
+  font-size: 14px;
+  z-index: 90;
+}
+.wallet-icon { font-size: 16px; }
+.wallet-amount { font-weight: bold; color: #f0d070; }
+.empty { color: #8a7a6a; font-style: italic; }

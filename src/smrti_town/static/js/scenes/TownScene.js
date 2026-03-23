@@ -111,6 +111,14 @@ TOWN._handleClick = function(pointer) {
   if (!scene) return;
   var wp = scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
 
+  /* Check if in placement mode first */
+  if (TOWN.isPlacementMode && TOWN.isPlacementMode()) {
+    var worldPt = scene.cameras.main.getWorldPoint(pointer.x, pointer.y);
+    if (TOWN.handlePlacementClick(worldPt.x, worldPt.y)) {
+      return;
+    }
+  }
+
   /* Agents */
   var sprites = TOWN.state.agentSprites;
   for (var name in sprites) {

@@ -35,7 +35,7 @@ Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as
 **Core layers (`core/`):**
 - `models.py` — Pydantic data structures: `Atom`, `TruthValue`, `AttentionValue`, `Valence`, `Evidence`, `RecallResult`
 - `atomspace.py` — Graph operations: add/update atoms, link atoms, boost STI
-- `db.py` — SQLite schema (WAL mode). Tables: `atoms`, `vec_atoms` (virtual vec0 for KNN), `evidence` (append-only observation log), `personality`, `aliases`
+- `db.py` — SQLite schema (WAL mode). Tables: `atoms`, `vec_atoms` (virtual vec0 for KNN), `evidence` (append-only observation log), `personality`, `aliases`. Key methods: `execute_many` (batched executemany), `execute_batch` (multi-statement single transaction with rollback on failure), `close_database` / `clear_registry` (evict one or all entries from the shared registry — intended for test teardown)
 - `embed.py` — Thread-safe FastEmbed singleton (paraphrase-multilingual-MiniLM-L12-v2, 384 dims, ONNX CPU, 50+ languages)
 
 **Retrieval (`retrieval/`):** `fan_out.py` does KNN → 1-hop graph expansion → salience scoring. `salience.py` formula: `w_sim×sim + w_sti×sti + w_conf×conf + w_lti×lti + w_val×|valence|×intensity`. When valence < -0.5, weight dynamically shifts from `w_sti` to `w_valence` so old-but-critical errors outrank recent trivia. `classify.py` classifies recall results into severity levels (`critical_warning`, `known_antipattern`, `context`) based on valence/intensity/probability thresholds.
@@ -79,13 +79,14 @@ The simulation uses an LLM for two things: generating the world at startup and g
 **Architecture:**
 
 - `engine.py` — `SimEngine`: owns the async 8-phase tick loop (perceive → decide → resolve → remember → converse → sporadic → epoch). Each tick returns a `TickResult` broadcast to WebSocket clients.
-- `agent.py` — `Agent`: drives (Python state) + `Smrti` instance (memory). Rule-based `decide()` — **no LLM calls**. Each agent writes to `Agent_Space_{name}` and reads from their space + `World_Space` + `Space_Culture` + current place space.
+- `agent.py` — `Agent`: drives (Python state) + `Smrti` instance (memory). Rule-based `decide()` — **no LLM calls**; social targets and locations are weighted by recalled memory valence. `traits` dict (from `PRESET_TRAITS` or custom); `effective_action_bias()` applies all 5 trait axes (laziness, leadership, creativity, stubbornness, nurturing) to drive weights. `persist_interactions()` / `restore_interactions()` save and reload pairwise interaction counts to/from the DB directly. Each agent writes to `Agent_Space_{name}` and reads from their space + `World_Space` + `Space_Culture` + current place space.
+- `dialogue_queue.py` — `DialogueQueue`: bounded async queue for LLM dialogue enrichment. Prevents unbounded task accumulation by capping concurrent in-flight requests; results are broadcast as `dialogue_patch` WebSocket messages after the tick resolves.
 - `director.py` — `Director`: adaptive tick pacing — scene mode (0.25h, ≥2 agents together), routine (2h), montage (8h, all sleeping), skip (168h on demand). `Chronos` fires milestone and birthday events.
-- `spatial.py` — `TownTopology` + `Place`: adjacency graph with BFS path distance. Each socially significant place has a `Place_Space_{name}` Smrti instance.
-- `lifecycle.py` — relationship gating, death, reproduction, personality inheritance with stress-boosted mutation variance.
+- `spatial.py` — `TownTopology` + `Place`: adjacency graph with BFS path distance. `places_by_type()` alias returns places filtered by type tag. Each socially significant place has a `Place_Space_{name}` Smrti instance.
+- `lifecycle.py` — relationship gating, death, reproduction, personality inheritance with stress-boosted mutation variance. Relationship regression: pairs regress one tier when their negative-episode count exceeds a threshold; a per-pair cooldown prevents per-epoch spam.
 - `culture.py` — `run_bridge_discovery` + `promote_bridges_to_culture`: every 10th epoch, bridge spaces (`{a}_x_{b}`) are scanned; high-confidence atoms flow up to `Space_Culture`.
 - `scenarios/millbrook.py` — `create_millbrook()`: canonical starting scenario (6 agents, full topology, pre-seeded World_Space and Space_Culture facts).
-- `server.py` — FastAPI app: WebSocket `/ws` for real-time tick stream, REST endpoints (`/start`, `/pause`, `/resume`, `/skip`, `/state`, `/agents`, `/agents/{name}/memories`), static frontend served from `static/`.
+- `server.py` — FastAPI app: WebSocket `/ws` for real-time tick stream, REST endpoints (`/start`, `/pause`, `/resume`, `/skip`, `/state`, `/agents`, `/agents/{name}/memories`, `/culture` (GET — Space_Culture atoms), `/events/inject` (POST — 9 event types)), static frontend served from `static/`.
 
 **Space hierarchy:** `World_Space` (topology facts, written once at startup) → `Agent_Space_{name}` (private per-agent) → `Place_Space_{name}` (per socially-active place) → `Space_Culture` (promoted shared beliefs from bridge spaces). Bridge spaces are ephemeral intersection products named `{sorted_a}_x_{sorted_b}`.
 

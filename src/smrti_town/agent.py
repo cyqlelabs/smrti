@@ -61,6 +61,7 @@ class PerceptionContext:
     schedule_obligation: Optional[str]
     personality_preset: str
     place_types: dict = field(default_factory=dict)
+    workplace: Optional[str] = None
 
     def to_dict(self) -> dict:
         return {
@@ -103,6 +104,17 @@ class Agent:
         self._tenant_id = tenant_id
         self._place_types: dict[str, str] = {}
         self.mood_valence: float = 0.0
+        # Movement state (navgrid-based)
+        self.path: list[tuple[float, float]] = []  # world-coordinate waypoints
+        self.path_index: int = 0
+        self.moving: bool = False
+        self.speed: float = 3.0  # tiles per tick
+        self.world_pos: tuple[float, float] = (0.0, 0.0)  # current interpolated position
+        self.facing: str = "se"  # direction for sprite orientation
+        # Visual DNA for paperdoll rendering
+        self.visual_dna: dict = {}
+        # Economy
+        self.wallet: int = 100
         self._relationships: list[dict] = []
         self._regression_cooldown: dict[str, bool] = {}  # target_name → True while cooling
         self.traits: dict[str, float] = (
@@ -212,6 +224,55 @@ class Agent:
             if scores[best] > 0.2:
                 return best
         return None
+
+    def step_movement(self, delta_tiles: float) -> bool:
+        """Advance along the path by delta_tiles. Returns True if destination reached."""
+        if not self.moving or not self.path or self.path_index >= len(self.path):
+            self.moving = False
+            return True
+
+        remaining = delta_tiles
+        while remaining > 0 and self.path_index < len(self.path):
+            target = self.path[self.path_index]
+            dx = target[0] - self.world_pos[0]
+            dy = target[1] - self.world_pos[1]
+            dist = (dx * dx + dy * dy) ** 0.5
+
+            if dist <= remaining:
+                # Reached this waypoint
+                self.world_pos = target
+                self.path_index += 1
+                remaining -= dist
+                # Update facing direction
+                if abs(dx) > abs(dy):
+                    self.facing = "e" if dx > 0 else "w"
+                else:
+                    self.facing = "s" if dy > 0 else "n"
+            else:
+                # Move toward waypoint
+                ratio = remaining / dist if dist > 0 else 0
+                self.world_pos = (
+                    self.world_pos[0] + dx * ratio,
+                    self.world_pos[1] + dy * ratio,
+                )
+                if abs(dx) > abs(dy):
+                    self.facing = "e" if dx > 0 else "w"
+                else:
+                    self.facing = "s" if dy > 0 else "n"
+                remaining = 0
+
+        if self.path_index >= len(self.path):
+            self.moving = False
+            return True
+        return False
+
+    def assign_path(self, waypoints: list[tuple[float, float]]) -> None:
+        """Assign a new movement path from navgrid A*."""
+        if not waypoints:
+            return
+        self.path = waypoints
+        self.path_index = 0
+        self.moving = True
 
     def persist_interactions(self) -> None:
         """Save interaction counts directly to the Smrti DB (single transaction)."""
@@ -399,7 +460,15 @@ class Agent:
                 return Action(type=ACTION_MOVE, target=school_places[0])
             return Action(type=ACTION_STUDY)
         if ctx.schedule_obligation == "work":
-            work_places = [p for p in available_places if ctx.place_types.get(p) == "public"]
+            # Prefer assigned workplace; fall back to any public/commercial place
+            if ctx.workplace and ctx.workplace in available_places:
+                if self.location != ctx.workplace:
+                    return Action(type=ACTION_MOVE, target=ctx.workplace)
+                return Action(type=ACTION_WORK)
+            work_places = [
+                p for p in available_places
+                if ctx.place_types.get(p) in ("public", "shop", "market", "farm")
+            ]
             if work_places and self.location not in work_places:
                 target = random.choice(work_places)
                 return Action(type=ACTION_MOVE, target=target)
@@ -444,7 +513,10 @@ class Agent:
         return Action(type=ACTION_WAIT)
 
     def _decide_eat(self, ctx: PerceptionContext, available_places: list[str]) -> Action:
-        food_places = [p for p in available_places if ctx.place_types.get(p) == "public"]
+        food_places = [
+            p for p in available_places
+            if ctx.place_types.get(p) in ("market", "farm", "public")
+        ]
         if food_places and self.location not in food_places:
             target = random.choice(food_places)
             return Action(type=ACTION_MOVE, target=target)
@@ -605,4 +677,9 @@ class Agent:
             "parents": list(self.parents) if self.parents else None,
             "mood_valence": round(self.mood_valence, 2),
             "relationships": self._relationships,
+            "world_pos": list(self.world_pos),
+            "moving": self.moving,
+            "facing": self.facing,
+            "wallet": self.wallet,
+            "visual_dna": self.visual_dna,
         }

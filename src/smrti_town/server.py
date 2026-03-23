@@ -21,6 +21,15 @@ from fastapi.staticfiles import StaticFiles
 from starlette.websockets import WebSocketState
 
 from smrti_town.config import (
+    ACTION_EAT,
+    ACTION_INTERACT,
+    ACTION_PLAY,
+    ACTION_PRAY,
+    ACTION_SHOP,
+    ACTION_SLEEP,
+    ACTION_STUDY,
+    ACTION_TALK,
+    ACTION_WORK,
     BUILDING_CATALOG,
     COUNCIL_MEETING_INTERVAL_HOURS,
     COUNCIL_ROLES,
@@ -160,6 +169,71 @@ async def _tick_loop() -> None:
                         actions.append({"citizen": c.name, "action": dataclasses.asdict(action) if dataclasses.is_dataclass(action) else action})
                     except Exception:
                         log.debug("decide() failed for %s", c.name, exc_info=True)
+
+            # Phase 2.5: Action resolution — execute decided actions
+            # This is the core feedback loop: action → need satisfaction + economic effect.
+            if economy:
+                citizen_map = {c.name: c for c in alive_citizens}
+                economy.register_citizen  # ensure method exists (it does)
+                for entry in actions:
+                    cname = entry["citizen"]
+                    act = entry["action"]
+                    atype = act.get("type") if isinstance(act, dict) else getattr(act, "type", None)
+                    c = citizen_map.get(cname)
+                    if c is None:
+                        continue
+                    needs = getattr(c, "needs", None)
+                    if needs is None:
+                        continue
+                    # Ensure citizen has a wallet
+                    economy.register_citizen(c.name)
+
+                    if atype == ACTION_EAT:
+                        target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)
+                        place = topology.places.get(target) if topology and target else None
+                        bkey = place.building_key if place else None
+                        bdef = BUILDING_CATALOG.get(bkey) if bkey else None
+                        if bdef and bdef.provides_food:
+                            # Proper meal at a food building
+                            economy.citizen_buy(c.name, "food")
+                            needs.satisfy("hunger")
+                        else:
+                            # Subsistence at home — partial satisfaction
+                            needs.satisfy("hunger", 50.0)
+
+                    elif atype == ACTION_WORK:
+                        skill_level = 0.0
+                        if hasattr(c, "skills") and hasattr(c.skills, "skills"):
+                            s = c.skills.skills
+                            skill_level = max(s.get("labour", 0.0), s.get("farming", 0.0),
+                                              s.get("commerce", 0.0), s.get("crafting", 0.0))
+                        economy.citizen_earn(c.name, delta, employed=c.workplace is not None,
+                                             skill_level=skill_level)
+                        needs.satisfy("purpose", delta * 8.0)
+
+                    elif atype == ACTION_SLEEP:
+                        # has_home handled by tick() via citizen.home; homeless sleeping
+                        # at an emergency shelter gets partial relief here.
+                        if c.home is None:
+                            needs.satisfy("shelter", delta * 2.0)
+
+                    elif atype == ACTION_STUDY:
+                        needs.satisfy("education")
+
+                    elif atype == ACTION_INTERACT:
+                        reason = (act.get("metadata", {}) or {}).get("reason", "") if isinstance(act, dict) else ""
+                        if reason == "health":
+                            needs.satisfy("health", delta * 15.0)
+
+                    elif atype in (ACTION_PLAY, ACTION_PRAY):
+                        needs.satisfy("culture")
+
+                    elif atype == ACTION_TALK:
+                        needs.satisfy("social", 15.0)
+
+                    elif atype == ACTION_SHOP:
+                        if economy.citizen_buy(c.name, "goods"):
+                            needs.satisfy("social", 10.0)
 
             # Phase 3: Economy tick
             if economy and topology:
@@ -410,6 +484,16 @@ async def _tick_loop() -> None:
                                 bio = nspec.get("bio", "")
                                 if bio:
                                     c.smrti.remember(bio, type="episode", probability=0.9, valence=0.1)
+                                # Register with economy
+                                economy.register_citizen(c.name)
+                                # Assign home from the housing type that attracted them
+                                housing_places = topology.places_by_building(housing_type) if topology else []
+                                for hp in housing_places:
+                                    cap = getattr(BUILDING_CATALOG.get(housing_type), "capacity", 2)
+                                    if len(hp._home_of) < cap:
+                                        c.home = hp.name
+                                        topology.assign_home(c.name, hp.name)
+                                        break
                                 new_citizens.append(c)
                             if new_citizens:
                                 _game["citizens"] = citizens + new_citizens
@@ -704,6 +788,12 @@ async def opening_begin() -> JSONResponse:
                 citizens.append(_StubCitizen(spec, db_path, tenant_id))
 
         _game["citizens"] = citizens
+
+        # Register all starting citizens with the economy so they have wallets
+        economy = _game.get("economy")
+        if economy:
+            for c in citizens:
+                economy.register_citizen(c.name)
 
         # Build Council object from council_specs
         from smrti_town.council import Council, CouncilMember
@@ -1041,6 +1131,36 @@ async def place_building(body: dict) -> JSONResponse:
 
         # Register building in economy
         economy.register_building(pname, bdef)
+
+        # Assign homeless citizens to new housing
+        citizens = _game.get("citizens", [])
+        if bdef.provides_housing:
+            capacity = getattr(bdef, "capacity", 2)
+            assigned = 0
+            for c in citizens:
+                if not getattr(c, "alive", True):
+                    continue
+                if getattr(c, "home", None) is None and assigned < capacity:
+                    c.home = pname
+                    topology.assign_home(c.name, pname)
+                    economy.register_citizen(c.name)
+                    assigned += 1
+
+        # Assign unemployed adults to new workplace
+        staff_needed = getattr(bdef, "staff_required", 0)
+        if staff_needed > 0 and bdef.revenue_per_hour > 0:
+            assigned_workers = 0
+            for c in citizens:
+                if not getattr(c, "alive", True):
+                    continue
+                if (getattr(c, "workplace", None) is None
+                        and getattr(c, "can_work", True)
+                        and getattr(c, "life_stage", "adult") in ("adult", "elder")
+                        and assigned_workers < staff_needed):
+                    c.workplace = pname
+                    topology.assign_workplace(c.name, pname)
+                    economy.register_citizen(c.name)
+                    assigned_workers += 1
 
         # Seed world space
         world_smrti = _game.get("world_smrti")

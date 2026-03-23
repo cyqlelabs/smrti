@@ -18,6 +18,7 @@ from smrti_town.config import (
     PRESET_TRAITS,
     SKILL_CATEGORIES,
 )
+from smrti_town.council import _NEED_BUILDING_MAP
 
 log = logging.getLogger(__name__)
 
@@ -403,6 +404,15 @@ Return ONLY the JSON object."""
                 bdef = BUILDING_CATALOG.get(bkey) if bkey else None
                 if not bdef:
                     return self._fallback_meeting(town_state, building_catalog)
+                # Validate: proposed building must address the top unmet need.
+                # A well/water_tower doesn't feed hungry citizens — fall back if
+                # the LLM picked an irrelevant building for the top need.
+                unmet = town_state.get("unmet_needs", {})
+                if unmet:
+                    top_need = max(unmet, key=lambda k: unmet[k])
+                    relevant = _NEED_BUILDING_MAP.get(top_need, [])
+                    if relevant and bkey not in relevant:
+                        return self._fallback_meeting(town_state, building_catalog)
                 return {
                     "debate": validated_debate,
                     "proposal": {

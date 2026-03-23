@@ -141,7 +141,7 @@ var TickProcessor = {
     if (data.calendar) GameState.calendar = data.calendar;
     if (data.agents) GameState.agents = data.agents;
     if (data.places) GameState.places = data.places;
-    if (data.grid) GameState.grid = data.grid;
+    if (data.gridmap) GameState.grid = data.gridmap;
     if (data.economy) GameState.economy = data.economy;
     if (data.petitions) GameState.petitions = data.petitions;
     if (data.director_mode) GameState.directorMode = data.director_mode;
@@ -260,6 +260,8 @@ var TickProcessor = {
   _handleCouncilFormed: function(msg) {
     GameState.council.members = msg.council || [];
     GameState.phase = PHASES.OPENING_COUNCIL;
+    if (msg.gridmap) GameState.grid = msg.gridmap;
+    if (msg.topology && msg.topology.places) GameState.places = msg.topology.places;
     this._showCouncilReveal();
   },
 

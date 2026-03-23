@@ -115,140 +115,144 @@ async def _tick_loop() -> None:
     calendar: SimCalendar = _game["calendar"]
 
     while _game["phase"] == PHASE_GAMEPLAY:
-        citizens = _game.get("citizens", [])
-        topology = _game.get("topology")
-        economy = _game.get("economy")
-        gridmap = _game.get("gridmap")
+        try:
+            citizens = _game.get("citizens", [])
+            topology = _game.get("topology")
+            economy = _game.get("economy")
+            gridmap = _game.get("gridmap")
 
-        # Compute tick delta
-        delta = director.compute_delta(citizens, calendar)
-        calendar.advance(delta)
-        _game["tick_count"] += 1
-        tick = _game["tick_count"]
+            # Compute tick delta
+            delta = director.compute_delta(citizens, calendar)
+            calendar.advance(delta)
+            _game["tick_count"] += 1
+            tick = _game["tick_count"]
 
-        alive_citizens = [c for c in citizens if getattr(c, "alive", True)]
+            alive_citizens = [c for c in citizens if getattr(c, "alive", True)]
 
-        # Phase 1: Tick each citizen's needs
-        crime_rate = 0.0
-        for c in alive_citizens:
-            if hasattr(c, "tick_state"):
-                c.tick_state(delta, crime_rate=crime_rate)
-
-        # Phase 2: Perceive + Decide
-        actions = []
-        for c in alive_citizens:
-            ctx = None
-            if hasattr(c, "perceive") and topology:
-                nearby = [
-                    a for a in alive_citizens
-                    if a.name != c.name and getattr(a, "location", None) == getattr(c, "location", None)
-                ]
-                place = topology.places.get(getattr(c, "location", None) or "")
-                try:
-                    ctx = c.perceive(topology, calendar, nearby, place=place)
-                except Exception:
-                    log.debug("perceive() failed for %s", c.name, exc_info=True)
-            if hasattr(c, "decide") and ctx is not None:
-                try:
-                    action = c.decide(ctx, topology=topology)
-                    actions.append({"citizen": c.name, "action": action})
-                except Exception:
-                    log.debug("decide() failed for %s", c.name, exc_info=True)
-
-        # Phase 3: Economy tick
-        if economy and topology:
-            buildings = list(topology.places.values())
-            economy.collect_taxes(alive_citizens, buildings, delta)
-            economy.pay_maintenance(delta)
-            economy.process_commerce(buildings, alive_citizens, delta)
-
-            council_members = [
-                c for c in alive_citizens
-                if getattr(c, "council_role", None) is not None
-            ]
-            if council_members:
-                economy.pay_salaries(council_members, delta)
-
-        # Phase 4: Milestone check
-        milestone_events = chronos.check(alive_citizens, calendar)
-
-        # Phase 5: Check for game-over conditions
-        alive_count = len(alive_citizens)
-        if alive_count == 0:
-            _game["phase"] = PHASE_GAME_OVER
-            await broadcast({
-                "type": "game_over",
-                "reason": "All citizens have perished.",
-            })
-            break
-
-        if economy and economy.check_bankruptcy():
-            # Not instant game over, but warn
-            await broadcast({
-                "type": "event",
-                "event_type": "bankruptcy_warning",
-                "description": "The treasury is empty! The town is in financial crisis.",
-            })
-
-        # Phase 6: Dialogue queue submissions
-        dq = _game.get("dialogue_queue")
-        if dq:
+            # Phase 1: Tick each citizen's needs
+            crime_rate = 0.0
             for c in alive_citizens:
-                loc = getattr(c, "location", None) or "Town Square"
-                needs = getattr(c, "needs", None)
-                urgent = None
-                if needs and hasattr(needs, "highest_unmet_need"):
-                    urgent = needs.highest_unmet_need(getattr(c, "life_stage", "adult"))
+                if hasattr(c, "tick_state"):
+                    c.tick_state(delta, crime_rate=crime_rate)
 
-                # Get memories for dialogue context
-                memories: list[dict] = []
-                smrti_inst = getattr(c, "smrti", None)
-                if smrti_inst:
+            # Phase 2: Perceive + Decide
+            actions = []
+            for c in alive_citizens:
+                ctx = None
+                if hasattr(c, "perceive") and topology:
+                    nearby = [
+                        a for a in alive_citizens
+                        if a.name != c.name and getattr(a, "location", None) == getattr(c, "location", None)
+                    ]
+                    place = topology.places.get(getattr(c, "location", None) or "")
                     try:
-                        results = smrti_inst.recall(f"at {loc}", top_k=3)
-                        memories = [{"content": getattr(r, "content", "")} for r in results]
+                        ctx = c.perceive(topology, calendar, nearby, place=place)
                     except Exception:
-                        pass
+                        log.debug("perceive() failed for %s", c.name, exc_info=True)
+                if hasattr(c, "decide") and ctx is not None:
+                    try:
+                        action = c.decide(ctx, topology=topology)
+                        actions.append({"citizen": c.name, "action": action})
+                    except Exception:
+                        log.debug("decide() failed for %s", c.name, exc_info=True)
 
-                nearby_names = [
-                    a.name for a in alive_citizens
-                    if a.name != c.name and getattr(a, "location", None) == getattr(c, "location", None)
+            # Phase 3: Economy tick
+            if economy and topology:
+                buildings = list(topology.places.values())
+                economy.collect_taxes(alive_citizens, buildings, delta)
+                economy.pay_maintenance(delta)
+                economy.process_commerce(buildings, alive_citizens, delta)
+
+                council_members = [
+                    c for c in alive_citizens
+                    if getattr(c, "council_role", None) is not None
                 ]
-                target = nearby_names[0] if nearby_names else None
+                if council_members:
+                    economy.pay_salaries(council_members, delta)
 
-                from smrti_town.dialogue_queue import DialogueRequest
-                dq.submit(DialogueRequest(
-                    speaker=c.name,
-                    target=target,
-                    location=loc,
-                    time_of_day=calendar.time_of_day,
-                    season=calendar.season,
-                    personality=getattr(c, "personality_preset", "balanced"),
-                    urgent_need=urgent,
-                    memories=memories,
-                    fallback=f"{c.name} goes about their business.",
-                    tick_number=tick,
-                ))
+            # Phase 4: Milestone check
+            milestone_events = chronos.check(alive_citizens, calendar)
 
-        # Broadcast milestone events
-        for evt in milestone_events:
-            await broadcast({"type": "event", **evt})
+            # Phase 5: Check for game-over conditions
+            alive_count = len(alive_citizens)
+            if alive_count == 0:
+                _game["phase"] = PHASE_GAME_OVER
+                await broadcast({
+                    "type": "game_over",
+                    "reason": "All citizens have perished.",
+                })
+                break
 
-        # Broadcast tick result
-        tick_result = {
-            "type": "tick",
-            "tick": tick,
-            "delta_hours": round(delta, 2),
-            "director_mode": director.mode,
-            "calendar": calendar.to_dict(),
-            "citizens": [c.to_dict() for c in citizens if hasattr(c, "to_dict")],
-            "economy": economy.to_dict() if economy else None,
-            "topology": topology.to_dict() if topology and hasattr(topology, "to_dict") else None,
-            "gridmap": gridmap.to_dict() if gridmap and hasattr(gridmap, "to_dict") else None,
-            "actions": actions,
-            "milestone_events": milestone_events,
-        }
-        await broadcast(tick_result)
+            if economy and economy.check_bankruptcy():
+                await broadcast({
+                    "type": "event",
+                    "event_type": "bankruptcy_warning",
+                    "description": "The treasury is empty! The town is in financial crisis.",
+                })
+
+            # Phase 6: Dialogue queue submissions
+            dq = _game.get("dialogue_queue")
+            if dq:
+                for c in alive_citizens:
+                    loc = getattr(c, "location", None) or "Town Square"
+                    needs = getattr(c, "needs", None)
+                    urgent = None
+                    if needs and hasattr(needs, "highest_unmet_need"):
+                        urgent = needs.highest_unmet_need(getattr(c, "life_stage", "adult"))
+
+                    memories: list[dict] = []
+                    smrti_inst = getattr(c, "smrti", None)
+                    if smrti_inst:
+                        try:
+                            results = smrti_inst.recall(f"at {loc}", top_k=3)
+                            memories = [{"content": getattr(r, "content", "")} for r in results]
+                        except Exception:
+                            pass
+
+                    nearby_names = [
+                        a.name for a in alive_citizens
+                        if a.name != c.name and getattr(a, "location", None) == getattr(c, "location", None)
+                    ]
+                    target = nearby_names[0] if nearby_names else None
+
+                    from smrti_town.dialogue_queue import DialogueRequest
+                    dq.submit(DialogueRequest(
+                        speaker=c.name,
+                        target=target,
+                        location=loc,
+                        time_of_day=calendar.time_of_day,
+                        season=calendar.season,
+                        personality=getattr(c, "personality_preset", "balanced"),
+                        urgent_need=urgent,
+                        memories=memories,
+                        fallback=f"{c.name} goes about their business.",
+                        tick_number=tick,
+                    ))
+
+            # Broadcast milestone events
+            for evt in milestone_events:
+                await broadcast({"type": "event", **evt})
+
+            # Broadcast tick result
+            tick_result = {
+                "type": "tick",
+                "tick": tick,
+                "delta_hours": round(delta, 2),
+                "director_mode": director.mode,
+                "calendar": calendar.to_dict(),
+                "citizens": [c.to_dict() for c in citizens if hasattr(c, "to_dict")],
+                "economy": economy.to_dict() if economy else None,
+                "topology": topology.to_dict() if topology and hasattr(topology, "to_dict") else None,
+                "gridmap": gridmap.to_dict() if gridmap and hasattr(gridmap, "to_dict") else None,
+                "actions": actions,
+                "milestone_events": milestone_events,
+            }
+            await broadcast(tick_result)
+
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Tick loop error (tick %d) — continuing", _game.get("tick_count", 0))
 
         # Wait for next tick
         interval_s = _llm_settings.tick_interval_ms / 1000.0
@@ -481,6 +485,23 @@ async def opening_begin() -> JSONResponse:
                 citizen.location = "Town Hall"
                 if topology:
                     topology.assign_home(citizen.name, "Town Hall")
+                # Seed agent memory space so it appears in the visualizer
+                role = spec.get("council_role") or "citizen"
+                citizen.smrti.remember(
+                    f"{citizen.name} is the {role} of the town",
+                    type="concept",
+                    probability=1.0,
+                    valence=0.2,
+                    metadata={"citizen": citizen.name, "council_role": role},
+                )
+                bio = spec.get("bio", "")
+                if bio:
+                    citizen.smrti.remember(
+                        bio,
+                        type="episode",
+                        probability=0.9,
+                        valence=0.1,
+                    )
                 citizens.append(citizen)
         except ImportError:
             log.warning("agent.py not available, creating stub citizens")

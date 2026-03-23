@@ -32,6 +32,7 @@ from smrti_town.config import (
     ACTION_TALK,
     ACTION_WORK,
     BUILDING_CATALOG,
+    CELL_SIZE,
     COUNCIL_MEETING_INTERVAL_HOURS,
     COUNCIL_ROLES,
     IMMIGRATION_CHECK_INTERVAL_HOURS,
@@ -85,6 +86,7 @@ _game: dict[str, Any] = {
     "last_meeting_tick": 0,
     "last_immigration_check": 0,
     "pending_meeting": None,
+    "dialogue_last_tick": {},  # speaker -> tick when last dialogue was submitted
 }
 
 _llm_settings = LLMSettings()
@@ -108,6 +110,11 @@ async def broadcast(message: dict) -> None:
             dead.append(ws)
     for ws in dead:
         _connected_clients.discard(ws)
+
+
+def _world_pos_for_place(place: "Place") -> tuple[float, float]:
+    """Convert a Place's grid coordinates to navgrid world_pos units."""
+    return (float(place.grid_x * CELL_SIZE), float(place.grid_y * CELL_SIZE))
 
 
 # ── Tick loop ───────────────────────────────────────────────────────────────
@@ -167,6 +174,7 @@ async def _tick_loop() -> None:
                 if hasattr(c, "decide") and ctx is not None:
                     try:
                         action = c.decide(ctx, topology=topology)
+                        c.current_action = action
                         actions.append({"citizen": c.name, "action": dataclasses.asdict(action) if dataclasses.is_dataclass(action) else action})
                     except Exception:
                         log.debug("decide() failed for %s", c.name, exc_info=True)
@@ -192,6 +200,7 @@ async def _tick_loop() -> None:
                         target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)
                         if target and topology and target in topology.places:
                             c.location = target
+                            c.world_pos = _world_pos_for_place(topology.places[target])
                         continue
 
                     if atype == ACTION_EAT:
@@ -280,7 +289,15 @@ async def _tick_loop() -> None:
             dq = _game.get("dialogue_queue")
             if dq:
                 per_tick = _llm_settings.dialogue_per_tick
-                candidates = _random.sample(alive_citizens, min(per_tick, len(alive_citizens)))
+                # Cooldown: each citizen can only speak every 20 ticks (~40s at
+                # 2s/tick) so the map doesn't become a wall of speech bubbles.
+                dialogue_last = _game["dialogue_last_tick"]
+                cooldown = max(20, len(alive_citizens) * 3)
+                eligible = [
+                    c for c in alive_citizens
+                    if tick - dialogue_last.get(c.name, 0) >= cooldown
+                ]
+                candidates = _random.sample(eligible, min(per_tick, len(eligible)))
                 for c in candidates:
                     loc = getattr(c, "location", None) or "Town Square"
                     needs = getattr(c, "needs", None)
@@ -334,7 +351,7 @@ async def _tick_loop() -> None:
                     target = nearby_names[0] if nearby_names else None
 
                     from smrti_town.dialogue_queue import DialogueRequest
-                    dq.submit(DialogueRequest(
+                    submitted = dq.submit(DialogueRequest(
                         speaker=c.name,
                         target=target,
                         location=loc,
@@ -348,6 +365,8 @@ async def _tick_loop() -> None:
                         calendar_day=calendar.day,
                         calendar_hour=calendar.hour,
                     ))
+                    if submitted:
+                        dialogue_last[c.name] = tick
 
             # Phase 7: Council meeting check
             council = _game.get("council")
@@ -767,8 +786,10 @@ async def opening_begin() -> JSONResponse:
                     for cat, lvl in spec["skills"].items():
                         if hasattr(citizen.skills, "skills"):
                             citizen.skills.skills[cat] = max(0.0, min(1.0, float(lvl)))
-                # Place at Town Hall
+                # Place at Town Hall and sync world_pos
                 citizen.location = "Town Hall"
+                if topology and "Town Hall" in topology.places:
+                    citizen.world_pos = _world_pos_for_place(topology.places["Town Hall"])
                 if topology:
                     topology.assign_home(citizen.name, "Town Hall")
                 # Seed agent memory space so it appears in the visualizer
@@ -822,6 +843,7 @@ async def opening_begin() -> JSONResponse:
         from smrti_town.population import PopulationManager
         _game["population_manager"] = PopulationManager()
         _game["last_immigration_check"] = 0
+        _game["dialogue_last_tick"] = {}
 
         # Initialize dialogue queue
         from smrti_town.dialogue_queue import DialogueQueue

@@ -17,14 +17,32 @@ class PlacedBuilding:
 
     def to_dict(self) -> dict:
         bdef = BUILDING_CATALOG.get(self.building_key)
-        return {
+        d = {
             "building_key": self.building_key,
             "grid_x": self.grid_x,
             "grid_y": self.grid_y,
             "place_name": self.place_name,
             "sprite_variant": self.sprite_variant,
             "sprite_key": bdef.sprite_key if bdef else self.building_key,
+            # Static catalog metadata
+            "description": bdef.description if bdef else "",
+            "category": bdef.category if bdef else "",
+            "cost": bdef.cost if bdef else 0,
+            "maintenance": bdef.maintenance if bdef else 0,
+            "capacity": bdef.capacity if bdef else 0,
+            "revenue_per_hour": bdef.revenue_per_hour if bdef else 0,
+            "staff_required": bdef.staff_required if bdef else 0,
+            "provides_food": bool(bdef and bdef.provides_food),
+            "provides_housing": bool(bdef and bdef.provides_housing),
+            "provides_goods": bool(bdef and getattr(bdef, "provides_goods", False)),
+            # Live stats — populated by server before broadcast
+            "citizens_here": 0,
+            "citizens_home": 0,
+            "citizens_work": 0,
+            "transactions": 0,
+            "revenue": 0,
         }
+        return d
 
 
 class GridMap:

@@ -340,6 +340,17 @@ var TickProcessor = {
           break;
         }
       }
+    } else if (GameState.selectedPlace) {
+      // Refresh building popup with latest live stats from the tick.
+      var pname = GameState.selectedPlace.place_name;
+      var buildings = (GameState.grid && GameState.grid.buildings) || [];
+      for (var j = 0; j < buildings.length; j++) {
+        if (buildings[j].place_name === pname) {
+          GameState.selectedPlace = buildings[j];
+          Sidebar.showBuilding(buildings[j]);
+          break;
+        }
+      }
     }
   },
 

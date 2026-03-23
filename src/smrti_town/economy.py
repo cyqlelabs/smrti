@@ -43,6 +43,7 @@ class EconomyManager:
         self.tax_rates: dict[str, float] = dict(tax_rates or TAX_RATES_DEFAULT)
         self.wallets: dict[str, int] = {}
         self.maintenance_ledger: dict[str, int] = {}
+        self.building_stats: dict[str, dict] = {}  # place_name → {transactions, revenue}
         # Running totals for the current reporting period.
         self._tax_collected: int = 0
         self._maintenance_paid: int = 0
@@ -225,7 +226,7 @@ class EconomyManager:
 
     # ── citizen spending ────────────────────────────────────────────────
 
-    def citizen_buy(self, name: str, item_type: str) -> bool:
+    def citizen_buy(self, name: str, item_type: str, building: str | None = None) -> bool:
         """Deduct cost from citizen wallet.  Returns True if affordable."""
         cost = _ITEM_COSTS.get(item_type, 0)
         if cost <= 0:
@@ -237,6 +238,11 @@ class EconomyManager:
         self.wallets[name] -= cost
         # Purchase revenue goes partly back to treasury (simulating merchant tax).
         self.treasury += int(cost * 0.1)
+        # Per-building transaction tracking.
+        if building:
+            s = self.building_stats.setdefault(building, {"transactions": 0, "revenue": 0})
+            s["transactions"] += 1
+            s["revenue"] += cost
         return True
 
     # ── building affordability ──────────────────────────────────────────

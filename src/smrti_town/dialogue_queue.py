@@ -24,6 +24,8 @@ class DialogueRequest:
     memories: list[dict]
     fallback: str
     tick_number: int
+    calendar_day: int = 1
+    calendar_hour: float = 8.0
 
 
 class DialogueQueue:
@@ -40,9 +42,9 @@ class DialogueQueue:
         self,
         llm_client: LLMClient,
         broadcast_fn: Callable[[dict], Coroutine[Any, Any, None]],
-        queue_size: int = 20,
-        batch_size: int = 5,
-        stale_ticks: int = 3,
+        queue_size: int = 10,
+        batch_size: int = 1,
+        stale_ticks: int = 30,
     ) -> None:
         self._queue: asyncio.Queue[DialogueRequest] = asyncio.Queue(maxsize=queue_size)
         self._llm = llm_client
@@ -162,6 +164,8 @@ class DialogueQueue:
                     "location": req.location,
                     "line": line,
                     "tick": req.tick_number,
+                    "calendar_day": req.calendar_day,
+                    "calendar_hour": req.calendar_hour,
                 }
                 try:
                     await self._broadcast(patch)

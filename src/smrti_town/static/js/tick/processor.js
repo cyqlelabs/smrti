@@ -68,6 +68,10 @@ var TickProcessor = {
           EventLog.add('Council approved: place ' + msg.building_key.replace(/_/g, ' '), 'milestone');
           Council.hide();
           if (typeof Toolbar !== 'undefined') Toolbar.render();
+        } else if (msg.approved) {
+          var desc = msg.description || msg.action_type || 'proposal';
+          EventLog.add('Council approved: ' + desc, 'milestone');
+          Council.hide();
         } else {
           EventLog.add('Council proposal rejected.', 'event');
           Council.hide();
@@ -213,11 +217,17 @@ var TickProcessor = {
   },
 
   _handleDialoguePatch: function(msg) {
-    // Server sends a single patch per message: {speaker, line, target, location, tick}
+    // Server sends a single patch per message: {speaker, line, target, location, tick, calendar_day, calendar_hour}
     var line = msg.line || msg.dialogue;
     if (msg.speaker && line) {
       SpeechBubbles.show(msg.speaker, line, 5000);
-      EventLog.add(msg.speaker + ': "' + line + '"', 'dialogue');
+      // Use the calendar time from when the dialogue was submitted, not current time.
+      var timeStr;
+      if (msg.calendar_day !== undefined && msg.calendar_hour !== undefined) {
+        timeStr = 'D' + msg.calendar_day + ' ' +
+          (msg.calendar_hour < 10 ? '0' : '') + Math.floor(msg.calendar_hour) + ':00';
+      }
+      EventLog.add(msg.speaker + ': "' + line + '"', 'dialogue', timeStr);
     }
   },
 

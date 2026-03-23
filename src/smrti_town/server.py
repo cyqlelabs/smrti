@@ -23,6 +23,7 @@ from starlette.websockets import WebSocketState
 from smrti_town.config import (
     ACTION_EAT,
     ACTION_INTERACT,
+    ACTION_MOVE,
     ACTION_PLAY,
     ACTION_PRAY,
     ACTION_SHOP,
@@ -186,6 +187,12 @@ async def _tick_loop() -> None:
                         continue
                     # Ensure citizen has a wallet
                     economy.register_citizen(c.name)
+
+                    if atype == ACTION_MOVE:
+                        target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)
+                        if target and topology and target in topology.places:
+                            c.location = target
+                        continue
 
                     if atype == ACTION_EAT:
                         target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)

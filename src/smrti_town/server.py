@@ -277,6 +277,13 @@ async def _tick_loop() -> None:
                 if council_members:
                     economy.pay_salaries(council_members, delta)
 
+            # Sync economy wallets → citizen.wallet so the UI sees real balances.
+            if economy:
+                for c in alive_citizens:
+                    balance = economy.wallets.get(c.name)
+                    if balance is not None:
+                        c.wallet = balance
+
             # Phase 4: Milestone check
             milestone_events = chronos.check(alive_citizens, calendar)
 

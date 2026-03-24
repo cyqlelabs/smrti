@@ -11,6 +11,7 @@ import pathlib
 import random as _random
 import re
 import time
+import uuid
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -23,6 +24,7 @@ from smrti_town.config import (
     BUILDING_CATALOG,
     COUNCIL_MEETING_INTERVAL_HOURS,
     COUNCIL_ROLES,
+    IMMIGRATION_CHECK_INTERVAL_HOURS,
     PHASE_GAMEPLAY,
     PHASE_GAME_OVER,
     PHASE_OPENING_CHOOSE_MAYOR,
@@ -71,6 +73,7 @@ _game: dict[str, Any] = {
     "dialogue_queue": None,
     "citizens": [],
     "last_meeting_tick": 0,
+    "last_immigration_check": 0,
     "pending_meeting": None,
 }
 
@@ -288,11 +291,19 @@ async def _tick_loop() -> None:
                             if val > unmet_needs.get(need, 0.0):
                                 unmet_needs[need] = val
 
+                    needs_summary = ", ".join(
+                        f"{k} ({v:.0%})"
+                        for k, v in sorted(unmet_needs.items(), key=lambda x: -x[1])
+                        if v > 0.1
+                    ) or "No critical needs."
+
                     town_state = {
                         "population": len(alive_citizens),
                         "treasury": economy.treasury if economy else 0,
                         "existing_buildings": built_keys,
+                        "built_keys": built_keys,
                         "unmet_needs": unmet_needs,
+                        "needs_summary": needs_summary,
                         "petitions": [],
                         "tick_number": int(calendar.total_hours),
                         "council": [
@@ -300,23 +311,118 @@ async def _tick_loop() -> None:
                             for m in council.members
                         ],
                     }
-                    meeting = council.generate_fallback_meeting(town_state)
+
+                    # Try LLM-generated meeting; fall back to rule-based on failure.
+                    llm_meeting = None
+                    try:
+                        llm_meeting = await _llm_client.generate_council_meeting(town_state)
+                    except Exception:
+                        log.warning("LLM council meeting failed, using fallback", exc_info=True)
+
+                    if llm_meeting and llm_meeting.get("proposal"):
+                        from smrti_town.council import CouncilMeeting, Proposal
+                        proposal_data = llm_meeting["proposal"]
+                        proposal = Proposal(
+                            action_type=proposal_data.get("action_type", "build"),
+                            building_key=proposal_data.get("building_key"),
+                            description=proposal_data.get("description", ""),
+                            cost=int(proposal_data.get("cost", 0)),
+                            proposed_by="mayor",
+                        )
+                        meeting_obj = CouncilMeeting(
+                            meeting_id=uuid.uuid4().hex[:12],
+                            tick_number=int(calendar.total_hours),
+                            debate_transcript=llm_meeting.get("debate", []),
+                            proposal=proposal,
+                            status="pending",
+                        )
+                        council.meetings.append(meeting_obj)
+                        council.last_meeting_tick = int(calendar.total_hours)
+                    else:
+                        meeting_obj = council.generate_fallback_meeting(town_state)
+
                     meeting_dict = {
-                        "meeting_id": meeting.meeting_id,
-                        "debate": meeting.debate_transcript,
+                        "meeting_id": meeting_obj.meeting_id,
+                        "debate": meeting_obj.debate_transcript,
                         "proposal": {
-                            "action_type": meeting.proposal.action_type,
-                            "building_key": meeting.proposal.building_key,
-                            "description": meeting.proposal.description,
-                            "cost": meeting.proposal.cost,
+                            "action_type": meeting_obj.proposal.action_type,
+                            "building_key": meeting_obj.proposal.building_key,
+                            "description": meeting_obj.proposal.description,
+                            "cost": meeting_obj.proposal.cost,
                         },
                     }
                     _game["pending_meeting"] = meeting_dict
                     log.info(
                         "Council meeting convened (tick %d): %s",
-                        tick, meeting.proposal.description,
+                        tick, meeting_obj.proposal.description,
                     )
                     await broadcast({"type": "council_meeting", "meeting": meeting_dict})
+
+            # Phase 8: Immigration check
+            pop_manager = _game.get("population_manager")
+            if pop_manager and topology and economy:
+                last_imm = _game.get("last_immigration_check", 0)
+                if calendar.total_hours - last_imm >= IMMIGRATION_CHECK_INTERVAL_HOURS:
+                    _game["last_immigration_check"] = calendar.total_hours
+                    available_housing = list({
+                        getattr(p, "building_key", None)
+                        for p in topology.places.values()
+                        if getattr(p, "building_key", None)
+                        and getattr(BUILDING_CATALOG.get(getattr(p, "building_key", None)), "provides_housing", False)
+                    })
+                    pull_factors = pop_manager.compute_pull_factors(alive_citizens, economy, topology)
+                    spec = pop_manager.check_immigration(pull_factors, available_housing)
+                    if spec:
+                        housing_type = spec["housing_type"]
+                        existing_names = {c.name for c in citizens}
+                        town_context = (
+                            f"Population: {len(alive_citizens)}, "
+                            f"treasury: {economy.treasury}, "
+                            f"season: {calendar.season}, "
+                            f"theme: {_llm_settings.world_theme}"
+                        )
+                        try:
+                            newcomer_specs = await _llm_client.generate_immigrants(housing_type, town_context)
+                        except Exception:
+                            log.warning("LLM immigrant generation failed, using fallback", exc_info=True)
+                            newcomer_specs = pop_manager.generate_fallback_family(housing_type, existing_names)
+
+                        try:
+                            from smrti_town.agent import Citizen
+                            db_path = _game.get("_db_path", os.path.expanduser("~/.smrti/town.db"))
+                            tenant_id = _game.get("_tenant_id", "millbrook")
+                            new_citizens = []
+                            for nspec in newcomer_specs:
+                                name = nspec.get("name", f"Immigrant {len(citizens) + len(new_citizens) + 1}")
+                                if name in existing_names:
+                                    name = f"{name} Jr."
+                                existing_names.add(name)
+                                age = int(nspec.get("age", 25))
+                                c = Citizen(
+                                    name=name,
+                                    age_years=float(age),
+                                    personality=nspec.get("personality", "balanced"),
+                                    db_path=db_path,
+                                    tenant_id=tenant_id,
+                                    initial_skills=nspec.get("skills") or {},
+                                )
+                                c.location = "Town Square"
+                                bio = nspec.get("bio", "")
+                                if bio:
+                                    c.smrti.remember(bio, type="episode", probability=0.9, valence=0.1)
+                                new_citizens.append(c)
+                            if new_citizens:
+                                _game["citizens"] = citizens + new_citizens
+                                await broadcast({
+                                    "type": "immigration",
+                                    "citizens": [
+                                        {"name": c.name, "age": int(c.age_years), "housing_type": housing_type}
+                                        for c in new_citizens
+                                    ],
+                                })
+                                log.info("Immigration: %d new citizens arrived (%s)", len(new_citizens), housing_type)
+                        except Exception:
+                            log.exception("Failed to create immigrant citizens")
 
             # Broadcast milestone events
             for evt in milestone_events:
@@ -614,6 +720,11 @@ async def opening_begin() -> JSONResponse:
                 governing_style=cs.get("governing_style", "moderate"),
             ))
         _game["council"] = Council(council_members)
+
+        # Initialize population manager
+        from smrti_town.population import PopulationManager
+        _game["population_manager"] = PopulationManager()
+        _game["last_immigration_check"] = 0
 
         # Initialize dialogue queue
         from smrti_town.dialogue_queue import DialogueQueue

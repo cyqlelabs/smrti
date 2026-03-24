@@ -163,11 +163,8 @@ class SimEngine:
         # Bake navgrid from initial topology
         self.navgrid.bake(self.topology)
 
-        # Seed starter petitions for missing building types
-        existing_types = {
-            p.place_type for p in self.topology.places.values()
-            if p.place_type and p.place_type not in ("public", "other")
-        }
+        # Seed starter petitions based on gridmap buildings already placed
+        existing_types = {b.building_type for b in self.gridmap.buildings}
         self.petition_manager.seed_needs(existing_types, current_hours=0.0)
 
         # Initialize agent positions and economy

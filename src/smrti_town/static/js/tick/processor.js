@@ -302,6 +302,9 @@ TOWN.processInit = function(scene, data) {
   }
 
   TOWN.addLogEntry('system', 'Connected to Smrti Town simulation');
+
+  /* Refresh petition badge with seeded petitions */
+  TOWN.updatePetitionBadge();
 };
 
 /* ── Generating overlay ──────────────────────────────────────────── */

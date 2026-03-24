@@ -404,14 +404,18 @@ Return ONLY the JSON object."""
                 bdef = BUILDING_CATALOG.get(bkey) if bkey else None
                 if not bdef:
                     return self._fallback_meeting(town_state, building_catalog)
-                # Validate: proposed building must address the top unmet need.
-                # A well/water_tower doesn't feed hungry citizens — fall back if
-                # the LLM picked an irrelevant building for the top need.
+                # Validate: proposed building must address at least one
+                # significantly unmet need (urgency > 0.3).  This catches LLM
+                # hallucinations like "well" for a starving town, while still
+                # accepting valid cross-need proposals (e.g. cottage when both
+                # hunger and shelter are high).
                 unmet = town_state.get("unmet_needs", {})
-                if unmet:
-                    top_need = max(unmet, key=lambda k: unmet[k])
-                    relevant = _NEED_BUILDING_MAP.get(top_need, [])
-                    if relevant and bkey not in relevant:
+                significant = {n for n, u in unmet.items() if u > 0.3}
+                if significant:
+                    addresses_need = any(
+                        bkey in _NEED_BUILDING_MAP.get(n, []) for n in significant
+                    )
+                    if not addresses_need:
                         return self._fallback_meeting(town_state, building_catalog)
                 return {
                     "debate": validated_debate,
@@ -445,15 +449,16 @@ Return ONLY the JSON object."""
         treasury = town_state.get("treasury", 0)
         available = building_catalog or _available_buildings(pop, built)
 
-        # Priority: housing if low, then civic, then commercial
         affordable = [b for b in available if b["cost"] <= treasury]
         if not affordable:
             affordable = available[:1] if available else [{"key": "cottage", "cost": 2000, "description": "Basic housing"}]
 
-        # Prefer housing if population is growing
-        housing = [b for b in affordable if BUILDING_CATALOG.get(b["key"], None) and
-                   BUILDING_CATALOG[b["key"]].provides_housing]
-        pick = housing[0] if housing else affordable[0]
+        # Pick the building that addresses the highest unmet need.
+        unmet = town_state.get("unmet_needs", {})
+        top_need = max(unmet, key=lambda k: unmet[k]) if unmet else None
+        need_keys = _NEED_BUILDING_MAP.get(top_need, []) if top_need else []
+        need_match = [b for b in affordable if b["key"] in need_keys]
+        pick = need_match[0] if need_match else affordable[0]
         bdef = BUILDING_CATALOG.get(pick["key"])
 
         council_members = town_state.get("council", [])

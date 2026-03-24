@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
 import pathlib
+import random as _random
 import re
 import time
 from contextlib import asynccontextmanager
@@ -152,7 +154,7 @@ async def _tick_loop() -> None:
                 if hasattr(c, "decide") and ctx is not None:
                     try:
                         action = c.decide(ctx, topology=topology)
-                        actions.append({"citizen": c.name, "action": action})
+                        actions.append({"citizen": c.name, "action": dataclasses.asdict(action) if dataclasses.is_dataclass(action) else action})
                     except Exception:
                         log.debug("decide() failed for %s", c.name, exc_info=True)
 
@@ -190,15 +192,48 @@ async def _tick_loop() -> None:
                     "description": "The treasury is empty! The town is in financial crisis.",
                 })
 
-            # Phase 6: Dialogue queue submissions
+            # Phase 6: Dialogue queue submissions — limit to dialogue_per_tick citizens
+            # to avoid flooding a slow local LLM.
             dq = _game.get("dialogue_queue")
             if dq:
-                for c in alive_citizens:
+                per_tick = _llm_settings.dialogue_per_tick
+                candidates = _random.sample(alive_citizens, min(per_tick, len(alive_citizens)))
+                for c in candidates:
                     loc = getattr(c, "location", None) or "Town Square"
                     needs = getattr(c, "needs", None)
                     urgent = None
                     if needs and hasattr(needs, "highest_unmet_need"):
                         urgent = needs.highest_unmet_need(getattr(c, "life_stage", "adult"))
+                    # Suppress needs whose satisfying buildings don't exist yet —
+                    # prevents the LLM from generating dialogue about things the
+                    # town simply cannot provide yet.
+                    if urgent and topology:
+                        _suppress = False
+                        if urgent == "education":
+                            _suppress = not (
+                                topology.places_by_building("school")
+                                or topology.places_by_building("library")
+                                or topology.places_by_building("university")
+                            )
+                        elif urgent == "purpose":
+                            # No workplace and no commercial/industrial venue
+                            _has_venue = (
+                                topology.places_by_building("trading_post")
+                                or topology.places_by_building("market")
+                                or topology.places_by_building("blacksmith")
+                                or topology.places_by_building("bakery")
+                                or topology.places_by_building("general_store")
+                            )
+                            _suppress = not (getattr(c, "workplace", None) or _has_venue)
+                        elif urgent in ("culture", "actualization"):
+                            _suppress = not (
+                                topology.places_by_building("park")
+                                or topology.places_by_building("theater")
+                                or topology.places_by_building("museum")
+                                or topology.places_by_building("church")
+                            )
+                        if _suppress:
+                            urgent = None
 
                     memories: list[dict] = []
                     smrti_inst = getattr(c, "smrti", None)
@@ -227,7 +262,61 @@ async def _tick_loop() -> None:
                         memories=memories,
                         fallback=f"{c.name} goes about their business.",
                         tick_number=tick,
+                        calendar_day=calendar.day,
+                        calendar_hour=calendar.hour,
                     ))
+
+            # Phase 7: Council meeting check
+            council = _game.get("council")
+            if council is not None and _game.get("pending_meeting") is None:
+                if council.should_convene(calendar.total_hours):
+                    built_keys = []
+                    if topology:
+                        built_keys = [
+                            p.building_key for p in topology.places.values()
+                            if getattr(p, "building_key", None)
+                        ]
+                    # Aggregate peak urgency per need across all citizens
+                    unmet_needs: dict[str, float] = {}
+                    for c in alive_citizens:
+                        needs_obj = getattr(c, "needs", None)
+                        if needs_obj is None:
+                            continue
+                        for need in ["hunger", "shelter", "health", "safety",
+                                     "social", "education", "purpose", "culture"]:
+                            val = needs_obj.need_urgency(need) if hasattr(needs_obj, "need_urgency") else 0.0
+                            if val > unmet_needs.get(need, 0.0):
+                                unmet_needs[need] = val
+
+                    town_state = {
+                        "population": len(alive_citizens),
+                        "treasury": economy.treasury if economy else 0,
+                        "existing_buildings": built_keys,
+                        "unmet_needs": unmet_needs,
+                        "petitions": [],
+                        "tick_number": int(calendar.total_hours),
+                        "council": [
+                            {"name": m.name, "role": m.role, "personality": m.personality}
+                            for m in council.members
+                        ],
+                    }
+                    meeting = council.generate_fallback_meeting(town_state)
+                    meeting_dict = {
+                        "meeting_id": meeting.meeting_id,
+                        "debate": meeting.debate_transcript,
+                        "proposal": {
+                            "action_type": meeting.proposal.action_type,
+                            "building_key": meeting.proposal.building_key,
+                            "description": meeting.proposal.description,
+                            "cost": meeting.proposal.cost,
+                        },
+                    }
+                    _game["pending_meeting"] = meeting_dict
+                    log.info(
+                        "Council meeting convened (tick %d): %s",
+                        tick, meeting.proposal.description,
+                    )
+                    await broadcast({"type": "council_meeting", "meeting": meeting_dict})
 
             # Broadcast milestone events
             for evt in milestone_events:
@@ -510,6 +599,22 @@ async def opening_begin() -> JSONResponse:
 
         _game["citizens"] = citizens
 
+        # Build Council object from council_specs
+        from smrti_town.council import Council, CouncilMember
+        council_specs = _game.get("council_specs") or []
+        council_members = []
+        for cs in council_specs:
+            role = cs.get("role", "mayor")
+            domain = COUNCIL_ROLES.get(role, {}).get("domain", "governance")
+            council_members.append(CouncilMember(
+                name=cs["name"],
+                role=role,
+                domain=domain,
+                personality=cs.get("personality", "balanced"),
+                governing_style=cs.get("governing_style", "moderate"),
+            ))
+        _game["council"] = Council(council_members)
+
         # Initialize dialogue queue
         from smrti_town.dialogue_queue import DialogueQueue
         dq = DialogueQueue(
@@ -517,6 +622,7 @@ async def opening_begin() -> JSONResponse:
             broadcast_fn=broadcast,
             queue_size=_llm_settings.dialogue_queue_size,
             batch_size=_llm_settings.dialogue_batch_size,
+            stale_ticks=_llm_settings.dialogue_stale_ticks,
         )
         dq.start()
         _game["dialogue_queue"] = dq
@@ -555,14 +661,40 @@ async def council_approve(body: dict) -> JSONResponse:
         gridmap = _game.get("gridmap")
         topology = _game.get("topology")
 
+        action_type = proposal.get("action_type", "build")
+        council = _game.get("council")
+        meeting_id = meeting.get("meeting_id")
+
+        # Non-build proposals (tax_change, event, etc.) don't need a building key
+        if action_type != "build":
+            cost = proposal.get("cost", 0)
+            if economy and cost:
+                economy.treasury -= min(cost, economy.treasury)
+            if council and meeting_id:
+                council.approve(meeting_id)
+            _game["pending_meeting"] = None
+            result = {
+                "approved": True,
+                "action_type": action_type,
+                "description": proposal.get("description", ""),
+            }
+            await broadcast({"type": "council_result", **result})
+            return JSONResponse(result)
+
         if not bkey or bkey not in BUILDING_CATALOG:
+            if council and meeting_id:
+                council.reject(meeting_id)
             _game["pending_meeting"] = None
             return JSONResponse({"error": f"Unknown building: {bkey}"}, status_code=400)
 
         if economy and not economy.can_afford_building(bkey):
+            if council and meeting_id:
+                council.reject(meeting_id)
             _game["pending_meeting"] = None
             return JSONResponse({"error": "Cannot afford building"}, status_code=400)
 
+        if council and meeting_id:
+            council.approve(meeting_id)
         _game["pending_meeting"] = None
 
         result = {
@@ -583,6 +715,10 @@ async def council_approve(body: dict) -> JSONResponse:
 async def council_reject() -> JSONResponse:
     """Reject the pending council meeting proposal."""
     async with _lock:
+        meeting = _game.get("pending_meeting")
+        council = _game.get("council")
+        if meeting and council:
+            council.reject(meeting.get("meeting_id", ""))
         _game["pending_meeting"] = None
         await broadcast({"type": "council_result", "approved": False})
         return JSONResponse({"approved": False})
@@ -838,10 +974,16 @@ async def update_settings(body: dict) -> JSONResponse:
             if hasattr(_llm_settings, key):
                 setattr(_llm_settings, key, type(getattr(_llm_settings, key))(value))
 
-        # Recreate client if base_url or model changed
-        if "base_url" in body or "model" in body:
+        # Recreate client if connection params or concurrency changed
+        if "base_url" in body or "model" in body or "llm_concurrency" in body:
             await _llm_client.close()
             _llm_client = LLMClient(_llm_settings)
+
+        # Propagate stale_ticks to the running dialogue queue
+        if "dialogue_stale_ticks" in body:
+            dq = _game.get("dialogue_queue")
+            if dq is not None:
+                dq._stale_ticks = _llm_settings.dialogue_stale_ticks
 
         return JSONResponse(_llm_settings.to_dict())
 

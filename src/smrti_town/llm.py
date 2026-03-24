@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import random
@@ -31,13 +32,16 @@ class LLMSettings:
     top_p: float = 0.95
     max_tokens: int = 1024
     worldgen_max_tokens: int = 4096
-    dialogue_timeout: float = 30.0
+    dialogue_timeout: float = 60.0
     worldgen_timeout: float = 120.0
     enabled: bool = True
     world_theme: str = ""
     tick_interval_ms: int = 2000
-    dialogue_queue_size: int = 20
-    dialogue_batch_size: int = 5
+    dialogue_queue_size: int = 10
+    dialogue_batch_size: int = 1
+    dialogue_per_tick: int = 2
+    dialogue_stale_ticks: int = 30
+    llm_concurrency: int = 1
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -194,6 +198,7 @@ class LLMClient:
     def __init__(self, settings: LLMSettings) -> None:
         self.settings = settings
         self._client: httpx.AsyncClient | None = None
+        self._semaphore: asyncio.Semaphore | None = None
 
     async def _ensure_client(self) -> httpx.AsyncClient:
         if self._client is None or self._client.is_closed:
@@ -215,7 +220,23 @@ class LLMClient:
         temperature: float | None = None,
         timeout: float | None = None,
     ) -> str:
-        """Send a chat completion request and return the assistant content."""
+        """Send a chat completion request and return the assistant content.
+
+        All calls are serialised through a semaphore (``llm_concurrency``) so a
+        slow local model is never flooded by concurrent requests.
+        """
+        if self._semaphore is None:
+            self._semaphore = asyncio.Semaphore(max(1, self.settings.llm_concurrency))
+        async with self._semaphore:
+            return await self._chat_inner(messages, max_tokens, temperature, timeout)
+
+    async def _chat_inner(
+        self,
+        messages: list[dict[str, str]],
+        max_tokens: int | None = None,
+        temperature: float | None = None,
+        timeout: float | None = None,
+    ) -> str:
         client = await self._ensure_client()
         payload: dict[str, Any] = {
             "model": self.settings.model,

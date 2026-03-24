@@ -24,16 +24,22 @@ var EventLog = {
    * Add an event entry.
    * @param {string} text
    * @param {string} [type='event'] - 'event', 'crisis', 'milestone', 'dialogue'
+   * @param {string} [timeOverride] - optional pre-formatted time string (e.g. from dialogue_patch)
    */
-  add: function(text, type) {
+  add: function(text, type, timeOverride) {
     var cls = 'event-entry';
     if (type === 'crisis') cls += ' event-crisis';
     else if (type === 'milestone') cls += ' event-milestone';
     else if (type === 'dialogue') cls += ' event-dialogue';
 
-    var cal = GameState.calendar;
-    var timeStr = 'D' + (cal.day || 1) + ' ' +
-      (cal.hour < 10 ? '0' : '') + Math.floor(cal.hour || 0) + ':00';
+    var timeStr;
+    if (timeOverride) {
+      timeStr = timeOverride;
+    } else {
+      var cal = GameState.calendar;
+      timeStr = 'D' + (cal.day || 1) + ' ' +
+        (cal.hour < 10 ? '0' : '') + Math.floor(cal.hour || 0) + ':00';
+    }
 
     var entry = document.createElement('div');
     entry.className = cls;

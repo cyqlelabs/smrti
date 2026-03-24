@@ -1,496 +1,200 @@
-/* ================================================================
-   agents.js — Isometric person sprites with walk animation
-   ================================================================ */
-window.TOWN = window.TOWN || {};
+/**
+ * Citizen sprite management — create, update positions with tweens, remove.
+ */
 
-/* ── Color helpers ───────────────────────────────────────────────── */
-TOWN._darkenInt = function(colorInt, amount) {
-  var r = (colorInt >> 16) & 0xFF;
-  var g = (colorInt >> 8)  & 0xFF;
-  var b =  colorInt        & 0xFF;
-  return Phaser.Display.Color.GetColor(
-    Math.max(0, r - amount),
-    Math.max(0, g - amount),
-    Math.max(0, b - amount)
-  );
-};
-TOWN._lightenInt = function(colorInt, amount) {
-  var r = (colorInt >> 16) & 0xFF;
-  var g = (colorInt >> 8)  & 0xFF;
-  var b =  colorInt        & 0xFF;
-  return Phaser.Display.Color.GetColor(
-    Math.min(255, r + amount),
-    Math.min(255, g + amount),
-    Math.min(255, b + amount)
-  );
-};
+var AgentRenderer = {
+  /** @type {Object<string, {sprite: Phaser.GameObjects.Image, label: Phaser.GameObjects.Text, tween: Phaser.Tweens.Tween|null}>} */
+  agents: {},
 
-/* ── Person renderer ─────────────────────────────────────────────── */
-/* Draw a miniature person at canvas pixel position (sx, sy — base feet).
-   Walking: if true, animate limbs based on walkPhase (0–1). */
-TOWN.drawPerson = function(gfx, sx, sy, color, lifeStage, alive, walking, walkPhase, moodValence) {
-  gfx.clear();
+  /** @type {Phaser.Scene|null} */
+  scene: null,
 
-  if (!alive) {
-    gfx.fillStyle(0x888888, 0.25);
-    gfx.fillEllipse(sx, sy - 4, 18, 8);
-    return;
-  }
+  init: function(scene) {
+    this.scene = scene;
+    this.agents = {};
+  },
 
-  var s = 1.0;
-  if (lifeStage === 'infant') s = 0.42;
-  else if (lifeStage === 'child')  s = 0.62;
-  else if (lifeStage === 'elder')  s = 0.85;
+  /**
+   * Full sync from GameState.agents array.
+   * Creates new sprites, updates positions, removes dead agents.
+   */
+  sync: function() {
+    var scene = this.scene;
+    if (!scene) return;
 
-  var headR = 9  * s;
-  var bodyH = 14 * s;
-  var bodyW = 8  * s;
-  var legLen = 10 * s;
-  var armLen = 8  * s;
-  var fw = 4 * s;  /* foot width */
+    var agentList = GameState.agents || [];
+    var activeNames = {};
 
-  /* Walk cycle */
-  var lSwing = walking ? Math.sin(walkPhase * Math.PI * 2) * 5 * s : 0;
-  var aSwing = -lSwing * 0.7;
+    for (var i = 0; i < agentList.length; i++) {
+      var a = agentList[i];
+      if (!a.alive) continue;
+      activeNames[a.name] = true;
 
-  /* Base y = sy (feet level) */
-  var feetY  = sy;
-  var bodyY  = feetY - legLen - bodyH;
-  var headY  = bodyY - headR;
+      var existing = this.agents[a.name];
+      if (!existing) {
+        this._createAgent(a);
+      } else {
+        this._updateAgent(a, existing);
+      }
+    }
 
-  /* Shadow */
-  gfx.fillStyle(0x1A0A00, 0.16);
-  gfx.fillEllipse(sx, feetY + 2, 16 * s, 6 * s);
+    // Remove agents no longer present
+    var toRemove = [];
+    for (var name in this.agents) {
+      if (!activeNames[name]) {
+        toRemove.push(name);
+      }
+    }
+    for (var r = 0; r < toRemove.length; r++) {
+      this._removeAgent(toRemove[r]);
+    }
+  },
 
-  /* Legs */
-  var legColor = TOWN._darkenInt(color, 45);
-  gfx.fillStyle(legColor, 1.0);
-  /* Left leg */
-  gfx.fillRect(sx - bodyW * 0.48 - 1, feetY - legLen + lSwing, fw, legLen - Math.abs(lSwing) * 0.4);
-  /* Right leg */
-  gfx.fillRect(sx + bodyW * 0.48 - fw + 1, feetY - legLen - lSwing, fw, legLen - Math.abs(lSwing) * 0.4);
-  /* Feet */
-  gfx.fillStyle(TOWN._darkenInt(color, 65), 1.0);
-  gfx.fillRect(sx - bodyW * 0.48 - 2, feetY + lSwing * 0.3 - 3, fw + 3, 3 * s);
-  gfx.fillRect(sx + bodyW * 0.48 - fw, feetY - lSwing * 0.3 - 3, fw + 3, 3 * s);
+  _createAgent: function(agentData) {
+    var scene = this.scene;
+    var spriteKey = GameState.spriteForAgent(agentData.name);
+    var pos = this._agentScreenPos(agentData);
 
-  /* Body */
-  gfx.fillStyle(color, 1.0);
-  gfx.fillRoundedRect(sx - bodyW / 2, bodyY, bodyW, bodyH, 3 * s);
-  /* Collar line */
-  gfx.fillStyle(TOWN._lightenInt(color, 30), 0.45);
-  gfx.fillRect(sx - bodyW * 0.28, bodyY, bodyW * 0.56, bodyH * 0.22);
-  /* Mood body tint */
-  if (moodValence && Math.abs(moodValence) > 0.15) {
-    var tint = moodValence > 0 ? 0x44EE88 : 0xFF5555;
-    gfx.fillStyle(tint, Math.min(0.20, Math.abs(moodValence) * 0.28));
-    gfx.fillRoundedRect(sx - bodyW / 2, bodyY, bodyW, bodyH, 3 * s);
-  }
+    var sprite = scene.add.image(pos.x, pos.y, 'sprites', spriteKey);
+    sprite.setOrigin(0.5, 1.0);
+    sprite.setScale(0.4);
+    sprite.setDepth(pos.y + 100); // agents render above terrain/buildings at same Y
+    sprite.setInteractive({ useHandCursor: true });
 
-  /* Arms */
-  gfx.lineStyle(2.5 * s, legColor, 1.0);
-  gfx.beginPath();
-  gfx.moveTo(sx - bodyW / 2, bodyY + bodyH * 0.18);
-  gfx.lineTo(sx - bodyW / 2 - armLen * 0.75 + aSwing, bodyY + bodyH * 0.62 + aSwing * 0.4);
-  gfx.strokePath();
-  gfx.beginPath();
-  gfx.moveTo(sx + bodyW / 2, bodyY + bodyH * 0.18);
-  gfx.lineTo(sx + bodyW / 2 + armLen * 0.75 - aSwing, bodyY + bodyH * 0.62 - aSwing * 0.4);
-  gfx.strokePath();
+    sprite.on('pointerdown', function() {
+      GameState.selectedPlace = null;
+      GameState.selectedAgent = agentData.name;
+      Sidebar.showAgent(agentData);
+    });
 
-  /* Neck */
-  gfx.fillStyle(0xF5CBA7, 1.0);
-  gfx.fillRect(sx - 1.5 * s, bodyY - 3 * s, 3 * s, 4 * s);
-
-  /* Head */
-  var skinColor = (lifeStage === 'elder') ? 0xE8B898 : 0xF5CBA7;
-  gfx.fillStyle(skinColor, 1.0);
-  gfx.fillCircle(sx, headY + headR, headR);
-
-  /* Hair */
-  var hairColor = TOWN._darkenInt(color, 28);
-  if (lifeStage === 'elder') hairColor = 0xCCCCCC;
-  if (lifeStage === 'child') hairColor = TOWN._darkenInt(color, 10);
-  gfx.fillStyle(hairColor, 1.0);
-  gfx.fillRect(sx - headR * 0.85, headY, headR * 1.7, headR * 0.55);
-  gfx.fillCircle(sx, headY + headR * 0.28, headR * 0.87);
-
-  /* Eyes */
-  gfx.fillStyle(0x1A1A1A, 1.0);
-  gfx.fillCircle(sx - headR * 0.30, headY + headR * 0.88, 1.7 * s);
-  gfx.fillCircle(sx + headR * 0.30, headY + headR * 0.88, 1.7 * s);
-  /* Shine */
-  gfx.fillStyle(0xFFFFFF, 0.8);
-  gfx.fillCircle(sx - headR * 0.22, headY + headR * 0.78, 0.8 * s);
-  gfx.fillCircle(sx + headR * 0.38, headY + headR * 0.78, 0.8 * s);
-
-  /* Expression */
-  gfx.lineStyle(1.4 * s, 0x8B5E3C, 0.85);
-  gfx.beginPath();
-  if (moodValence > 0.12) {
-    gfx.arc(sx, headY + headR * 1.05, headR * 0.28, 0.25, Math.PI - 0.25);
-  } else if (moodValence < -0.12) {
-    gfx.arc(sx, headY + headR * 1.28, headR * 0.28, Math.PI + 0.25, -0.25);
-  } else {
-    gfx.moveTo(sx - headR * 0.22, headY + headR * 1.12);
-    gfx.lineTo(sx + headR * 0.22, headY + headR * 1.12);
-  }
-  gfx.strokePath();
-
-  /* Life stage ring */
-  if (lifeStage === 'child') {
-    gfx.lineStyle(2, 0xFFD93D, 0.75);
-    gfx.strokeCircle(sx, headY + headR, headR + 3);
-  } else if (lifeStage === 'infant') {
-    gfx.lineStyle(2, 0xFF6F91, 0.75);
-    gfx.strokeCircle(sx, headY + headR, headR + 3);
-  } else if (lifeStage === 'elder') {
-    gfx.lineStyle(2, 0xCCCCCC, 0.55);
-    gfx.strokeCircle(sx, headY + headR, headR + 3);
-  }
-};
-
-/* ── Radius / color helpers ─────────────────────────────────────── */
-TOWN.getAgentRadius = function(lifeStage) {
-  switch (lifeStage) {
-    case 'infant': return 9;
-    case 'child':  return 14;
-    case 'elder':  return 20;
-    default:       return 22;
-  }
-};
-
-/* ── Create sprite ───────────────────────────────────────────────── */
-TOWN.createAgentSprite = function(scene, agent) {
-  var name   = agent.name;
-  var color  = TOWN.getAgentColor(name);
-  var radius = TOWN.getAgentRadius(agent.life_stage);
-  var pos    = TOWN.getPlaceCenter(agent.location || 'Main_Street');
-  var off    = TOWN.getAgentOffset(name, agent.location);
-  var x = pos.x + off.dx, y = pos.y + off.dy;
-
-  /* Isometric depth based on world position */
-  var wx0 = x, wy0 = y;
-  var isoD = 10 + (wx0 + wy0) / 2000;
-
-  /* Graphics */
-  var gfx = scene.add.graphics().setDepth(isoD);
-  TOWN.drawPerson(gfx, x, y, color, agent.life_stage,
-                  agent.alive !== false, false, 0, agent.mood_valence || 0);
-
-  /* Hitzone centred on the head */
-  var headOffY = radius * 2 + 14;
-  var hitzone  = scene.add.circle(x, y - headOffY, radius + 8, 0x000000, 0)
-    .setInteractive({ useHandCursor: true }).setDepth(isoD + 0.001);
-  hitzone.setData('agentName', name);
-
-  /* Name label */
-  var nameText = scene.add.text(x, y - headOffY - radius - 4,
-    name.replace(/_/g, ' '), {
-      fontSize: '12px',
-      fontFamily: 'Fredoka, sans-serif',
-      fontStyle: 'bold',
-      color: '#FFFFFF',
+    var label = scene.add.text(pos.x, pos.y - sprite.displayHeight - 2, agentData.name, {
+      fontSize: '10px',
+      fontFamily: 'sans-serif',
+      color: '#c9d1d9',
+      stroke: '#0e1117',
+      strokeThickness: 2,
       align: 'center',
-      stroke: '#3D2B1F',
-      strokeThickness: 3,
-    }).setOrigin(0.5, 1).setDepth(isoD + 0.003);
-
-  /* Action icon (above name label) */
-  var actionIcon = scene.add.text(x, y - headOffY - radius - 18, '', {
-    fontSize: '15px',
-    align: 'center',
-  }).setOrigin(0.5, 1).setDepth(isoD + 0.004);
-
-  /* Drive bars */
-  var driveBarContainer = scene.add.graphics().setDepth(isoD + 0.002);
-
-  /* Selection ring */
-  var selRing = scene.add.graphics().setDepth(isoD - 0.001);
-  selRing.setPosition(x, y - headOffY);
-  selRing.setAlpha(0);
-
-  scene.agentLayer.add(gfx);
-  scene.agentLayer.add(hitzone);
-  scene.agentLayer.add(nameText);
-  scene.agentLayer.add(actionIcon);
-  scene.agentLayer.add(driveBarContainer);
-  scene.agentLayer.add(selRing);
-
-  var sprite = {
-    gfx: gfx,
-    hitzone: hitzone,
-    nameText: nameText,
-    actionIcon: actionIcon,
-    driveBarContainer: driveBarContainer,
-    selRing: selRing,
-    speechBubble: null,
-    _speechTimer: null,
-    x: x, y: y,
-    radius: radius,
-    color: color,
-    prevX: x, prevY: y,
-    talking: false,
-    _talkTween: null,
-    _breatheTween: null,
-    _dimTween: null,
-    _walkPhase: Math.random(),
-    _walking: false,
-    _lastAction: '',
-  };
-  TOWN.state.agentSprites[name] = sprite;
-
-  /* Idle breathing tween — gentle 1px Y bob */
-  sprite._breatheTween = scene.tweens.add({
-    targets: gfx,
-    y: -1,
-    duration: 2500,
-    yoyo: true, repeat: -1,
-    ease: 'Sine.easeInOut',
-    delay: Math.random() * 2000,
-  });
-
-  /* Pop-in */
-  gfx.setAlpha(0);
-  nameText.setAlpha(0);
-  actionIcon.setAlpha(0);
-  scene.tweens.add({ targets: gfx,  alpha: 1, duration: 450, ease: 'Back.easeOut' });
-  scene.tweens.add({ targets: [nameText, actionIcon, driveBarContainer], alpha: 1, duration: 350, delay: 200 });
-
-  return sprite;
-};
-
-/* ── Drive bars ─────────────────────────────────────────────────── */
-TOWN.drawDriveBars = function(gfx, x, y, bottomOffset, drives) {
-  gfx.clear();
-  if (!drives) return;
-  var keys = Object.keys(drives);
-  var barW = 38, barH = 3, gap = 2;
-  var startX = x - barW / 2;
-  var startY = y + bottomOffset;
-  for (var i = 0; i < keys.length; i++) {
-    var key = keys[i];
-    var val = Math.max(0, Math.min(100, drives[key]));
-    var barY = startY + i * (barH + gap);
-    var c = Phaser.Display.Color.HexStringToColor(TOWN.DRIVE_COLORS[key] || '#888888').color;
-    gfx.fillStyle(0x3D2B1F, 0.2);
-    gfx.fillRoundedRect(startX, barY, barW, barH, 1);
-    if (val > 0) {
-      gfx.fillStyle(c, 0.85);
-      gfx.fillRoundedRect(startX, barY, barW * (val / 100), barH, 1);
-    }
-  }
-};
-
-/* ── Update sprite ───────────────────────────────────────────────── */
-TOWN.updateAgentSprite = function(scene, agent) {
-  var name = agent.name;
-  var sprite = TOWN.state.agentSprites[name];
-  if (!sprite) sprite = TOWN.createAgentSprite(scene, agent);
-
-  var radius = TOWN.getAgentRadius(agent.life_stage);
-  var color  = TOWN.getAgentColor(name);
-  sprite.radius = radius;
-  sprite.color  = color;
-
-  var headOffY = radius * 2 + 14;
-
-  /* Target iso position */
-  var wx, wy;
-  if (agent.world_pos && agent.world_pos[0] !== 0) {
-    wx = agent.world_pos[0];
-    wy = agent.world_pos[1];
-  } else {
-    var place = TOWN.state.town.places[agent.location];
-    if (place) {
-      wx = place.x + place.w / 2;
-      wy = place.y + place.h / 2;
-    } else {
-      var pos_ = TOWN.getPlaceCenter(agent.location || 'Main_Street');
-      wx = pos_.x;
-      wy = pos_.y;
-    }
-  }
-  var off = TOWN.getAgentOffset(name, agent.location);
-  var tx = wx + off.dx, ty = wy + off.dy;
-
-  var moving = Math.abs(sprite.x - tx) > 3 || Math.abs(sprite.y - ty) > 3;
-
-  /* Update isometric depth from world position */
-  var isoD = 10 + (wx + wy) / 2000;
-  sprite.gfx.setDepth(isoD);
-  sprite.hitzone.setDepth(isoD + 0.001);
-  sprite.driveBarContainer.setDepth(isoD + 0.002);
-  sprite.nameText.setDepth(isoD + 0.003);
-  sprite.actionIcon.setDepth(isoD + 0.004);
-  sprite.selRing.setDepth(isoD - 0.001);
-
-  /* Action icon */
-  var actionIconText = TOWN.ACTION_ICONS[agent.action] || '';
-  if (actionIconText !== sprite._lastAction) {
-    sprite._lastAction = actionIconText;
-    sprite.actionIcon.setText(actionIconText);
-  }
-
-  /* Inside dim: fade agents doing indoor actions */
-  var INDOOR_ACTIONS = { sleep: true, eat: true, work: true, read: true };
-  var targetAlpha = (INDOOR_ACTIONS[agent.action] && agent.alive !== false) ? 0.55 : 1.0;
-  if (!sprite._dimTween && Math.abs((sprite.gfx.alpha) - targetAlpha) > 0.08) {
-    var _spr = sprite;
-    sprite._dimTween = scene.tweens.add({
-      targets: [sprite.gfx, sprite.nameText, sprite.driveBarContainer, sprite.actionIcon],
-      alpha: targetAlpha,
-      duration: 600,
-      ease: 'Sine.easeInOut',
-      onComplete: function() { _spr._dimTween = null; },
     });
-  }
+    label.setOrigin(0.5, 1.0);
+    label.setDepth(pos.y + 101);
 
-  if (moving) {
-    /* Pause breathing while walking */
-    if (sprite._breatheTween) sprite._breatheTween.pause();
-    sprite.gfx.y = 0;
+    this.agents[agentData.name] = {
+      sprite: sprite,
+      label: label,
+      tween: null,
+      lastX: pos.x,
+      lastY: pos.y,
+    };
+  },
 
-    /* Animate movement + walk cycle */
-    var fromX = sprite.x, fromY = sprite.y;
-    sprite.x = tx; sprite.y = ty;
-    sprite._walking = true;
+  _updateAgent: function(agentData, entry) {
+    var targetPos = this._agentScreenPos(agentData);
+    var dx = Math.abs(targetPos.x - entry.lastX);
+    var dy = Math.abs(targetPos.y - entry.lastY);
 
-    var startPhase = sprite._walkPhase;
-    var dur = 900;
-    var tweenObj = { t: 0 };
-    var _sprite = sprite, _color = color, _agent = agent;
-    scene.tweens.add({
-      targets: tweenObj,
-      t: 1,
-      duration: dur,
-      ease: 'Quad.easeInOut',
-      onUpdate: function() {
-        var cx = fromX + (tx - fromX) * tweenObj.t;
-        var cy = fromY + (ty - fromY) * tweenObj.t;
-        _sprite._walkPhase = (startPhase + tweenObj.t * 1.8) % 1.0;
-        TOWN.drawPerson(_sprite.gfx, cx, cy, _color, _agent.life_stage,
-                        _agent.alive !== false, true, _sprite._walkPhase, _agent.mood_valence || 0);
-        TOWN.drawDriveBars(_sprite.driveBarContainer, cx, cy, 6, _agent.drives);
-        _sprite.hitzone.setPosition(cx, cy - headOffY);
-        _sprite.nameText.setPosition(cx, cy - headOffY - radius - 4);
-        _sprite.actionIcon.setPosition(cx, cy - headOffY - radius - 18);
-        _sprite.selRing.setPosition(cx, cy - headOffY);
-      },
-      onComplete: function() {
-        _sprite._walking = false;
-        TOWN.drawPerson(_sprite.gfx, tx, ty, _color, _agent.life_stage,
-                        _agent.alive !== false, false, _sprite._walkPhase, _agent.mood_valence || 0);
-        TOWN.drawDriveBars(_sprite.driveBarContainer, tx, ty, 6, _agent.drives);
-        /* Resume breathing after arriving */
-        if (_sprite._breatheTween) _sprite._breatheTween.resume();
-      },
-    });
-    scene.tweens.add({ targets: sprite.hitzone,  x: tx, y: ty - headOffY,           duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.nameText,  x: tx, y: ty - headOffY - radius - 4,  duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.actionIcon,x: tx, y: ty - headOffY - radius - 18, duration: dur, ease: 'Quad.easeInOut' });
-    scene.tweens.add({ targets: sprite.selRing,   x: tx, y: ty - headOffY,           duration: dur, ease: 'Quad.easeInOut' });
-  } else {
-    /* Idle — redraw in place, breathing tween active */
-    TOWN.drawPerson(sprite.gfx, sprite.x, sprite.y, color, agent.life_stage,
-                    agent.alive !== false, false, sprite._walkPhase, agent.mood_valence || 0);
-    TOWN.drawDriveBars(sprite.driveBarContainer, sprite.x, sprite.y, 6, agent.drives);
-    /* Ensure action icon is positioned correctly when idle */
-    sprite.actionIcon.setPosition(sprite.x, sprite.y - headOffY - radius - 18);
-    /* Walking wobble from server-side moving flag */
-    if (agent.moving) {
-      var wobblePhase = (Date.now() / 150) % (Math.PI * 2);
-      sprite.gfx.rotation = Math.sin(wobblePhase) * 0.08;
+    // Only tween if position changed significantly
+    if (dx > 2 || dy > 2) {
+      if (entry.tween) {
+        entry.tween.stop();
+      }
+
+      // Flip sprite based on movement direction
+      if (targetPos.x < entry.lastX) {
+        entry.sprite.setFlipX(true);
+      } else if (targetPos.x > entry.lastX) {
+        entry.sprite.setFlipX(false);
+      }
+
+      var duration = Math.max(300, Math.min(1200, Math.sqrt(dx * dx + dy * dy) * 8));
+
+      entry.tween = this.scene.tweens.add({
+        targets: [entry.sprite, entry.label],
+        x: targetPos.x,
+        duration: duration,
+        ease: 'Sine.easeInOut',
+      });
+
+      // Separate Y tween for sprite (bottom-anchored)
+      this.scene.tweens.add({
+        targets: entry.sprite,
+        y: targetPos.y,
+        duration: duration,
+        ease: 'Sine.easeInOut',
+        onUpdate: function() {
+          entry.sprite.setDepth(entry.sprite.y + 100);
+          entry.label.setDepth(entry.sprite.y + 101);
+        },
+      });
+
+      // Label Y follows sprite top
+      this.scene.tweens.add({
+        targets: entry.label,
+        y: targetPos.y - entry.sprite.displayHeight - 2,
+        duration: duration,
+        ease: 'Sine.easeInOut',
+      });
+
+      entry.lastX = targetPos.x;
+      entry.lastY = targetPos.y;
     }
-  }
 
-  /* Dead */
-  if (!agent.alive && sprite.gfx.alpha > 0.3) {
-    if (sprite._breatheTween) { sprite._breatheTween.stop(); sprite._breatheTween = null; }
-    scene.tweens.add({ targets: [sprite.gfx, sprite.nameText], alpha: 0.18, y: '-=22', duration: 2400, ease: 'Sine.easeInOut' });
-  }
-
-  /* Selection ring */
-  if (TOWN.state.selectedAgent === name) {
-    TOWN.showSelectionRing(scene, sprite);
-  } else if (sprite.selRing.alpha > 0) {
-    scene.tweens.killTweensOf(sprite.selRing);
-    sprite.selRing.setAlpha(0);
-  }
-};
-
-/* ── Selection ring ─────────────────────────────────────────────── */
-TOWN.showSelectionRing = function(scene, sprite) {
-  if (sprite.selRing.alpha > 0) return;
-  sprite.selRing.clear();
-  sprite.selRing.lineStyle(3, 0xFFD93D, 0.8);
-  sprite.selRing.strokeCircle(0, 0, sprite.radius + 10);
-  scene.tweens.add({
-    targets: sprite.selRing,
-    alpha: { from: 0.3, to: 0.85 },
-    duration: 800, yoyo: true, repeat: -1,
-    ease: 'Sine.easeInOut',
-  });
-};
-
-/* ── Talk bounce ────────────────────────────────────────────────── */
-TOWN.startTalkBounce = function(scene, agentName) {
-  var sprite = TOWN.state.agentSprites[agentName];
-  if (!sprite) return;
-  sprite.talking = true;
-};
-
-TOWN.stopTalkBounce = function(scene, agentName) {
-  var sprite = TOWN.state.agentSprites[agentName];
-  if (!sprite) return;
-  sprite.talking = false;
-};
-
-/* ── Relationship overlay ────────────────────────────────────────── */
-TOWN._REL_COLORS = {
-  married:      0xFFD700,
-  romantic:     0xFF69B4,
-  close_friend: 0x6BCB77,
-  friend:       0x87CEEB,
-  acquaintance: 0xBBBBBB,
-};
-
-TOWN.drawRelationshipOverlay = function(scene) {
-  var gfx = TOWN._relOverlayGfx;
-  if (!gfx) return;
-  gfx.clear();
-  if (!TOWN.state.showRelOverlay) return;
-  var agents  = TOWN.state.agents;
-  var sprites = TOWN.state.agentSprites;
-  var drawn   = {};
-  for (var nameA in agents) {
-    var a = agents[nameA];
-    if (!a.alive || !a.relationships || !a.relationships.length) continue;
-    var spA = sprites[nameA];
-    if (!spA) continue;
-    for (var r = 0; r < a.relationships.length; r++) {
-      var rel = a.relationships[r];
-      var nameB = rel.name;
-      if (!nameB) continue;
-      var pairKey = nameA < nameB ? nameA + ':' + nameB : nameB + ':' + nameA;
-      if (drawn[pairKey]) continue;
-      drawn[pairKey] = true;
-      var spB = sprites[nameB];
-      if (!spB || !agents[nameB] || !agents[nameB].alive) continue;
-      var lc = TOWN._REL_COLORS[rel.state] || 0xAAAAAA;
-      var la = rel.state === 'acquaintance' ? 0.2 : 0.45;
-      var lw = (rel.state === 'married' || rel.state === 'romantic') ? 2.5 : 1.5;
-      gfx.lineStyle(lw, lc, la);
-      gfx.beginPath();
-      gfx.moveTo(spA.x, spA.y); gfx.lineTo(spB.x, spB.y);
-      gfx.strokePath();
+    // Update sidebar if this agent is selected
+    if (GameState.selectedAgent === agentData.name) {
+      Sidebar.showAgent(agentData);
     }
-  }
-};
+  },
 
-/* ── Highlight flash ─────────────────────────────────────────────── */
-TOWN.highlightAgent = function(scene, name) {
-  var sp = TOWN.state.agentSprites[name];
-  if (!sp) return;
-  scene.tweens.add({ targets: sp.gfx, alpha: 0.4, duration: 80, yoyo: true });
+  _removeAgent: function(name) {
+    var entry = this.agents[name];
+    if (!entry) return;
+    if (entry.tween) entry.tween.stop();
+    entry.sprite.destroy();
+    entry.label.destroy();
+    delete this.agents[name];
+  },
+
+  /**
+   * Compute screen position for an agent.
+   * Uses world_pos if available, otherwise looks up place grid position.
+   */
+  _agentScreenPos: function(agentData) {
+    // If backend provides world_pos (pixel coords from navgrid)
+    if (agentData.world_pos) {
+      var wp = agentData.world_pos;
+      return Iso.worldToScreen(wp[0] || wp.x || 0, wp[1] || wp.y || 0);
+    }
+
+    // Fall back to place lookup
+    var places = GameState.places || [];
+    for (var i = 0; i < places.length; i++) {
+      var p = places[i];
+      if (p.name === agentData.location) {
+        var gx = p.grid_x || 0;
+        var gy = p.grid_y || 0;
+        // Add small offset per agent to avoid stacking
+        var hash = 0;
+        for (var c = 0; c < agentData.name.length; c++) {
+          hash = ((hash << 5) - hash + agentData.name.charCodeAt(c)) | 0;
+        }
+        var offsetX = ((hash & 0xff) / 255 - 0.5) * TILE_W * 0.6;
+        var offsetY = (((hash >> 8) & 0xff) / 255 - 0.5) * TILE_H * 0.4;
+        var pos = Iso.toScreen(gx, gy);
+        return { x: pos.x + offsetX, y: pos.y + offsetY };
+      }
+    }
+
+    // Default: center of map
+    return Iso.toScreen(MAP_COLS / 2, MAP_ROWS / 2);
+  },
+
+  destroy: function() {
+    for (var name in this.agents) {
+      var entry = this.agents[name];
+      if (entry.tween) entry.tween.stop();
+      entry.sprite.destroy();
+      entry.label.destroy();
+    }
+    this.agents = {};
+    this.scene = null;
+  },
 };

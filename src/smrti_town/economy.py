@@ -1,283 +1,324 @@
-"""EconomyManager: wallets, transactions, prices, workplace assignment."""
+"""EconomyManager — treasury, wallets, taxation, commerce, and building costs."""
 
 from __future__ import annotations
 
-import logging
-from dataclasses import dataclass, field
+import math
 
-logger = logging.getLogger("smrti_town.economy")
+from smrti_town.config import (
+    BUILDING_CATALOG,
+    COUNCIL_SALARY,
+    ENTREPRENEURSHIP_COMMERCE_SKILL,
+    ENTREPRENEURSHIP_SAVINGS_THRESHOLD,
+    FOOD_COST,
+    GOODS_COST,
+    HOURS_PER_DAY,
+    HOURS_PER_YEAR,
+    INCOME_ELDER,
+    INCOME_EMPLOYED,
+    INCOME_ODD_JOBS,
+    RENT_COST,
+    STARTING_TREASURY,
+    STARTING_WALLET,
+    TAX_RATES_DEFAULT,
+    BuildingDef,
+)
 
-# ── Base costs ──────────────────────────────────────────────────────
-FOOD_COST = 10
-RENT_COST = 5
-GOODS_COST = 15
-INCOME_EMPLOYED = 8     # per tick-hour
-INCOME_ODD_JOBS = 2     # per tick-hour (unemployed)
-INCOME_ELDER = 3        # per tick-hour (retired)
-STARTING_BALANCE = 100
-
-# Place types that qualify for economic actions
-FOOD_PLACE_TYPES = frozenset({"market", "farm", "public"})
-SHOP_PLACE_TYPES = frozenset({"shop", "market", "public"})
-WORK_PLACE_TYPES = frozenset({"public", "other", "shop", "market", "farm"})
-
-# ── Price dynamics ──────────────────────────────────────────────────
-# More shops of same type -> modifier decreases; many buyers -> increases.
-COMPETITION_DECAY = 0.1      # per additional shop of same type
-DEMAND_GROWTH = 0.05         # per buyer in last cycle
-PRICE_MODIFIER_MIN = 0.5
-PRICE_MODIFIER_MAX = 2.0
-
-
-def _clamp_price(value: float) -> float:
-    return max(PRICE_MODIFIER_MIN, min(PRICE_MODIFIER_MAX, value))
-
-
-@dataclass
-class Transaction:
-    """A single economic transaction."""
-
-    tick: int
-    agent: str
-    action: str        # "work", "buy_food", "buy_goods", "pay_rent", "study"
-    amount: int        # positive = earned, negative = spent
-    place: str = ""
-    balance_after: int = 0
-
-    def to_dict(self) -> dict:
-        return {
-            "tick": self.tick,
-            "agent": self.agent,
-            "action": self.action,
-            "amount": self.amount,
-            "place": self.place,
-            "balance_after": self.balance_after,
-        }
+# Citizen purchase costs by item type.
+_ITEM_COSTS: dict[str, int] = {
+    "food": FOOD_COST,
+    "rent": RENT_COST,
+    "goods": GOODS_COST,
+}
 
 
 class EconomyManager:
-    """Manages town economy: wallets, transactions, prices."""
+    """Central economy: treasury, citizen wallets, taxation, and commerce."""
 
-    def __init__(self) -> None:
-        self.wallets: dict[str, int] = {}           # agent_name -> balance
-        self.workplaces: dict[str, str] = {}         # agent_name -> place_name
-        self.incomes: dict[str, float] = {}          # agent_name -> income_per_tick_hour
-        self.price_modifiers: dict[str, float] = {}  # place_name -> modifier
-        self.transaction_log: list[Transaction] = []
-        self._buyer_counts: dict[str, int] = {}      # place_name -> buyers this cycle
-        self._tick: int = 0
-
-    # ── Initialisation ──────────────────────────────────────────────
-
-    def init_agent(
+    def __init__(
         self,
-        agent_name: str,
-        starting_balance: int = STARTING_BALANCE,
+        treasury: int = STARTING_TREASURY,
+        tax_rates: dict[str, float] | None = None,
     ) -> None:
-        """Register an agent with a starting wallet balance."""
-        if agent_name not in self.wallets:
-            self.wallets[agent_name] = starting_balance
+        self.treasury: int = treasury
+        self.tax_rates: dict[str, float] = dict(tax_rates or TAX_RATES_DEFAULT)
+        self.wallets: dict[str, int] = {}
+        self.maintenance_ledger: dict[str, int] = {}
+        # Running totals for the current reporting period.
+        self._tax_collected: int = 0
+        self._maintenance_paid: int = 0
+        self._salaries_paid: int = 0
+        self._commerce_revenue: int = 0
 
-    def remove_agent(self, agent_name: str) -> None:
-        """Unregister an agent (death / departure)."""
-        self.wallets.pop(agent_name, None)
-        self.workplaces.pop(agent_name, None)
-        self.incomes.pop(agent_name, None)
+    # ── citizen registration ────────────────────────────────────────────
 
-    # ── Workplace ───────────────────────────────────────────────────
+    def register_citizen(self, name: str, starting_wallet: int = STARTING_WALLET) -> None:
+        if name not in self.wallets:
+            self.wallets[name] = starting_wallet
 
-    def assign_workplace(
+    def remove_citizen(self, name: str) -> None:
+        self.wallets.pop(name, None)
+
+    # ── building registration ───────────────────────────────────────────
+
+    def register_building(self, place_name: str, building_def: BuildingDef) -> None:
+        self.maintenance_ledger[place_name] = building_def.maintenance
+
+    def remove_building(self, place_name: str) -> None:
+        self.maintenance_ledger.pop(place_name, None)
+
+    # ── taxation ────────────────────────────────────────────────────────
+
+    def collect_taxes(
         self,
-        agent_name: str,
-        place_name: str,
-        income: float = INCOME_EMPLOYED,
-    ) -> None:
-        """Assign an agent to a workplace with a given income rate."""
-        self.workplaces[agent_name] = place_name
-        self.incomes[agent_name] = income
-
-    def unassign_workplace(self, agent_name: str) -> None:
-        """Remove workplace assignment (layoff / retirement)."""
-        self.workplaces.pop(agent_name, None)
-        self.incomes.pop(agent_name, None)
-
-    def get_income_rate(self, agent_name: str, life_stage: str) -> float:
-        """Return the effective income rate for an agent.
-
-        Children earn nothing.  Elders earn INCOME_ELDER.
-        Employed adults earn their assigned rate; unemployed adults
-        earn INCOME_ODD_JOBS.
-        """
-        if life_stage in ("infant", "child"):
-            return 0.0
-        if life_stage == "elder":
-            return INCOME_ELDER
-        # Adult
-        if agent_name in self.incomes:
-            return self.incomes[agent_name]
-        return INCOME_ODD_JOBS
-
-    # ── Tick processing ─────────────────────────────────────────────
-
-    def set_tick(self, tick: int) -> None:
-        self._tick = tick
-
-    def process_work_tick(
-        self,
-        agent_name: str,
+        citizens: list,
+        buildings: list,
         delta_hours: float,
-        life_stage: str = "adult",
     ) -> int:
-        """Credit an agent for hours worked.  Returns amount earned."""
-        rate = self.get_income_rate(agent_name, life_stage)
-        if rate <= 0:
-            return 0
-        earned = int(rate * delta_hours)
-        if earned <= 0:
-            return 0
-        self.wallets[agent_name] = self.wallets.get(agent_name, 0) + earned
-        self._log(agent_name, "work", earned, self.workplaces.get(agent_name, ""))
+        """Collect property, business, and income taxes proportional to *delta_hours*.
+
+        *citizens* — objects with ``.name``, ``.wallet``, ``.home``, ``.workplace``.
+        *buildings* — Place objects with ``.building_key``.
+        Returns total taxes collected this tick.
+        """
+        year_fraction = delta_hours / HOURS_PER_YEAR
+        total = 0
+
+        # Property tax: per housing building, scaled to year fraction.
+        prop_rate = self.tax_rates.get("property", 0.0)
+        for b in buildings:
+            bdef = BUILDING_CATALOG.get(getattr(b, "building_key", None) or "", None)
+            if bdef and bdef.provides_housing:
+                tax = int(bdef.cost * prop_rate * year_fraction)
+                total += tax
+
+        # Business tax: per commercial/industrial building with revenue.
+        biz_rate = self.tax_rates.get("business", 0.0)
+        for b in buildings:
+            bdef = BUILDING_CATALOG.get(getattr(b, "building_key", None) or "", None)
+            if bdef and bdef.revenue_per_hour > 0:
+                annual_revenue = bdef.revenue_per_hour * HOURS_PER_YEAR
+                tax = int(annual_revenue * biz_rate * year_fraction)
+                total += tax
+
+        # Income tax: percentage of each citizen's wallet growth is handled
+        # at earn-time via citizen_earn.  Here we collect a flat per-employed
+        # citizen contribution so the treasury grows proportionally.
+        income_rate = self.tax_rates.get("income", 0.0)
+        for c in citizens:
+            if not getattr(c, "alive", True):
+                continue
+            stage = getattr(c, "life_stage", "adult")
+            if stage not in ("adult", "elder"):
+                continue
+            has_job = getattr(c, "workplace", None) is not None
+            base = INCOME_EMPLOYED if has_job else INCOME_ODD_JOBS
+            if stage == "elder":
+                base = INCOME_ELDER
+            tax = int(base * delta_hours * income_rate)
+            name = getattr(c, "name", "")
+            if name in self.wallets:
+                deducted = min(tax, self.wallets[name])
+                self.wallets[name] -= deducted
+                total += deducted
+
+        self.treasury += total
+        self._tax_collected += total
+        return total
+
+    # ── maintenance ─────────────────────────────────────────────────────
+
+    def pay_maintenance(self, delta_hours: float) -> int:
+        """Deduct building maintenance from treasury.  Returns total paid."""
+        year_fraction = delta_hours / HOURS_PER_YEAR
+        total = 0
+        for _place, annual_cost in self.maintenance_ledger.items():
+            cost = int(annual_cost * year_fraction)
+            total += cost
+        self.treasury -= total
+        self._maintenance_paid += total
+        return total
+
+    # ── salaries ────────────────────────────────────────────────────────
+
+    def pay_salaries(self, council_members: list, delta_hours: float) -> int:
+        """Pay council member salaries from treasury.
+
+        *council_members* — objects with ``.name`` attribute.
+        Returns total paid.
+        """
+        day_fraction = delta_hours / HOURS_PER_DAY
+        total = 0
+        for member in council_members:
+            salary = int(COUNCIL_SALARY * day_fraction)
+            name = getattr(member, "name", "")
+            if name in self.wallets:
+                self.wallets[name] += salary
+            total += salary
+        self.treasury -= total
+        self._salaries_paid += total
+        return total
+
+    # ── commerce ────────────────────────────────────────────────────────
+
+    def process_commerce(
+        self,
+        buildings: list,
+        citizens: list,
+        delta_hours: float,
+    ) -> int:
+        """Businesses generate revenue.  A portion goes to citizen workers,
+        the rest flows to treasury via business tax (already counted in
+        collect_taxes).  Returns total gross revenue generated.
+        """
+        total = 0
+        pop = max(1, len([c for c in citizens if getattr(c, "alive", True)]))
+        # Revenue scales with sqrt(population) — diminishing returns.
+        pop_factor = math.sqrt(pop) / math.sqrt(10)
+        pop_factor = max(0.5, min(pop_factor, 3.0))
+
+        for b in buildings:
+            bdef = BUILDING_CATALOG.get(getattr(b, "building_key", None) or "", None)
+            if not bdef or bdef.revenue_per_hour <= 0:
+                continue
+            revenue = int(bdef.revenue_per_hour * delta_hours * pop_factor)
+            total += revenue
+
+        # 60% goes to treasury as business income, 40% distributed to workers.
+        treasury_share = int(total * 0.6)
+        worker_share = total - treasury_share
+        self.treasury += treasury_share
+        self._commerce_revenue += total
+
+        # Distribute worker share among employed citizens.
+        employed = [
+            c for c in citizens
+            if getattr(c, "alive", True)
+            and getattr(c, "workplace", None) is not None
+        ]
+        if employed and worker_share > 0:
+            per_worker = max(1, worker_share // len(employed))
+            for c in employed:
+                name = getattr(c, "name", "")
+                if name in self.wallets:
+                    self.wallets[name] += per_worker
+
+        return total
+
+    # ── citizen income ──────────────────────────────────────────────────
+
+    def citizen_earn(
+        self,
+        name: str,
+        delta_hours: float,
+        employed: bool = True,
+        skill_level: float = 0.0,
+    ) -> int:
+        """Add income to citizen wallet.  Skill level gives a bonus up to +50%.
+        Returns amount earned (before tax — tax is collected separately).
+        """
+        base = INCOME_EMPLOYED if employed else INCOME_ODD_JOBS
+        bonus = 1.0 + min(skill_level, 1.0) * 0.5
+        earned = int(base * delta_hours * bonus)
+        if name in self.wallets:
+            self.wallets[name] += earned
         return earned
 
-    # ── Purchases ───────────────────────────────────────────────────
+    # ── citizen spending ────────────────────────────────────────────────
 
-    def buy_food(
-        self,
-        agent_name: str,
-        place_name: str,
-        base_cost: int = FOOD_COST,
-    ) -> bool:
-        """Attempt to buy food at *place_name*.  Returns True on success."""
-        cost = self._effective_cost(place_name, base_cost)
-        if not self.can_afford(agent_name, cost):
-            return False
-        self.wallets[agent_name] -= cost
-        self._buyer_counts[place_name] = self._buyer_counts.get(place_name, 0) + 1
-        self._log(agent_name, "buy_food", -cost, place_name)
-        return True
-
-    def buy_goods(
-        self,
-        agent_name: str,
-        place_name: str,
-        base_cost: int = GOODS_COST,
-    ) -> bool:
-        """Attempt to buy goods at *place_name*.  Returns True on success."""
-        cost = self._effective_cost(place_name, base_cost)
-        if not self.can_afford(agent_name, cost):
-            return False
-        self.wallets[agent_name] -= cost
-        self._buyer_counts[place_name] = self._buyer_counts.get(place_name, 0) + 1
-        self._log(agent_name, "buy_goods", -cost, place_name)
-        return True
-
-    def pay_study(
-        self,
-        agent_name: str,
-        place_name: str,
-        tuition: int = 0,
-    ) -> bool:
-        """Pay tuition (0 for public school).  Returns True on success."""
-        if tuition <= 0:
-            return True
-        if not self.can_afford(agent_name, tuition):
-            return False
-        self.wallets[agent_name] -= tuition
-        self._log(agent_name, "study", -tuition, place_name)
-        return True
-
-    # ── Daily expenses ──────────────────────────────────────────────
-
-    def pay_daily_expenses(
-        self,
-        agent_name: str,
-        has_home: bool = True,
-    ) -> bool:
-        """Deduct daily rent/living costs.  Returns True if fully paid.
-
-        If the agent cannot afford the full cost, they pay what they can
-        (wallet goes to 0) and the method returns False.
-        """
-        cost = RENT_COST if has_home else 0
+    def citizen_buy(self, name: str, item_type: str) -> bool:
+        """Deduct cost from citizen wallet.  Returns True if affordable."""
+        cost = _ITEM_COSTS.get(item_type, 0)
         if cost <= 0:
             return True
-        balance = self.wallets.get(agent_name, 0)
-        paid = min(cost, balance)
-        self.wallets[agent_name] = balance - paid
-        if paid > 0:
-            self._log(agent_name, "pay_rent", -paid, "")
-        return paid >= cost
+        if name not in self.wallets:
+            return False
+        if self.wallets[name] < cost:
+            return False
+        self.wallets[name] -= cost
+        # Purchase revenue goes partly back to treasury (simulating merchant tax).
+        self.treasury += int(cost * 0.1)
+        return True
 
-    # ── Price dynamics ──────────────────────────────────────────────
+    # ── building affordability ──────────────────────────────────────────
 
-    def update_prices(self, building_counts: dict[str, int]) -> None:
-        """Recalculate price modifiers based on competition and demand.
+    def can_afford_building(self, building_key: str) -> bool:
+        bdef = BUILDING_CATALOG.get(building_key)
+        if not bdef:
+            return False
+        return self.treasury >= bdef.cost
 
-        *building_counts* maps a place_type (or place_name) to the number
-        of buildings of that type in the town.
-        """
-        for place_name, mod in list(self.price_modifiers.items()):
-            # Competition: more buildings of same type lowers prices
-            count = building_counts.get(place_name, 1)
-            competition_factor = 1.0 - COMPETITION_DECAY * max(0, count - 1)
+    def deduct_building_cost(self, building_key: str) -> bool:
+        bdef = BUILDING_CATALOG.get(building_key)
+        if not bdef:
+            return False
+        if self.treasury < bdef.cost:
+            return False
+        self.treasury -= bdef.cost
+        return True
 
-            # Demand: more buyers raises prices
-            buyers = self._buyer_counts.get(place_name, 0)
-            demand_factor = 1.0 + DEMAND_GROWTH * buyers
+    # ── checks ──────────────────────────────────────────────────────────
 
-            new_mod = _clamp_price(competition_factor * demand_factor)
-            self.price_modifiers[place_name] = new_mod
+    def check_bankruptcy(self) -> bool:
+        """Returns True if treasury is at or below zero."""
+        return self.treasury <= 0
 
-        # Reset buyer counts for next cycle
-        self._buyer_counts.clear()
+    def check_entrepreneurship(
+        self,
+        citizen_name: str,
+        citizen_skills: dict[str, float],
+    ) -> bool:
+        """Returns True if citizen has enough savings and commerce skill to
+        open a business."""
+        wallet = self.wallets.get(citizen_name, 0)
+        commerce = citizen_skills.get("commerce", 0.0)
+        return (
+            wallet >= ENTREPRENEURSHIP_SAVINGS_THRESHOLD
+            and commerce >= ENTREPRENEURSHIP_COMMERCE_SKILL
+        )
 
-    def set_price_modifier(self, place_name: str, modifier: float) -> None:
-        self.price_modifiers[place_name] = _clamp_price(modifier)
+    # ── reporting ───────────────────────────────────────────────────────
 
-    # ── Queries ─────────────────────────────────────────────────────
+    def reset_period_stats(self) -> dict[str, int]:
+        """Reset and return period stats."""
+        stats = {
+            "tax_collected": self._tax_collected,
+            "maintenance_paid": self._maintenance_paid,
+            "salaries_paid": self._salaries_paid,
+            "commerce_revenue": self._commerce_revenue,
+        }
+        self._tax_collected = 0
+        self._maintenance_paid = 0
+        self._salaries_paid = 0
+        self._commerce_revenue = 0
+        return stats
 
-    def get_wallet(self, agent_name: str) -> int:
-        return self.wallets.get(agent_name, 0)
-
-    def can_afford(self, agent_name: str, cost: int) -> bool:
-        return self.wallets.get(agent_name, 0) >= cost
-
-    def get_workplace(self, agent_name: str) -> str | None:
-        return self.workplaces.get(agent_name)
-
-    def recent_transactions(self, limit: int = 50) -> list[dict]:
-        """Return the most recent transactions as dicts."""
-        return [t.to_dict() for t in self.transaction_log[-limit:]]
-
-    # ── Serialisation ───────────────────────────────────────────────
+    # ── serialization ───────────────────────────────────────────────────
 
     def to_dict(self) -> dict:
         return {
+            "treasury": self.treasury,
+            "tax_rates": dict(self.tax_rates),
             "wallets": dict(self.wallets),
-            "workplaces": dict(self.workplaces),
-            "incomes": {k: round(v, 2) for k, v in self.incomes.items()},
-            "price_modifiers": {
-                k: round(v, 2) for k, v in self.price_modifiers.items()
+            "maintenance_ledger": dict(self.maintenance_ledger),
+            "stats": {
+                "tax_collected": self._tax_collected,
+                "maintenance_paid": self._maintenance_paid,
+                "salaries_paid": self._salaries_paid,
+                "commerce_revenue": self._commerce_revenue,
             },
-            "recent_transactions": self.recent_transactions(20),
         }
 
-    # ── Internals ───────────────────────────────────────────────────
-
-    def _effective_cost(self, place_name: str, base_cost: int) -> int:
-        mod = self.price_modifiers.get(place_name, 1.0)
-        return max(1, int(base_cost * mod))
-
-    def _log(self, agent: str, action: str, amount: int, place: str) -> None:
-        tx = Transaction(
-            tick=self._tick,
-            agent=agent,
-            action=action,
-            amount=amount,
-            place=place,
-            balance_after=self.wallets.get(agent, 0),
+    @classmethod
+    def from_dict(cls, data: dict) -> EconomyManager:
+        em = cls(
+            treasury=data.get("treasury", STARTING_TREASURY),
+            tax_rates=data.get("tax_rates"),
         )
-        self.transaction_log.append(tx)
-        # Cap log size to prevent unbounded growth
-        if len(self.transaction_log) > 5000:
-            self.transaction_log = self.transaction_log[-2500:]
+        em.wallets = dict(data.get("wallets", {}))
+        em.maintenance_ledger = dict(data.get("maintenance_ledger", {}))
+        stats = data.get("stats", {})
+        em._tax_collected = stats.get("tax_collected", 0)
+        em._maintenance_paid = stats.get("maintenance_paid", 0)
+        em._salaries_paid = stats.get("salaries_paid", 0)
+        em._commerce_revenue = stats.get("commerce_revenue", 0)
+        return em

@@ -1,137 +1,189 @@
-"""AgentDrives: hunger, energy, social, curiosity, duty, romance."""
+"""CitizenNeeds — 9-level Maslow hierarchy for citizen drives."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 from smrti_town.config import (
-    CURIOSITY_RATE,
-    CURIOSITY_RESET_AMOUNT,
-    CURIOSITY_THRESHOLD,
-    DRIVE_MAX,
-    DRIVE_MIN,
-    DUTY_RATE,
-    DUTY_THRESHOLD,
-    ENERGY_DRAIN_RATE,
-    ENERGY_LOW_THRESHOLD,
+    ACTUALIZATION_RATE,
+    ACTUALIZATION_THRESHOLD,
+    CULTURE_RATE,
+    CULTURE_RESET_AMOUNT,
+    CULTURE_THRESHOLD,
+    EDUCATION_RATE,
+    EDUCATION_RESET_AMOUNT,
+    EDUCATION_THRESHOLD,
+    HEALTH_RATE,
+    HEALTH_THRESHOLD,
     HUNGER_RATE,
     HUNGER_RESET,
     HUNGER_THRESHOLD,
-    ROMANCE_RATE,
-    ROMANCE_RESET_AMOUNT,
-    ROMANCE_THRESHOLD,
+    LIFE_STAGES,
+    NEED_MAX,
+    NEED_MIN,
+    PURPOSE_RATE,
+    PURPOSE_THRESHOLD,
+    SAFETY_RATE,
+    SAFETY_THRESHOLD,
+    SHELTER_RATE,
+    SHELTER_THRESHOLD,
     SOCIAL_RATE,
     SOCIAL_RESET_AMOUNT,
     SOCIAL_THRESHOLD,
 )
 
+# Maslow priority order (index 0 = highest priority).
+MASLOW_ORDER: list[str] = [
+    "hunger",
+    "shelter",
+    "health",
+    "safety",
+    "social",
+    "education",
+    "purpose",
+    "culture",
+    "actualization",
+]
 
-def _clamp(value: int, lo: int = DRIVE_MIN, hi: int = DRIVE_MAX) -> int:
-    return max(lo, min(hi, value))
+_RATES: dict[str, float] = {
+    "hunger": HUNGER_RATE,
+    "shelter": SHELTER_RATE,
+    "health": HEALTH_RATE,
+    "safety": SAFETY_RATE,
+    "social": SOCIAL_RATE,
+    "education": EDUCATION_RATE,
+    "purpose": PURPOSE_RATE,
+    "culture": CULTURE_RATE,
+    "actualization": ACTUALIZATION_RATE,
+}
+
+_THRESHOLDS: dict[str, float] = {
+    "hunger": HUNGER_THRESHOLD,
+    "shelter": SHELTER_THRESHOLD,
+    "health": HEALTH_THRESHOLD,
+    "safety": SAFETY_THRESHOLD,
+    "social": SOCIAL_THRESHOLD,
+    "education": EDUCATION_THRESHOLD,
+    "purpose": PURPOSE_THRESHOLD,
+    "culture": CULTURE_THRESHOLD,
+    "actualization": ACTUALIZATION_THRESHOLD,
+}
+
+_RESET_AMOUNTS: dict[str, float] = {
+    "hunger": HUNGER_RESET,
+    "social": SOCIAL_RESET_AMOUNT,
+    "education": EDUCATION_RESET_AMOUNT,
+    "culture": CULTURE_RESET_AMOUNT,
+}
 
 
-@dataclass
-class AgentDrives:
-    hunger: int = 0
-    energy: int = 100
-    social: int = 0
-    curiosity: int = 0
-    duty: int = 0
-    romance: int = 0
+def _clamp(v: float) -> float:
+    return max(NEED_MIN, min(NEED_MAX, v))
 
-    # Fractional accumulators — drives are integers but small deltas
-    # (e.g. 0.25h scene ticks) produce sub-1.0 increments. We accumulate
-    # the fractional remainder here and add whole units once they reach 1.
-    _frac_hunger: float = 0.0
-    _frac_energy: float = 0.0
-    _frac_social: float = 0.0
-    _frac_curiosity: float = 0.0
-    _frac_duty: float = 0.0
-    _frac_romance: float = 0.0
 
-    def _acc(self, frac_attr: str, drive_attr: str, raw: float, sign: int = 1) -> None:
-        """Accumulate a fractional drive change, applying whole units."""
-        frac = getattr(self, frac_attr) + raw
-        whole = int(frac)
-        setattr(self, frac_attr, frac - whole)
-        if whole != 0:
-            setattr(self, drive_attr, _clamp(getattr(self, drive_attr) + sign * whole))
+class CitizenNeeds:
+    """Nine Maslow needs, each 0-100.  Higher value = more deprived."""
 
-    def accumulate(
+    __slots__ = tuple(MASLOW_ORDER)
+
+    def __init__(self) -> None:
+        for name in MASLOW_ORDER:
+            setattr(self, name, 0.0)
+
+    # ── tick ──────────────────────────────────────────────────────────
+    def tick(
         self,
         delta_hours: float,
-        *,
-        is_work_hours: bool = False,
-        is_adult: bool = True,
-        energy_decay_mult: float = 1.0,
-        active_drives: list[str] | None = None,
+        life_stage: str,
+        has_home: bool,
+        has_job: bool,
+        crime_rate: float = 0.0,
     ) -> None:
-        """Time-weighted drive accumulation."""
-        allowed = set(active_drives) if active_drives else {
-            "hunger", "energy", "social", "curiosity", "duty", "romance",
-        }
+        """Advance all needs by *delta_hours*.
 
-        if "hunger" in allowed:
-            self._acc("_frac_hunger", "hunger", HUNGER_RATE * delta_hours)
-        if "energy" in allowed:
-            self._acc("_frac_energy", "energy", ENERGY_DRAIN_RATE * delta_hours * energy_decay_mult, sign=-1)
-        if "social" in allowed:
-            self._acc("_frac_social", "social", SOCIAL_RATE * delta_hours)
-        if "curiosity" in allowed:
-            self._acc("_frac_curiosity", "curiosity", CURIOSITY_RATE * delta_hours)
-        if "duty" in allowed and is_work_hours and is_adult:
-            self._acc("_frac_duty", "duty", DUTY_RATE * delta_hours)
-        if "romance" in allowed and is_adult:
-            self._acc("_frac_romance", "romance", ROMANCE_RATE * delta_hours)
+        Only needs listed in the life-stage's ``needs`` array are active;
+        others stay at their current value (never decay for irrelevant stages).
+        """
+        stage_info = LIFE_STAGES.get(life_stage, LIFE_STAGES["adult"])
+        active_needs: set[str] = set(stage_info["needs"])
+        energy_mult: float = stage_info.get("energy_decay_mult", 1.0)
 
-    def reset_hunger(self) -> None:
-        self.hunger = HUNGER_RESET
+        for name in MASLOW_ORDER:
+            if name not in active_needs:
+                continue
 
-    def reset_energy(self) -> None:
-        self.energy = _clamp(100)
+            rate = _RATES[name]
 
-    def reduce_social(self) -> None:
-        self.social = _clamp(self.social - SOCIAL_RESET_AMOUNT)
+            # Special-case adjustments
+            if name == "shelter":
+                # Shelter need only rises when homeless.
+                if has_home:
+                    self.shelter = _clamp(self.shelter - 2.0 * delta_hours)
+                    continue
+                rate = 2.0  # Homeless: shelter need rises fast.
+            elif name == "safety":
+                rate = rate * (1.0 + crime_rate * 4.0)
+            elif name == "purpose":
+                if not has_job:
+                    rate *= 1.5  # Unemployed adults feel purposelessness faster.
+            elif name == "hunger":
+                rate *= energy_mult
 
-    def reduce_curiosity(self) -> None:
-        self.curiosity = _clamp(self.curiosity - CURIOSITY_RESET_AMOUNT)
+            current = getattr(self, name)
+            setattr(self, name, _clamp(current + rate * delta_hours))
 
-    def reduce_romance(self) -> None:
-        self.romance = _clamp(self.romance - ROMANCE_RESET_AMOUNT)
+    # ── queries ───────────────────────────────────────────────────────
+    def highest_unmet_need(self, life_stage: str = "adult") -> str | None:
+        """Return the highest-priority need above its threshold, respecting
+        Maslow ordering: lower-priority needs only matter if all higher-priority
+        needs are below threshold.
 
-    def reset_duty(self) -> None:
-        self.duty = 0
+        Returns ``None`` when every active need is satisfied.
+        """
+        stage_info = LIFE_STAGES.get(life_stage, LIFE_STAGES["adult"])
+        active_needs: set[str] = set(stage_info["needs"])
 
-    def highest_urgent_drive(self, active_drives: list[str] | None = None) -> str | None:
-        """Return the name of the highest-priority drive above its threshold, or None."""
-        allowed = set(active_drives) if active_drives else {
-            "hunger", "energy", "social", "curiosity", "duty", "romance",
-        }
-        candidates: list[tuple[int, str]] = []
-        if "energy" in allowed and self.energy <= ENERGY_LOW_THRESHOLD:
-            candidates.append((100 - self.energy, "energy"))
-        if "hunger" in allowed and self.hunger >= HUNGER_THRESHOLD:
-            candidates.append((self.hunger, "hunger"))
-        if "duty" in allowed and self.duty >= DUTY_THRESHOLD:
-            candidates.append((self.duty, "duty"))
-        if "social" in allowed and self.social >= SOCIAL_THRESHOLD:
-            candidates.append((self.social, "social"))
-        if "romance" in allowed and self.romance >= ROMANCE_THRESHOLD:
-            candidates.append((self.romance, "romance"))
-        if "curiosity" in allowed and self.curiosity >= CURIOSITY_THRESHOLD:
-            candidates.append((self.curiosity, "curiosity"))
+        for name in MASLOW_ORDER:
+            if name not in active_needs:
+                continue
+            if getattr(self, name) >= _THRESHOLDS[name]:
+                return name
+        return None
 
-        if not candidates:
-            return None
-        candidates.sort(key=lambda x: x[0], reverse=True)
-        return candidates[0][1]
+    def need_value(self, name: str) -> float:
+        return getattr(self, name, 0.0)
 
-    def to_dict(self) -> dict:
-        return {
-            "hunger": self.hunger,
-            "energy": self.energy,
-            "social": self.social,
-            "curiosity": self.curiosity,
-            "duty": self.duty,
-            "romance": self.romance,
-        }
+    def need_urgency(self, name: str) -> float:
+        """0.0 = fully satisfied, 1.0 = maximally deprived."""
+        return getattr(self, name, 0.0) / NEED_MAX
+
+    # ── mutations ─────────────────────────────────────────────────────
+    def satisfy(self, need_name: str, amount: float | None = None) -> None:
+        """Reduce *need_name* by *amount*, or to its reset value if *amount*
+        is ``None`` and a reset constant exists."""
+        if amount is not None:
+            current = getattr(self, need_name, 0.0)
+            setattr(self, need_name, _clamp(current - amount))
+        elif need_name in _RESET_AMOUNTS:
+            reset = _RESET_AMOUNTS[need_name]
+            if need_name == "hunger":
+                setattr(self, need_name, _clamp(reset))
+            else:
+                current = getattr(self, need_name, 0.0)
+                setattr(self, need_name, _clamp(current - reset))
+        else:
+            setattr(self, need_name, NEED_MIN)
+
+    # ── serialization ─────────────────────────────────────────────────
+    def to_dict(self) -> dict[str, float]:
+        return {name: round(getattr(self, name), 2) for name in MASLOW_ORDER}
+
+    @classmethod
+    def from_dict(cls, data: dict[str, float]) -> CitizenNeeds:
+        n = cls()
+        for name in MASLOW_ORDER:
+            if name in data:
+                setattr(n, name, _clamp(float(data[name])))
+        return n
+
+    def __repr__(self) -> str:
+        parts = [f"{n}={getattr(self, n):.0f}" for n in MASLOW_ORDER]
+        return f"CitizenNeeds({', '.join(parts)})"

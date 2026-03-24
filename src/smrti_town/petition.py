@@ -1,333 +1,359 @@
-"""Petition system: detects community needs from Space_Culture and suggests buildings."""
+"""PetitionManager — citizen-driven requests and needs-based petition generation."""
 
 from __future__ import annotations
 
-import json
-from dataclasses import dataclass
-from typing import Any
+from dataclasses import dataclass, field
 
-import numpy as np
-
-from smrti.core.db import get_database
-from smrti.core.embed import get_embedding_provider
-
-# ── Need taxonomy ────────────────────────────────────────────────────
-# Trigger phrases are embedded at startup and averaged into anchor
-# vectors.  Detection uses cosine similarity — no hardcoded language
-# matching.
-
-NEED_CATEGORIES: dict[str, dict[str, list[str]]] = {
-    "food": {
-        "triggers": ["hungry", "no food", "need bread", "starving"],
-        "resolves_to": ["farm", "market", "bakery"],
-    },
-    "health": {
-        "triggers": ["sick", "injured", "no doctor", "ill"],
-        "resolves_to": ["clinic"],
-    },
-    "education": {
-        "triggers": ["learn", "study", "school", "children bored"],
-        "resolves_to": ["school", "library"],
-    },
-    "entertainment": {
-        "triggers": ["bored", "nothing to do", "fun"],
-        "resolves_to": ["tavern", "park", "theater"],
-    },
-    "commerce": {
-        "triggers": ["buy", "sell", "trade", "goods", "shop"],
-        "resolves_to": ["market", "workshop"],
-    },
-    "housing": {
-        "triggers": ["homeless", "crowded", "no room"],
-        "resolves_to": ["house"],
-    },
-    "spiritual": {
-        "triggers": ["pray", "meaning", "community", "faith"],
-        "resolves_to": ["church"],
-    },
-}
-
-# ── Similarity / urgency thresholds ──────────────────────────────────
-SIMILARITY_THRESHOLD = 0.4   # uses max-over-triggers, not mean-anchor
-CONFIDENCE_THRESHOLD = 0.35
-DEFAULT_MAX_AGE_HOURS = 720  # 30 sim-days
-
-
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    norm_a = np.linalg.norm(a)
-    norm_b = np.linalg.norm(b)
-    if norm_a == 0.0 or norm_b == 0.0:
-        return 0.0
-    return float(np.dot(a, b) / (norm_a * norm_b))
+from smrti_town.config import (
+    BUILDING_CATALOG,
+    NEED_MAX,
+    PETITION_MAX_AGE_HOURS,
+    PETITION_SIMILARITY_THRESHOLD,
+)
 
 
 @dataclass
 class Petition:
-    """A community petition requesting a new building."""
+    text: str
+    source: str  # "council" or citizen name
+    category: str  # "housing", "food", "safety", "education", "health", "culture", "infrastructure"
+    building_suggestion: str | None = None
+    signatures: list[str] = field(default_factory=list)
+    created_at_hours: float = 0.0
+    urgency: float = 0.5  # 0.0-1.0
+    status: str = "active"  # "active", "approved", "dismissed", "expired"
 
-    need_category: str
-    building_type: str
-    petitioners: list[str]
-    urgency: float
-    evidence: list[str]
-    created_at_hours: float
-    status: str  # "pending" | "fulfilled" | "expired"
-    rationale: str = ""
+
+# ── Need-to-petition mapping ───────────────────────────────────────────
+
+_NEED_PETITION_MAP: dict[str, list[dict]] = {
+    "hunger": [
+        {
+            "category": "food",
+            "text": "Citizens are going hungry. We need a source of food.",
+            "buildings": ["farm", "bakery", "butcher", "market"],
+            "threshold": 60,
+        },
+    ],
+    "shelter": [
+        {
+            "category": "housing",
+            "text": "Citizens lack housing. We need more homes.",
+            "buildings": ["cottage", "house", "apartment"],
+            "threshold": 40,
+        },
+    ],
+    "health": [
+        {
+            "category": "health",
+            "text": "Citizens are falling ill without medical care.",
+            "buildings": ["clinic", "hospital"],
+            "threshold": 50,
+        },
+        {
+            "category": "infrastructure",
+            "text": "We need clean water infrastructure.",
+            "buildings": ["well", "water_tower"],
+            "threshold": 40,
+        },
+    ],
+    "safety": [
+        {
+            "category": "safety",
+            "text": "Crime and disorder threaten our community. We need law enforcement.",
+            "buildings": ["constabulary", "jail"],
+            "threshold": 50,
+        },
+    ],
+    "social": [
+        {
+            "category": "culture",
+            "text": "Citizens feel isolated. We need social gathering places.",
+            "buildings": ["park", "tavern", "church", "festival_grounds"],
+            "threshold": 60,
+        },
+    ],
+    "education": [
+        {
+            "category": "education",
+            "text": "Children need education. We should build a school.",
+            "buildings": ["school", "library"],
+            "threshold": 50,
+        },
+    ],
+    "purpose": [
+        {
+            "category": "infrastructure",
+            "text": "Adults lack meaningful work. We need more businesses.",
+            "buildings": ["general_store", "blacksmith", "tailor", "trading_post"],
+            "threshold": 50,
+        },
+    ],
+    "culture": [
+        {
+            "category": "culture",
+            "text": "Our town lacks cultural enrichment.",
+            "buildings": ["theater", "museum", "bookstore"],
+            "threshold": 55,
+        },
+    ],
+}
 
 
 class PetitionManager:
-    """Monitors Space_Culture for consensus needs and generates petitions."""
+    """Manages citizen petitions: creation, signing, merging, and lifecycle."""
 
-    def __init__(self, db_path: str, tenant_id: str) -> None:
-        self._db_path = db_path
-        self._tenant_id = tenant_id
-        self._anchors: dict[str, np.ndarray] = {}  # category -> mean embedding
-        self._petitions: list[Petition] = []
-        self._fulfilled_types: set[str] = set()
-        self._seen_atom_ids: set[str] = set()  # avoid re-scanning atoms
+    def __init__(self) -> None:
+        self.petitions: list[Petition] = []
 
-    # ── Anchor caching ───────────────────────────────────────────────
+    # ── creation ────────────────────────────────────────────────────────
 
-    def _cache_anchors(self) -> None:
-        """Embed each category's trigger phrases and cache all vectors (not mean).
-
-        Similarity uses max-over-triggers so a single strong signal fires the
-        category even when the candidate text is not close to the mean anchor.
-        Language-agnostic: embedding cosine similarity handles all locales.
-        """
-        if self._anchors:
-            return
-        embed = get_embedding_provider()
-        for category, spec in NEED_CATEGORIES.items():
-            vecs = embed.embed_batch(spec["triggers"])
-            arr = np.array(vecs, dtype=np.float32)
-            # Normalise rows so dot product == cosine similarity
-            norms = np.linalg.norm(arr, axis=1, keepdims=True)
-            norms = np.where(norms == 0, 1.0, norms)
-            self._anchors[category] = arr / norms  # shape (n_triggers, dim)
-
-    # ── Culture scanning ─────────────────────────────────────────────
-
-    def scan_culture(
+    def add_petition(
         self,
-        current_hours: float,
-        existing_building_types: set[str],
-    ) -> list[Petition]:
-        """Scan new Space_Culture atoms for need signals.
-
-        Returns newly created petitions (if any).
-        """
-        self._cache_anchors()
-
-        db = get_database(self._db_path)
-        rows = db.fetchall(
-            "SELECT id, label, content, confidence, sti "
-            "FROM atoms "
-            "WHERE tenant_id = ? AND space = 'Space_Culture' "
-            "  AND type IN ('belief', 'concept')",
-            (self._tenant_id,),
+        text: str,
+        source: str,
+        category: str,
+        building_suggestion: str | None = None,
+        urgency: float = 0.5,
+        current_hours: float = 0.0,
+    ) -> Petition:
+        """Add a new petition.  Returns the created Petition."""
+        pet = Petition(
+            text=text,
+            source=source,
+            category=category,
+            building_suggestion=building_suggestion,
+            signatures=[source] if source != "council" else [],
+            created_at_hours=current_hours,
+            urgency=max(0.0, min(1.0, urgency)),
         )
+        self.petitions.append(pet)
+        return pet
 
-        # Collect only unseen atoms that pass the confidence gate
-        candidates: list[dict[str, Any]] = []
-        for row in rows:
-            atom_id: str = row["id"]
-            if atom_id in self._seen_atom_ids:
-                continue
-            self._seen_atom_ids.add(atom_id)
-            if row["confidence"] < CONFIDENCE_THRESHOLD:
-                continue
-            candidates.append({
-                "id": atom_id,
-                "label": row["label"],
-                "content": row["content"],
-                "confidence": row["confidence"],
-                "sti": row["sti"],
-            })
+    # ── needs scanning ──────────────────────────────────────────────────
 
-        if not candidates:
+    def check_citizen_needs(
+        self,
+        citizens: list,
+        topology,
+        economy,
+        current_hours: float = 0.0,
+    ) -> list[Petition]:
+        """Scan citizens for unmet needs and generate petitions.
+
+        Only generates a petition if:
+        1. Enough citizens share the same unmet need (>=30% or >=3).
+        2. No existing active petition already covers it.
+        3. The suggested building is not already present.
+        """
+        alive = [c for c in citizens if getattr(c, "alive", True)]
+        if not alive:
             return []
 
-        # Embed candidate texts
-        embed = get_embedding_provider()
-        texts = [c["content"] or c["label"] for c in candidates]
-        embeddings = embed.embed_batch(texts)
+        # Collect existing building keys in the topology.
+        existing_buildings: set[str] = set()
+        places = getattr(topology, "places", {})
+        if isinstance(places, dict):
+            for place in places.values():
+                bkey = getattr(place, "building_key", None)
+                if bkey:
+                    existing_buildings.add(bkey)
 
-        # Build combined set of types already placed or fulfilled
-        unavailable = existing_building_types | self._fulfilled_types
-        # Also exclude building types that already have a pending petition
-        for p in self._petitions:
-            if p.status == "pending":
-                unavailable.add(p.building_type)
+        # Tally need values across citizens.
+        need_tallies: dict[str, list[float]] = {}
+        for c in alive:
+            needs = getattr(c, "needs", None)
+            if not needs:
+                continue
+            for need_name in _NEED_PETITION_MAP:
+                val = getattr(needs, need_name, 0.0)
+                need_tallies.setdefault(need_name, []).append(val)
+
+        active_categories = {
+            p.category for p in self.petitions if p.status == "active"
+        }
 
         new_petitions: list[Petition] = []
+        pop = len(alive)
+        threshold_count = max(3, int(pop * 0.3))
 
-        # Match candidates against anchors (max-over-triggers)
-        for candidate, vec in zip(candidates, embeddings):
-            vec_arr = np.array(vec, dtype=np.float32)
-            norm = np.linalg.norm(vec_arr)
-            if norm > 0:
-                vec_arr = vec_arr / norm
-            for category, trigger_matrix in self._anchors.items():
-                # trigger_matrix: (n_triggers, dim), each row normalised
-                sims = trigger_matrix @ vec_arr  # (n_triggers,)
-                sim = float(sims.max())
-                if sim < SIMILARITY_THRESHOLD:
+        for need_name, entries in _NEED_PETITION_MAP.items():
+            values = need_tallies.get(need_name, [])
+            if not values:
+                continue
+
+            for entry in entries:
+                need_threshold = entry["threshold"]
+                affected = [v for v in values if v >= need_threshold]
+                if len(affected) < min(threshold_count, pop):
                     continue
 
-                # Find first available building type
-                building_type = None
-                for bt in NEED_CATEGORIES[category]["resolves_to"]:
-                    if bt not in unavailable:
-                        building_type = bt
+                category = entry["category"]
+                if category in active_categories:
+                    continue
+
+                # Find a building suggestion that is not yet built and
+                # whose population unlock is met.
+                suggestion: str | None = None
+                for bkey in entry["buildings"]:
+                    if bkey in existing_buildings:
+                        continue
+                    bdef = BUILDING_CATALOG.get(bkey)
+                    if bdef and bdef.unlock_population <= pop:
+                        # Check prerequisite buildings.
+                        if bdef.unlock_buildings and not all(
+                            ub in existing_buildings for ub in bdef.unlock_buildings
+                        ):
+                            continue
+                        suggestion = bkey
                         break
-                if building_type is None:
+
+                if suggestion is None:
+                    # All candidate buildings already exist or are locked.
                     continue
 
-                urgency = min(1.0, max(0.0,
-                    candidate["confidence"] * 0.6 + candidate["sti"] * 0.4,
-                ))
+                avg_severity = sum(affected) / len(affected) / NEED_MAX
+                urgency = min(1.0, avg_severity + len(affected) / pop * 0.3)
 
-                # Try to extract petitioner names from promoted_from metadata
-                petitioners = self._extract_petitioners(candidate["id"])
-
-                petition = Petition(
-                    need_category=category,
-                    building_type=building_type,
-                    petitioners=petitioners,
+                pet = self.add_petition(
+                    text=entry["text"],
+                    source="citizens",
+                    category=category,
+                    building_suggestion=suggestion,
                     urgency=urgency,
-                    evidence=[candidate["label"]],
-                    created_at_hours=current_hours,
-                    status="pending",
+                    current_hours=current_hours,
                 )
-                self._petitions.append(petition)
-                new_petitions.append(petition)
-                # Mark this building type as claimed
-                unavailable.add(building_type)
+                # Auto-sign with affected citizens.
+                for c in alive:
+                    needs_obj = getattr(c, "needs", None)
+                    if needs_obj and getattr(needs_obj, need_name, 0.0) >= need_threshold:
+                        name = getattr(c, "name", "")
+                        if name and name not in pet.signatures:
+                            pet.signatures.append(name)
+
+                new_petitions.append(pet)
+                active_categories.add(category)
 
         return new_petitions
 
-    def _extract_petitioners(self, atom_id: str) -> list[str]:
-        """Best-effort extraction of agent names from bridge provenance."""
-        db = get_database(self._db_path)
-        row = db.fetchone(
-            "SELECT metadata FROM atoms WHERE id = ?",
-            (atom_id,),
-        )
-        if not row or not row["metadata"]:
-            return []
-        try:
-            meta = json.loads(row["metadata"])
-        except (json.JSONDecodeError, TypeError):
-            return []
-        promoted_from = meta.get("promoted_from", "")
-        if not promoted_from:
-            return []
-        # Bridge spaces are named Agent_Space_{a}_x_Agent_Space_{b}
-        parts = promoted_from.split("_x_")
-        names: list[str] = []
-        for part in parts:
-            if part.startswith("Agent_Space_"):
-                names.append(part.removeprefix("Agent_Space_"))
-        return names
+    # ── signatures ──────────────────────────────────────────────────────
 
-    # ── Bootstrap ────────────────────────────────────────────────────
+    def add_signature(self, petition_index: int, citizen_name: str) -> bool:
+        """Add a citizen's signature to a petition.  Returns True if added."""
+        if petition_index < 0 or petition_index >= len(self.petitions):
+            return False
+        pet = self.petitions[petition_index]
+        if pet.status != "active":
+            return False
+        if citizen_name in pet.signatures:
+            return False
+        pet.signatures.append(citizen_name)
+        return True
 
-    def seed_needs(
-        self,
-        existing_building_types: set[str],
-        current_hours: float = 0.0,
-        max_seeds: int = 3,
-    ) -> list[Petition]:
-        """Create starter petitions for missing critical building types.
+    # ── merging ─────────────────────────────────────────────────────────
 
-        Called once at engine startup so the player immediately sees what the
-        town needs — before Space_Culture has any atoms from bridge discovery.
-        Skips categories already covered by existing buildings or pending petitions.
+    def merge_similar(self) -> int:
+        """Merge petitions about similar topics (same category and building suggestion).
+
+        Returns number of merges performed.
         """
-        # Priority order: food first, then housing, health, etc.
-        priority_order = ["food", "housing", "health", "education", "entertainment",
-                          "commerce", "spiritual"]
+        active = [p for p in self.petitions if p.status == "active"]
+        merged_count = 0
+        seen: dict[tuple[str, str | None], Petition] = {}
 
-        unavailable = set(existing_building_types) | self._fulfilled_types
-        for p in self._petitions:
-            if p.status == "pending":
-                unavailable.add(p.building_type)
+        for pet in active:
+            key = (pet.category, pet.building_suggestion)
+            if key in seen:
+                target = seen[key]
+                # Merge signatures.
+                for sig in pet.signatures:
+                    if sig not in target.signatures:
+                        target.signatures.append(sig)
+                # Take higher urgency.
+                target.urgency = max(target.urgency, pet.urgency)
+                pet.status = "expired"  # Mark as consumed.
+                merged_count += 1
+            else:
+                seen[key] = pet
 
-        seeded: list[Petition] = []
-        for category in priority_order:
-            if len(seeded) >= max_seeds:
-                break
-            spec = NEED_CATEGORIES.get(category)
-            if not spec:
+        return merged_count
+
+    # ── expiration ──────────────────────────────────────────────────────
+
+    def expire_old(self, current_hours: float) -> int:
+        """Expire petitions older than PETITION_MAX_AGE_HOURS.  Returns count expired."""
+        count = 0
+        for pet in self.petitions:
+            if pet.status != "active":
                 continue
-            building_type = next(
-                (bt for bt in spec["resolves_to"] if bt not in unavailable),
-                None,
+            age = current_hours - pet.created_at_hours
+            if age > PETITION_MAX_AGE_HOURS:
+                pet.status = "expired"
+                count += 1
+        return count
+
+    # ── ranking ─────────────────────────────────────────────────────────
+
+    def rank_by_urgency(self) -> list[Petition]:
+        """Return active petitions sorted by urgency (highest first), then
+        by number of signatures."""
+        active = [p for p in self.petitions if p.status == "active"]
+        return sorted(
+            active,
+            key=lambda p: (p.urgency, len(p.signatures)),
+            reverse=True,
+        )
+
+    # ── resolution ──────────────────────────────────────────────────────
+
+    def approve(self, index: int) -> Petition | None:
+        """Mark petition as approved.  Returns the petition or None."""
+        if index < 0 or index >= len(self.petitions):
+            return None
+        pet = self.petitions[index]
+        pet.status = "approved"
+        return pet
+
+    def dismiss(self, index: int) -> Petition | None:
+        """Mark petition as dismissed.  Returns the petition or None."""
+        if index < 0 or index >= len(self.petitions):
+            return None
+        pet = self.petitions[index]
+        pet.status = "dismissed"
+        return pet
+
+    # ── serialization ───────────────────────────────────────────────────
+
+    def to_dict(self) -> dict:
+        return {
+            "petitions": [
+                {
+                    "text": p.text,
+                    "source": p.source,
+                    "category": p.category,
+                    "building_suggestion": p.building_suggestion,
+                    "signatures": list(p.signatures),
+                    "created_at_hours": p.created_at_hours,
+                    "urgency": round(p.urgency, 3),
+                    "status": p.status,
+                }
+                for p in self.petitions
+            ],
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> PetitionManager:
+        pm = cls()
+        for p_data in data.get("petitions", []):
+            pet = Petition(
+                text=p_data.get("text", ""),
+                source=p_data.get("source", ""),
+                category=p_data.get("category", ""),
+                building_suggestion=p_data.get("building_suggestion"),
+                signatures=list(p_data.get("signatures", [])),
+                created_at_hours=p_data.get("created_at_hours", 0.0),
+                urgency=p_data.get("urgency", 0.5),
+                status=p_data.get("status", "active"),
             )
-            if building_type is None:
-                continue
-            petition = Petition(
-                need_category=category,
-                building_type=building_type,
-                petitioners=[],
-                urgency=0.4,
-                evidence=[f"Community lacks a {building_type}"],
-                created_at_hours=current_hours,
-                status="pending",
-                rationale=f"The town has no {building_type} yet.",
-            )
-            self._petitions.append(petition)
-            seeded.append(petition)
-            unavailable.add(building_type)
-
-        return seeded
-
-    # ── Mutation ─────────────────────────────────────────────────────
-
-    def fulfill(self, petition_idx: int) -> None:
-        """Mark a petition as fulfilled."""
-        if 0 <= petition_idx < len(self._petitions):
-            p = self._petitions[petition_idx]
-            p.status = "fulfilled"
-            self._fulfilled_types.add(p.building_type)
-
-    def dismiss(self, petition_idx: int) -> None:
-        """Mark a petition as expired (dismissed by player/engine)."""
-        if 0 <= petition_idx < len(self._petitions):
-            self._petitions[petition_idx].status = "expired"
-
-    def expire_old(
-        self,
-        current_hours: float,
-        max_age_hours: float = DEFAULT_MAX_AGE_HOURS,
-    ) -> None:
-        """Expire pending petitions older than *max_age_hours*."""
-        for p in self._petitions:
-            if p.status != "pending":
-                continue
-            if current_hours - p.created_at_hours > max_age_hours:
-                p.status = "expired"
-
-    # ── Queries ──────────────────────────────────────────────────────
-
-    def pending(self) -> list[Petition]:
-        """Return all pending petitions."""
-        return [p for p in self._petitions if p.status == "pending"]
-
-    def to_dict(self) -> list[dict[str, Any]]:
-        """Serialise all petitions for the REST/WebSocket API."""
-        out: list[dict[str, Any]] = []
-        for i, p in enumerate(self._petitions):
-            out.append({
-                "idx": i,
-                "need_category": p.need_category,
-                "building_type": p.building_type,
-                "petitioners": p.petitioners,
-                "urgency": p.urgency,
-                "evidence": p.evidence,
-                "created_at_hours": p.created_at_hours,
-                "status": p.status,
-                "rationale": p.rationale,
-            })
-        return out
+            pm.petitions.append(pet)
+        return pm

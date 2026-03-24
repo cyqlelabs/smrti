@@ -1,236 +1,147 @@
-/* ================================================================
-   sidebar.js — renderAgentSidebar(), renderPlaceSidebar(), toggle
-   ================================================================ */
-window.TOWN = window.TOWN || {};
+/**
+ * Right-side inspector sidebar — shows agent or building details.
+ */
 
-TOWN.renderAgentSidebar = function(agent) {
-  var el = document.getElementById('sb-content');
-  var color = TOWN.colorToHex(TOWN.getAgentColor(agent.name));
-  var esc = TOWN.escapeHtml;
+var Sidebar = {
+  el: null,
+  contentEl: null,
 
-  var html = '<div class="sb-section">';
-  html += '<div class="sb-agent-name" style="color:' + color + '">';
-  html += esc(agent.name.replace(/_/g, ' '));
-  html += '</div>';
+  init: function() {
+    this.el = document.getElementById('ui-sidebar');
+    this.contentEl = document.getElementById('sidebar-content');
+    document.getElementById('sidebar-close').addEventListener('click', function() {
+      Sidebar.hide();
+    });
+  },
 
-  /* Life stage and age */
-  var stage = (agent.life_stage || 'adult');
-  html += '<div class="sb-agent-info">' + esc(stage.charAt(0).toUpperCase() + stage.slice(1));
-  if (agent.age_years !== undefined) html += ' &middot; Age ' + Math.floor(agent.age_years);
-  html += '</div>';
+  show: function() {
+    this.el.classList.remove('hidden');
+  },
 
-  /* Current action */
-  if (agent.action) {
-    html += '<div class="sb-agent-info">Action: ' + esc(agent.action);
-    if (agent.action_target) html += ' \u2192 ' + esc(agent.action_target);
-    if (agent.target) html += ' \u2192 ' + esc(agent.target);
-    html += '</div>';
-  }
+  hide: function() {
+    this.el.classList.add('hidden');
+    GameState.selectedAgent = null;
+    GameState.selectedPlace = null;
+  },
 
-  /* Location */
-  if (agent.location) {
-    html += '<div class="sb-agent-info">Location: ' + esc(agent.location.replace(/_/g, ' ')) + '</div>';
-  }
+  /**
+   * Display agent details in the sidebar.
+   */
+  showAgent: function(agent) {
+    this.show();
+    var html = '<h3>' + _esc(agent.name) + '</h3>';
 
-  /* Deceased marker */
-  if (!agent.alive) {
-    html += '<div class="sb-agent-info" style="color:#FF6B6B;font-weight:700">Deceased</div>';
-  }
-  html += '</div>';
-
-  /* ── Drives ──────────────────────────────────────────────────── */
-  if (agent.drives) {
-    html += '<div class="sb-section"><h3>Drives</h3>';
-    var driveKeys = Object.keys(agent.drives);
-    for (var i = 0; i < driveKeys.length; i++) {
-      var key = driveKeys[i];
-      var val = agent.drives[key];
-      var pct = Math.max(0, Math.min(100, val));
-      var barColor = TOWN.DRIVE_COLORS[key] || '#888';
-      html += '<div class="sb-drive-row">';
-      html += '<span class="sb-drive-label">' + key + '</span>';
-      html += '<div class="sb-drive-bar-bg">';
-      html += '<div class="sb-drive-bar" style="width:' + pct + '%;background:' + barColor + '"></div>';
-      html += '</div>';
-      html += '<span class="sb-drive-val">' + Math.round(val) + '</span>';
-      html += '</div>';
+    // Life info
+    html += '<div class="sidebar-section">';
+    html += '<div class="sidebar-label">Status</div>';
+    html += '<div class="sidebar-value">' +
+      _esc(agent.life_stage || 'adult') + ', age ' + (agent.age_years || '?') +
+      '</div>';
+    if (agent.location) {
+      html += '<div class="sidebar-value" style="color:var(--text-dim);font-size:11px;">at ' +
+        _esc(agent.location) + '</div>';
+    }
+    if (agent.council_role) {
+      html += '<div class="sidebar-value" style="color:var(--accent);font-size:11px;">' +
+        _esc(agent.council_role) + '</div>';
     }
     html += '</div>';
-  }
 
-  /* ── Relationships ───────────────────────────────────────────── */
-  if (agent.relationships && agent.relationships.length > 0) {
-    html += '<div class="sb-section"><h3>Relationships</h3>';
-    for (var r = 0; r < agent.relationships.length; r++) {
-      var rel = agent.relationships[r];
-      var relColor;
-      if (rel.valence > 0.3) relColor = '#6BCB77';
-      else if (rel.valence < -0.3) relColor = '#FF6B6B';
-      else relColor = '#D4A03C';
-      html += '<div class="sb-rel-item">';
-      html += '<div class="sb-rel-dot" style="background:' + relColor + '"></div>';
-      html += '<span class="sb-rel-name">' + esc(rel.name.replace(/_/g, ' ')) + '</span>';
-      html += '<span class="sb-rel-state">' + esc(rel.state || 'acquaintance') + '</span>';
+    // Wallet
+    if (agent.wallet !== undefined) {
+      html += '<div class="sidebar-section">';
+      html += '<div class="sidebar-label">Wallet</div>';
+      html += '<div class="sidebar-value" style="color:var(--gold);">' + agent.wallet + 'g</div>';
       html += '</div>';
     }
-    html += '</div>';
-  }
 
-  /* ── Last dialogue ───────────────────────────────────────────── */
-  if (agent.dialogue) {
-    html += '<div class="sb-section"><h3>Last Said</h3>';
-    html += '<div class="sb-memory-item">\u201C' + esc(agent.dialogue) + '\u201D</div>';
-    html += '</div>';
-  }
-
-  el.innerHTML = html;
-};
-
-TOWN.renderPlaceSidebar = function(placeKey) {
-  var el = document.getElementById('sb-content');
-  var place = TOWN.state.town && TOWN.state.town.places ? TOWN.state.town.places[placeKey] : null;
-  if (!place) return;
-  var esc = TOWN.escapeHtml;
-
-  /* Gather occupants */
-  var occupants = [];
-  var all = TOWN.state.agents;
-  for (var n in all) {
-    if (all[n].location === placeKey && all[n].alive) occupants.push(all[n]);
-  }
-
-  var colorHex = place.color || '#888888';
-  var html = '<div class="sb-section">';
-  html += '<div class="sb-agent-name" style="color:' + colorHex + '">';
-  html += esc(place.icon || '') + ' ' + esc(place.label || placeKey.replace(/_/g, ' '));
-  html += '</div>';
-  html += '</div>';
-
-  /* Occupant list */
-  html += '<div class="sb-section"><h3>Occupants (' + occupants.length + ')</h3>';
-  if (occupants.length === 0) {
-    html += '<div class="sb-agent-info" style="font-style:italic">Empty</div>';
-  } else {
-    for (var i = 0; i < occupants.length; i++) {
-      var a = occupants[i];
-      var ac = TOWN.colorToHex(TOWN.getAgentColor(a.name));
-      html += '<div class="sb-rel-item" style="cursor:pointer" onclick="TOWN.selectAgent(\'' + a.name + '\')">';
-      html += '<div class="sb-rel-dot" style="background:' + ac + '"></div>';
-      html += '<span class="sb-rel-name">' + esc(a.name.replace(/_/g, ' ')) + '</span>';
-      html += '<span class="sb-rel-state">' + esc(a.action || 'idle') + '</span>';
-      html += '</div>';
-    }
-  }
-  html += '</div>';
-
-  /* Recent events at this place */
-  var placeEvents = [];
-  var log = TOWN.state.eventLog;
-  var lowerKey = placeKey.toLowerCase();
-  var lowerLabel = lowerKey.replace(/_/g, ' ');
-  for (var j = Math.max(0, log.length - 50); j < log.length; j++) {
-    var txt = log[j].text.toLowerCase();
-    if (txt.indexOf(lowerKey) !== -1 || txt.indexOf(lowerLabel) !== -1) {
-      placeEvents.push(log[j]);
-    }
-  }
-  placeEvents = placeEvents.slice(-8);
-
-  if (placeEvents.length > 0) {
-    html += '<div class="sb-section"><h3>Recent Events</h3>';
-    for (var k = 0; k < placeEvents.length; k++) {
-      var evt = placeEvents[k];
-      html += '<div class="sb-memory-item"><span class="log-time">' + evt.time + '</span> ' + esc(evt.text) + '</div>';
-    }
-    html += '</div>';
-  }
-
-  el.innerHTML = html;
-};
-
-TOWN.selectAgent = function(name) {
-  TOWN.state.selectedAgent = name;
-  TOWN.state.selectedPlace = null;
-  TOWN.openSidebar();
-  if (TOWN.state.agents[name]) {
-    TOWN.renderAgentSidebar(TOWN.state.agents[name]);
-  }
-  /* Update selection ring + camera pan */
-  var scene = TOWN.state.scene;
-  if (scene) {
-    var sprites = TOWN.state.agentSprites;
-    for (var n in sprites) {
-      if (n === name) {
-        TOWN.showSelectionRing(scene, sprites[n]);
-        TOWN.highlightAgent(scene, n);
-        /* Smoothly pan camera to the selected agent */
-        var sp = sprites[n];
-        var headOffY = sp.radius * 2 + 14;
-        scene.cameras.main.pan(sp.x, sp.y - headOffY / 2, 500, 'Quad.easeOut');
-      } else if (sprites[n].selRing.alpha > 0) {
-        scene.tweens.killTweensOf(sprites[n].selRing);
-        sprites[n].selRing.setAlpha(0);
-      }
-    }
-  }
-};
-
-TOWN.openSidebar = function() {
-  document.getElementById('sidebar').classList.remove('collapsed');
-  var btn = document.getElementById('sidebar-toggle');
-  btn.classList.remove('collapsed-pos');
-  btn.textContent = '\u203A';
-};
-
-TOWN.closeSidebar = function() {
-  document.getElementById('sidebar').classList.add('collapsed');
-  var btn = document.getElementById('sidebar-toggle');
-  btn.classList.add('collapsed-pos');
-  btn.textContent = '\u2039';
-};
-
-TOWN.toggleSidebar = function() {
-  var sb = document.getElementById('sidebar');
-  if (sb.classList.contains('collapsed')) {
-    TOWN.openSidebar();
-  } else {
-    TOWN.closeSidebar();
-  }
-};
-
-TOWN.showCulturePanel = function() {
-  TOWN.state.selectedAgent = null;
-  TOWN.state.selectedPlace = null;
-  TOWN.openSidebar();
-  var el = document.getElementById('sb-content');
-  el.innerHTML = '<div class="sb-section"><div class="sb-agent-name" style="color:#D4A03C">&#127758; Town Beliefs</div><div class="sb-agent-info" style="font-style:italic">Loading…</div></div>';
-
-  fetch('/culture?top_k=15')
-    .then(function(r) { return r.json(); })
-    .then(function(atoms) {
-      var esc = TOWN.escapeHtml;
-      var html = '<div class="sb-section"><div class="sb-agent-name" style="color:#D4A03C">&#127758; Town Beliefs</div>';
-      if (!atoms || !atoms.length) {
-        html += '<div class="sb-agent-info" style="font-style:italic">No shared beliefs yet — bridge discovery runs every 10th epoch.</div>';
+    // Needs / drives
+    var needs = agent.needs || agent.drives || {};
+    var needKeys = Object.keys(needs);
+    if (needKeys.length > 0) {
+      html += '<div class="sidebar-section">';
+      html += '<div class="sidebar-label">Needs</div>';
+      for (var i = 0; i < needKeys.length; i++) {
+        var key = needKeys[i];
+        var val = needs[key];
+        if (typeof val !== 'number') continue;
+        var pct = Math.min(100, Math.max(0, Math.round(val)));
+        var color = pct > 70 ? 'var(--danger)' : pct > 40 ? 'var(--warning)' : 'var(--success)';
+        html += '<div class="need-bar">' +
+          '<span class="need-bar-label">' + _esc(key) + '</span>' +
+          '<div class="need-bar-track"><div class="need-bar-fill" style="width:' +
+          pct + '%;background:' + color + ';"></div></div>' +
+          '<span class="need-bar-value">' + pct + '</span>' +
+          '</div>';
       }
       html += '</div>';
-      if (atoms && atoms.length) {
-        html += '<div class="sb-section"><h3>Shared Knowledge</h3>';
-        for (var i = 0; i < atoms.length; i++) {
-          var a = atoms[i];
-          var valColor = a.valence > 0.2 ? '#6BCB77' : a.valence < -0.2 ? '#FF6B6B' : '#D4A03C';
-          html += '<div class="sb-rel-item">';
-          html += '<div class="sb-rel-dot" style="background:' + valColor + '"></div>';
-          html += '<span class="sb-rel-name">' + esc(a.content || a.label) + '</span>';
-          html += '<span class="sb-rel-state">' + Math.round(a.confidence * 100) + '%</span>';
-          html += '</div>';
+    }
+
+    // Traits
+    if (agent.traits) {
+      var traitKeys = Object.keys(agent.traits);
+      if (traitKeys.length > 0) {
+        html += '<div class="sidebar-section">';
+        html += '<div class="sidebar-label">Traits</div>';
+        for (var t = 0; t < traitKeys.length; t++) {
+          var tk = traitKeys[t];
+          var tv = agent.traits[tk];
+          if (typeof tv !== 'number') continue;
+          var tpct = Math.round(tv * 100);
+          html += '<div class="need-bar">' +
+            '<span class="need-bar-label">' + _esc(tk) + '</span>' +
+            '<div class="need-bar-track"><div class="need-bar-fill" style="width:' +
+            tpct + '%;background:var(--accent);"></div></div>' +
+            '<span class="need-bar-value">' + tpct + '</span>' +
+            '</div>';
         }
         html += '</div>';
       }
-      document.getElementById('sb-content').innerHTML = html;
-    })
-    .catch(function() {
-      document.getElementById('sb-content').innerHTML =
-        '<div class="sb-section"><div class="sb-agent-info" style="color:#FF6B6B">Could not load culture data.</div></div>';
-    });
+    }
+
+    this.contentEl.innerHTML = html;
+  },
+
+  /**
+   * Display building details in the sidebar.
+   */
+  showBuilding: function(building) {
+    this.show();
+    var bKey = building.building_key || building.type || 'unknown';
+    var def = BUILDINGS[bKey];
+    var name = (def && def.name) || bKey;
+
+    var html = '<h3>' + _esc(name) + '</h3>';
+
+    html += '<div class="sidebar-section">';
+    html += '<div class="sidebar-label">Type</div>';
+    html += '<div class="sidebar-value">' + _esc(bKey) + '</div>';
+    html += '</div>';
+
+    if (def) {
+      html += '<div class="sidebar-section">';
+      html += '<div class="sidebar-label">Category</div>';
+      html += '<div class="sidebar-value" style="color:' +
+        (CATEGORY_COLORS[def.category] || 'var(--text)') + ';">' +
+        _esc(def.category) + '</div>';
+      html += '</div>';
+    }
+
+    html += '<div class="sidebar-section">';
+    html += '<div class="sidebar-label">Position</div>';
+    html += '<div class="sidebar-value">(' + building.grid_x + ', ' + building.grid_y + ')</div>';
+    html += '</div>';
+
+    // List occupants from GameState
+    if (building.occupants && building.occupants.length > 0) {
+      html += '<div class="sidebar-section">';
+      html += '<div class="sidebar-label">Occupants</div>';
+      for (var i = 0; i < building.occupants.length; i++) {
+        html += '<div class="sidebar-value">' + _esc(building.occupants[i]) + '</div>';
+      }
+      html += '</div>';
+    }
+
+    this.contentEl.innerHTML = html;
+  },
 };

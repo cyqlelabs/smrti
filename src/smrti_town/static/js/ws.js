@@ -1,71 +1,108 @@
-/* ================================================================
-   ws.js — WebSocket connection, reconnection, send helper
-   ================================================================ */
-window.TOWN = window.TOWN || {};
+/**
+ * WebSocket connection with auto-reconnect.
+ */
 
-TOWN.connectWS = function() {
-  TOWN.setWSStatus('connecting');
+var WS = {
+  /** @type {WebSocket|null} */
+  socket: null,
+  _reconnectDelay: 1000,
+  _maxReconnectDelay: 15000,
+  _reconnectTimer: null,
 
-  var protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  var host = location.hostname || 'localhost';
-  var port = location.port || '8420';
-  var wsUrl = protocol + '//' + host + ':' + port + '/ws';
-
-  var ws;
-  try {
-    ws = new WebSocket(wsUrl);
-  } catch (e) {
-    TOWN.setWSStatus('disconnected');
-    setTimeout(TOWN.connectWS, 3000);
-    return;
-  }
-
-  ws.onopen = function() {
-    TOWN.state.ws = ws;
-    TOWN.state.wsReady = true;
-    TOWN.setWSStatus('connected');
-    TOWN.addLogEntry('system', 'WebSocket connected');
-
-    /* If demo mode was running, we keep it — server data will override */
-  };
-
-  ws.onmessage = function(evt) {
-    try {
-      var data = JSON.parse(evt.data);
-      if (data.type === 'reset') {
-        /* World regenerated — clear local state before new data arrives */
-        if (typeof TOWN._handleReset === 'function') TOWN._handleReset();
-        return;
-      }
-      TOWN.state.tickQueue.push(data);
-    } catch (e) {
-      /* Ignore malformed messages */
+  /**
+   * Connect to the server WebSocket.
+   */
+  connect: function() {
+    if (this.socket && (this.socket.readyState === WebSocket.OPEN || this.socket.readyState === WebSocket.CONNECTING)) {
+      return;
     }
-  };
 
-  ws.onclose = function() {
-    TOWN.state.ws = null;
-    TOWN.state.wsReady = false;
-    TOWN.setWSStatus('disconnected');
-    TOWN.addLogEntry('system', 'Disconnected. Reconnecting in 3s\u2026');
-    setTimeout(TOWN.connectWS, 3000);
-  };
+    var protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    var url = protocol + '//' + window.location.host + '/ws';
 
-  ws.onerror = function() {
-    ws.close();
-  };
-};
+    try {
+      this.socket = new WebSocket(url);
+    } catch (e) {
+      console.error('WebSocket creation failed:', e);
+      this._scheduleReconnect();
+      return;
+    }
 
-TOWN.wsSend = function(msg) {
-  if (TOWN.state.ws && TOWN.state.wsReady) {
-    TOWN.state.ws.send(JSON.stringify(msg));
-  }
-};
+    this.socket.onopen = function() {
+      console.log('WS connected');
+      GameState.connected = true;
+      WS._reconnectDelay = 1000;
 
-TOWN.setWSStatus = function(status) {
-  var dot = document.getElementById('ws-dot');
-  var label = document.getElementById('ws-label');
-  if (!dot || !label) return;
-  dot.className = 'ws-dot ws-' + status;
-  label.textContent = status.charAt(0).toUpperCase() + status.slice(1);
+      // Hide generating overlay if it was shown
+      var genEl = document.getElementById('ui-generating');
+      if (genEl && !genEl.classList.contains('hidden')) {
+        // Keep it shown until we receive state data
+      }
+    };
+
+    this.socket.onmessage = function(event) {
+      try {
+        var msg = JSON.parse(event.data);
+        TickProcessor.handle(msg);
+
+        // Hide generating on first state/tick
+        if (msg.type === 'state' || msg.type === 'tick') {
+          var genEl = document.getElementById('ui-generating');
+          if (genEl) genEl.classList.add('hidden');
+        }
+      } catch (e) {
+        console.error('WS parse error:', e, event.data);
+      }
+    };
+
+    this.socket.onclose = function(event) {
+      console.log('WS closed:', event.code, event.reason);
+      GameState.connected = false;
+      WS._scheduleReconnect();
+    };
+
+    this.socket.onerror = function(err) {
+      console.error('WS error:', err);
+      GameState.connected = false;
+    };
+  },
+
+  /**
+   * Send a JSON message to the server.
+   * @param {object} data
+   */
+  send: function(data) {
+    if (this.socket && this.socket.readyState === WebSocket.OPEN) {
+      this.socket.send(JSON.stringify(data));
+    } else {
+      console.warn('WS not connected, cannot send:', data);
+    }
+  },
+
+  _scheduleReconnect: function() {
+    if (this._reconnectTimer) return;
+
+    var delay = this._reconnectDelay;
+    console.log('WS reconnecting in', delay, 'ms');
+
+    this._reconnectTimer = setTimeout(function() {
+      WS._reconnectTimer = null;
+      WS.connect();
+    }, delay);
+
+    // Exponential backoff
+    this._reconnectDelay = Math.min(this._reconnectDelay * 1.5, this._maxReconnectDelay);
+  },
+
+  disconnect: function() {
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
+    if (this.socket) {
+      this.socket.close();
+      this.socket = null;
+    }
+    GameState.connected = false;
+  },
 };

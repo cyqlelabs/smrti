@@ -1,12 +1,11 @@
-"""Director: tick pacing.  Chronos: milestone and birthday detection."""
+"""Director — adaptive tick pacing and Chronos milestone tracker."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+import logging
+from typing import Any
 
 from smrti_town.config import (
-    HOURS_PER_YEAR,
     MILESTONES,
     TICK_MONTAGE,
     TICK_ROUTINE,
@@ -14,128 +13,153 @@ from smrti_town.config import (
     TICK_SKIP,
 )
 
-if TYPE_CHECKING:
-    from smrti_town.agent import Agent
-    from smrti_town.calendar import SimCalendar
-    from smrti_town.spatial import Place
+log = logging.getLogger(__name__)
 
-
-# ── Data carriers ────────────────────────────────────────────────────
-
-@dataclass
-class SystemEvent:
-    agent_name: str
-    event_type: str
-    detail: str = ""
-
-    def to_dict(self) -> dict:
-        return {
-            "type": "milestone",
-            "agent": self.agent_name,
-            "event_type": self.event_type,
-            "detail": self.detail,
-        }
-
-
-# ── Director ─────────────────────────────────────────────────────────
 
 class Director:
-    """Decides how much sim-time each tick consumes."""
+    """Adaptive tick pacing based on current town activity.
+
+    Modes:
+    - ``scene`` (0.25h):  2+ agents together at the same place (social interaction).
+    - ``routine`` (2h):   default daily-life pacing.
+    - ``montage`` (8h):   everyone sleeping or alone — fast-forward.
+    - ``skip`` (168h):    player-requested 1-week jump.
+    """
 
     def __init__(self) -> None:
-        self._skip_requested: bool = False
         self.mode: str = "routine"
+        self._skip_requested: bool = False
 
-    def request_skip(self) -> None:
-        self._skip_requested = True
+    def compute_delta(self, agents: list[Any], calendar: Any) -> float:
+        """Determine the tick delta in sim-hours based on current agent activity.
 
-    def compute_tick_delta(
-        self,
-        agents: list[Agent],
-        places: dict[str, Place],
-    ) -> float:
+        Parameters
+        ----------
+        agents:
+            List of agent objects. Each must have ``location`` (str|None)
+            and ``alive`` (bool) attributes.
+        calendar:
+            SimCalendar instance (used for time_of_day).
+        """
         if self._skip_requested:
             self._skip_requested = False
             self.mode = "skip"
             return TICK_SKIP
 
-        # Scene mode: 2+ agents at the same non-home place
-        alive_names = {a.name for a in agents if a.alive}
-        for place in places.values():
-            # Sleeping together at home is montage, not scene
-            if place.place_type == "home":
-                continue
-            living_occupants = [n for n in place.occupants if n in alive_names]
-            if len(living_occupants) >= 2:
-                self.mode = "scene"
-                return TICK_SCENE
+        alive = [a for a in agents if getattr(a, "alive", True)]
+        if not alive:
+            self.mode = "routine"
+            return TICK_ROUTINE
 
-        # Montage mode: everyone sleeping or solo
-        alive_agents = [a for a in agents if a.alive]
-        if alive_agents and all(
-            a.drives.energy < 10 or not a.life_stage_info.get("can_talk", False)
-            for a in alive_agents
-        ):
+        # Count occupants per location
+        location_counts: dict[str, int] = {}
+        for a in alive:
+            loc = getattr(a, "location", None)
+            if loc:
+                location_counts[loc] = location_counts.get(loc, 0) + 1
+
+        # Check for social scene: any location with 2+ agents
+        has_social = any(c >= 2 for c in location_counts.values())
+        if has_social:
+            self.mode = "scene"
+            return TICK_SCENE
+
+        # Check for montage: all agents sleeping or alone
+        time_of_day = getattr(calendar, "time_of_day", "morning")
+        all_solo_or_sleeping = True
+        for a in alive:
+            loc = getattr(a, "location", None)
+            if loc and location_counts.get(loc, 0) > 1:
+                all_solo_or_sleeping = False
+                break
+
+        if all_solo_or_sleeping and time_of_day == "night":
             self.mode = "montage"
             return TICK_MONTAGE
 
         self.mode = "routine"
         return TICK_ROUTINE
 
+    def force_skip(self) -> None:
+        """Request a 1-week time skip on the next tick."""
+        self._skip_requested = True
 
-# ── Chronos ──────────────────────────────────────────────────────────
+    def to_dict(self) -> dict:
+        return {
+            "mode": self.mode,
+            "skip_requested": self._skip_requested,
+        }
+
 
 class Chronos:
-    """Fires milestone and birthday events based on agent ages."""
+    """Milestone and birthday event tracker.
 
-    def check_milestones(
-        self,
-        agents: list[Agent],
-        cal: SimCalendar,
-    ) -> list[SystemEvent]:
-        events: list[SystemEvent] = []
+    Checks agent ages against the ``MILESTONES`` table and fires events
+    once per agent per milestone. Also detects birthdays (new year-of-age).
+    """
+
+    def __init__(self) -> None:
+        # (agent_name, milestone_age) tuples that have already been fired.
+        self.fired_milestones: set[tuple[str, int]] = set()
+        # Track last known year-age per agent for birthday detection.
+        self._last_age: dict[str, int] = {}
+
+    def check(self, agents: list[Any], calendar: Any) -> list[dict]:
+        """Check all agents for milestone and birthday events.
+
+        Parameters
+        ----------
+        agents:
+            List of agent objects. Each must have ``name`` (str),
+            ``age_years`` (int/float), ``alive`` (bool), ``life_stage`` (str).
+        calendar:
+            SimCalendar instance (unused currently, reserved for anniversary events).
+
+        Returns
+        -------
+        list[dict]
+            List of event dicts: ``{event_type, agent_name, description}``.
+        """
+        events: list[dict] = []
+
         for agent in agents:
-            if not agent.alive:
+            if not getattr(agent, "alive", True):
                 continue
-            age_years = cal.to_years(agent.age_hours)
-            for year, milestone in MILESTONES.items():
-                if agent.last_milestone_year < year <= age_years:
-                    detail = _milestone_detail(agent.name, milestone, year)
-                    events.append(SystemEvent(
-                        agent_name=agent.name,
-                        event_type=milestone,
-                        detail=detail,
-                    ))
-                    agent.last_milestone_year = year
+
+            name = getattr(agent, "name", "")
+            age = int(getattr(agent, "age_years", 0))
+
+            # Birthday detection
+            prev_age = self._last_age.get(name)
+            if prev_age is not None and age > prev_age:
+                events.append({
+                    "event_type": "birthday",
+                    "agent_name": name,
+                    "description": f"{name} turned {age} years old!",
+                })
+            self._last_age[name] = age
+
+            # Milestone detection
+            for milestone_age, event_type in MILESTONES.items():
+                if age >= milestone_age and (name, milestone_age) not in self.fired_milestones:
+                    self.fired_milestones.add((name, milestone_age))
+                    stage = getattr(agent, "life_stage", "adult")
+                    desc = self._milestone_description(name, milestone_age, event_type, stage)
+                    events.append({
+                        "event_type": event_type,
+                        "agent_name": name,
+                        "description": desc,
+                    })
+
         return events
 
-    def check_birthdays(
-        self,
-        agents: list[Agent],
-        cal: SimCalendar,
-        delta_hours: float,
-    ) -> list[SystemEvent]:
-        events: list[SystemEvent] = []
-        for agent in agents:
-            if not agent.alive:
-                continue
-            prev_years = int(cal.to_years(agent.age_hours - delta_hours))
-            curr_years = int(cal.to_years(agent.age_hours))
-            if curr_years > prev_years and curr_years > 0:
-                events.append(SystemEvent(
-                    agent_name=agent.name,
-                    event_type="birthday",
-                    detail=f"Today is {agent.name}'s birthday! They are now {curr_years} years old.",
-                ))
-        return events
-
-
-def _milestone_detail(name: str, milestone: str, year: int) -> str:
-    details = {
-        "school_enrollment": f"{name} starts school at age {year}.",
-        "adolescence": f"{name} enters adolescence at age {year}.",
-        "graduation": f"{name} graduates at age {year}.",
-        "career_start": f"{name} begins their career at age {year}.",
-        "retirement": f"{name} retires at age {year}.",
-    }
-    return details.get(milestone, f"{name} reaches milestone '{milestone}' at age {year}.")
+    @staticmethod
+    def _milestone_description(name: str, age: int, event_type: str, life_stage: str) -> str:
+        descs = {
+            "school_enrollment": f"{name} (age {age}) is old enough to attend school.",
+            "adolescence": f"{name} (age {age}) enters adolescence.",
+            "graduation": f"{name} (age {age}) graduates and enters adulthood.",
+            "career_start": f"{name} (age {age}) is ready to begin a professional career.",
+            "retirement": f"{name} (age {age}) retires from active work.",
+        }
+        return descs.get(event_type, f"{name} reached age {age} milestone: {event_type}.")

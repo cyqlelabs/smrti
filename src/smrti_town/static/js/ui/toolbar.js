@@ -1,104 +1,87 @@
 /**
- * Building placement toolbar and grid interaction.
+ * Left-side building palette toolbar.
  */
-(function() {
-  'use strict';
 
-  var _placementMode = false;
-  var _selectedType = null;
-  var _ghostGfx = null;
+var Toolbar = {
+  el: null,
+  itemsEl: null,
 
-  TOWN.initToolbar = function() {
-    var container = document.getElementById('toolbar');
-    if (!container) return;
-    TOWN.refreshToolbar();
-  };
+  init: function() {
+    this.el = document.getElementById('ui-toolbar');
+    this.itemsEl = document.getElementById('toolbar-items');
+  },
 
-  TOWN.refreshToolbar = function() {
-    var container = document.getElementById('toolbar');
-    if (!container) return;
-    container.innerHTML = '';
+  show: function() {
+    this.el.classList.remove('hidden');
+    this.render();
+  },
 
-    fetch('/buildable')
-      .then(function(r) { return r.json(); })
-      .then(function(buildings) {
-        if (!buildings || !buildings.length) return;
-        container.style.display = 'flex';
-        buildings.forEach(function(b) {
-          var btn = document.createElement('button');
-          btn.className = 'toolbar-btn';
-          btn.title = b.type + ' (' + b.grid_size[0] + 'x' + b.grid_size[1] + ')';
-          btn.textContent = _buildingIcon(b.type);
-          btn.onclick = function() { TOWN.enterPlacementMode(b.type, b.grid_size); };
-          container.appendChild(btn);
-        });
-      })
-      .catch(function() {});
-  };
+  hide: function() {
+    this.el.classList.add('hidden');
+  },
 
-  TOWN.enterPlacementMode = function(buildingType, gridSize) {
-    _placementMode = true;
-    _selectedType = buildingType;
-    document.body.classList.add('placement-mode');
-    TOWN.addLogEntry('system', 'Click on the map to place ' + buildingType + '. ESC to cancel.');
-  };
-
-  TOWN.exitPlacementMode = function() {
-    _placementMode = false;
-    _selectedType = null;
-    document.body.classList.remove('placement-mode');
-    if (_ghostGfx && TOWN.state.scene) {
-      _ghostGfx.destroy();
-      _ghostGfx = null;
+  render: function() {
+    var html = '';
+    var population = 0;
+    var agents = GameState.agents || [];
+    for (var i = 0; i < agents.length; i++) {
+      if (agents[i].alive !== false) population++;
     }
-  };
 
-  TOWN.isPlacementMode = function() {
-    return _placementMode;
-  };
+    // Group by category
+    var categories = {};
+    for (var key in BUILDINGS) {
+      var b = BUILDINGS[key];
+      if (!categories[b.category]) categories[b.category] = [];
+      categories[b.category].push({ key: key, def: b });
+    }
 
-  TOWN.handlePlacementClick = function(worldX, worldY) {
-    if (!_placementMode || !_selectedType) return false;
-    /* Convert world coords to grid coords (16px cells) */
-    var gridX = Math.floor(worldX / 16);
-    var gridY = Math.floor(worldY / 16);
+    for (var c = 0; c < CATEGORY_ORDER.length; c++) {
+      var cat = CATEGORY_ORDER[c];
+      var items = categories[cat];
+      if (!items || items.length === 0) continue;
 
-    fetch('/place-building', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ type: _selectedType, grid_x: gridX, grid_y: gridY })
-    })
-    .then(function(r) { return r.json(); })
-    .then(function(result) {
-      if (result.error) {
-        TOWN.addLogEntry('system', '\u274C ' + result.error);
-      } else {
-        TOWN.addLogEntry('system', '\u2705 ' + _selectedType + ' placed!');
-        TOWN.refreshToolbar();
+      html += '<div class="toolbar-category">';
+      html += '<div class="toolbar-category-title" style="color:' +
+        (CATEGORY_COLORS[cat] || 'var(--text-dim)') + ';">' + _esc(cat) + '</div>';
+
+      for (var j = 0; j < items.length; j++) {
+        var item = items[j];
+        var locked = population < item.def.minPop;
+        var selected = GameState.selectedBuilding === item.key;
+        var cls = 'toolbar-item';
+        if (locked) cls += ' locked';
+        if (selected) cls += ' selected';
+
+        html += '<div class="' + cls + '" data-building="' + item.key + '">';
+        html += '<span class="toolbar-item-name">' + _esc(item.def.name) + '</span>';
+        html += '<span class="toolbar-item-cost">' + item.def.cost + 'g</span>';
+        html += '</div>';
       }
-    })
-    .catch(function(err) {
-      TOWN.addLogEntry('system', '\u274C Placement failed: ' + err.message);
-    });
 
-    TOWN.exitPlacementMode();
-    return true;
-  };
-
-  function _buildingIcon(type) {
-    var icons = {
-      city_hall: '\uD83C\uDFDB\uFE0F', house: '\uD83C\uDFE0', farm: '\uD83C\uDF3E', market: '\uD83C\uDFEA',
-      school: '\uD83C\uDFEB', workshop: '\uD83D\uDD28', clinic: '\uD83C\uDFE5', tavern: '\uD83C\uDF7A',
-      church: '\u26EA', library: '\uD83D\uDCDA'
-    };
-    return icons[type] || '\uD83C\uDFD7\uFE0F';
-  }
-
-  /* ESC to cancel placement */
-  document.addEventListener('keydown', function(e) {
-    if (e.key === 'Escape' && _placementMode) {
-      TOWN.exitPlacementMode();
+      html += '</div>';
     }
-  });
 
-})();
+    this.itemsEl.innerHTML = html;
+
+    // Attach click handlers
+    var toolbarItems = this.itemsEl.querySelectorAll('.toolbar-item:not(.locked)');
+    for (var t = 0; t < toolbarItems.length; t++) {
+      toolbarItems[t].addEventListener('click', function(e) {
+        var bKey = this.getAttribute('data-building');
+        if (GameState.selectedBuilding === bKey) {
+          GameState.selectedBuilding = null;
+        } else {
+          GameState.selectedBuilding = bKey;
+        }
+        Toolbar.render();
+      });
+    }
+  },
+
+  /** Cancel placement mode. */
+  cancelPlacement: function() {
+    GameState.selectedBuilding = null;
+    this.render();
+  },
+};

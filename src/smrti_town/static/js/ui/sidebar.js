@@ -103,44 +103,77 @@ var Sidebar = {
   },
 
   /**
-   * Display building details in the sidebar.
+   * Display building details in the sidebar with live stats.
    */
   showBuilding: function(building) {
     this.show();
     var bKey = building.building_key || building.type || 'unknown';
     var def = BUILDINGS[bKey];
     var name = (def && def.name) || bKey;
+    var category = building.category || (def && def.category) || '';
+    var catColor = CATEGORY_COLORS[category] || 'var(--text)';
 
     var html = '<h3>' + _esc(name) + '</h3>';
 
-    html += '<div class="sidebar-section">';
-    html += '<div class="sidebar-label">Type</div>';
-    html += '<div class="sidebar-value">' + _esc(bKey) + '</div>';
-    html += '</div>';
-
-    if (def) {
-      html += '<div class="sidebar-section">';
-      html += '<div class="sidebar-label">Category</div>';
-      html += '<div class="sidebar-value" style="color:' +
-        (CATEGORY_COLORS[def.category] || 'var(--text)') + ';">' +
-        _esc(def.category) + '</div>';
+    // Category badge
+    if (category) {
+      html += '<div style="margin-bottom:8px;">';
+      html += '<span style="background:' + catColor + '22;color:' + catColor +
+        ';border:1px solid ' + catColor + '44;border-radius:4px;padding:2px 7px;font-size:11px;">' +
+        _esc(category) + '</span>';
       html += '</div>';
     }
 
-    html += '<div class="sidebar-section">';
-    html += '<div class="sidebar-label">Position</div>';
-    html += '<div class="sidebar-value">(' + building.grid_x + ', ' + building.grid_y + ')</div>';
-    html += '</div>';
+    // Description
+    var desc = building.description || (def && def.description) || '';
+    if (desc) {
+      html += '<div style="color:var(--text-dim);font-size:12px;margin-bottom:10px;line-height:1.4;">' +
+        _esc(desc) + '</div>';
+    }
 
-    // List occupants from GameState
-    if (building.occupants && building.occupants.length > 0) {
-      html += '<div class="sidebar-section">';
-      html += '<div class="sidebar-label">Occupants</div>';
-      for (var i = 0; i < building.occupants.length; i++) {
-        html += '<div class="sidebar-value">' + _esc(building.occupants[i]) + '</div>';
+    // Purpose tags
+    var tags = [];
+    if (building.provides_food) tags.push({ label: 'Food', color: '#f0a500' });
+    if (building.provides_housing) tags.push({ label: 'Housing', color: '#58a6ff' });
+    if (building.provides_goods) tags.push({ label: 'Goods', color: '#7ee787' });
+    if (building.revenue_per_hour > 0) tags.push({ label: 'Revenue', color: '#bc8cff' });
+    if (building.staff_required > 0) tags.push({ label: 'Employs ' + building.staff_required, color: '#d29922' });
+    if (building.capacity > 0) tags.push({ label: 'Cap. ' + building.capacity, color: '#79c0ff' });
+    if (tags.length > 0) {
+      html += '<div style="display:flex;flex-wrap:wrap;gap:4px;margin-bottom:10px;">';
+      for (var t = 0; t < tags.length; t++) {
+        html += '<span style="background:' + tags[t].color + '22;color:' + tags[t].color +
+          ';border:1px solid ' + tags[t].color + '44;border-radius:4px;padding:1px 6px;font-size:11px;">' +
+          _esc(tags[t].label) + '</span>';
       }
       html += '</div>';
     }
+
+    // Live stats
+    html += '<div class="sidebar-section">';
+    html += '<div class="sidebar-label">Live</div>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;margin-top:4px;">';
+    html += _statCell('Here now', building.citizens_here || 0, 'var(--accent)');
+    if (building.provides_housing)
+      html += _statCell('Residents', building.citizens_home || 0, '#58a6ff');
+    if (building.staff_required > 0)
+      html += _statCell('Workers', building.citizens_work || 0, '#d29922');
+    if (building.provides_food || building.provides_goods) {
+      html += _statCell('Transactions', building.transactions || 0, '#7ee787');
+      html += _statCell('Revenue', (building.revenue || 0) + 'g', '#bc8cff');
+    }
+    html += '</div>';
+    html += '</div>';
+
+    // Economics
+    html += '<div class="sidebar-section">';
+    html += '<div class="sidebar-label">Economics</div>';
+    html += '<div style="display:grid;grid-template-columns:1fr 1fr;gap:4px 8px;margin-top:4px;">';
+    if (building.cost) html += _statCell('Cost', building.cost + 'g', 'var(--text)');
+    if (building.maintenance) html += _statCell('Upkeep/hr', building.maintenance + 'g', '#f85149');
+    if (building.revenue_per_hour) html += _statCell('Rev/hr', building.revenue_per_hour + 'g', '#7ee787');
+    html += '</div>';
+    html += '</div>';
 
     this.contentEl.innerHTML = html;
   },

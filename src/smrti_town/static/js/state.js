@@ -9,6 +9,14 @@ function _esc(str) {
   return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+/** Render a two-line stat cell for the building popup grid. */
+function _statCell(label, value, color) {
+  return '<div style="background:var(--surface);border-radius:4px;padding:4px 6px;">' +
+    '<div style="font-size:10px;color:var(--text-dim);">' + _esc(label) + '</div>' +
+    '<div style="font-size:13px;font-weight:600;color:' + (color || 'var(--text)') + ';">' + _esc(String(value)) + '</div>' +
+    '</div>';
+}
+
 var GameState = {
   phase: PHASES.BOOT,
   tick: 0,

@@ -222,11 +222,9 @@ async def _tick_loop() -> None:
                         bkey = place.building_key if place else None
                         bdef = BUILDING_CATALOG.get(bkey) if bkey else None
                         if bdef and bdef.provides_food:
-                            # Proper meal at a food building
-                            economy.citizen_buy(c.name, "food")
+                            economy.citizen_buy(c.name, "food", building=target)
                             needs.satisfy("hunger")
                         else:
-                            # Subsistence at home — partial satisfaction
                             needs.satisfy("hunger", 50.0)
 
                     elif atype == ACTION_WORK:
@@ -260,7 +258,8 @@ async def _tick_loop() -> None:
                         needs.satisfy("social", 15.0)
 
                     elif atype == ACTION_SHOP:
-                        if economy.citizen_buy(c.name, "goods"):
+                        shop_target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)
+                        if economy.citizen_buy(c.name, "goods", building=shop_target):
                             needs.satisfy("social", 10.0)
 
             # Phase 3: Economy tick
@@ -558,6 +557,29 @@ async def _tick_loop() -> None:
             for evt in milestone_events:
                 await broadcast({"type": "event", **evt})
 
+            # Build gridmap payload with live per-building stats.
+            gridmap_dict = gridmap.to_dict() if gridmap and hasattr(gridmap, "to_dict") else None
+            if gridmap_dict and alive_citizens:
+                # Compute per-place headcounts in one pass.
+                here_count: dict[str, int] = {}
+                home_count: dict[str, int] = {}
+                work_count: dict[str, int] = {}
+                for c in alive_citizens:
+                    if c.location:
+                        here_count[c.location] = here_count.get(c.location, 0) + 1
+                    if c.home:
+                        home_count[c.home] = home_count.get(c.home, 0) + 1
+                    if c.workplace:
+                        work_count[c.workplace] = work_count.get(c.workplace, 0) + 1
+                bstats = economy.building_stats if economy else {}
+                for b in gridmap_dict.get("buildings", []):
+                    pname = b.get("place_name", "")
+                    b["citizens_here"] = here_count.get(pname, 0)
+                    b["citizens_home"] = home_count.get(pname, 0)
+                    b["citizens_work"] = work_count.get(pname, 0)
+                    b["transactions"] = bstats.get(pname, {}).get("transactions", 0)
+                    b["revenue"] = bstats.get(pname, {}).get("revenue", 0)
+
             # Broadcast tick result
             tick_result = {
                 "type": "tick",
@@ -568,7 +590,7 @@ async def _tick_loop() -> None:
                 "citizens": [c.to_dict() for c in citizens if hasattr(c, "to_dict")],
                 "economy": economy.to_dict() if economy else None,
                 "topology": topology.to_dict() if topology and hasattr(topology, "to_dict") else None,
-                "gridmap": gridmap.to_dict() if gridmap and hasattr(gridmap, "to_dict") else None,
+                "gridmap": gridmap_dict,
                 "actions": actions,
                 "milestone_events": milestone_events,
             }

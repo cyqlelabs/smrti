@@ -606,7 +606,7 @@ COUNCIL_ROLES = {
     "treasurer": {"domain": "finances", "title": "Treasurer"},
 }
 
-COUNCIL_MEETING_INTERVAL_HOURS = 168  # 1 sim-week
+COUNCIL_MEETING_INTERVAL_HOURS = 24  # 1 sim-day
 
 # ── Economy ──────────────────────────────────────────────────────────
 STARTING_TREASURY = 50000

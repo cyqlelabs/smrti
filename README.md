@@ -14,7 +14,7 @@
 
 > [Pipeline diagram →](docs/pipeline.md)
 
-**`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a Bayesian truth value, attention weight, and valence score. Evidence is append-only; truth values update via PLN revision. A hybrid GLiNER2 + LLM pipeline auto-extracts entities and relation edges; the LLM is only called when ≥2 entities are found (~40–60% fewer LLM calls). Pronouns are resolved against the live graph using persisted entity context, not raw conversation history.
+**`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a Bayesian truth value, attention weight, and valence score. Evidence is append-only; truth values update via PLN revision. A hybrid GLiNER2 + LLM pipeline auto-extracts entities and relation edges; the LLM is only called when ≥2 entities are found. Pronouns are resolved against the live graph using persisted entity context, not raw conversation history.
 
 **`recall()`** — Embeds the query → KNN seeds (top-50) → 1-hop graph expansion → salience re-ranking: `w_sim × similarity + w_sti × STI + w_conf × confidence + w_lti × LTI + w_val × |valence| × intensity`. When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. Each result is classified as `critical_warning`, `known_antipattern`, or `context`.
 

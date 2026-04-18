@@ -223,3 +223,29 @@ def test_viz_returns_404_when_no_html(client):
     resp = client.get("/viz")
     # Either 200 (if static file exists) or 404 (if not) — both are valid
     assert resp.status_code in (200, 404)
+
+
+# ── Empty / whitespace query validation ─────────────────────────────────────
+
+def test_recall_rejects_empty_query(client):
+    """A blank query should return 422 (validation), not hit the engine."""
+    resp = client.post("/recall", json={"query": "", "top_k": 5})
+    assert resp.status_code == 422
+    body = resp.json()
+    assert "query" in str(body).lower()
+
+
+def test_recall_rejects_whitespace_only_query(client):
+    resp = client.post("/recall", json={"query": "   \t\n  ", "top_k": 5})
+    assert resp.status_code == 422
+
+
+def test_recall_accepts_cjk_query(client):
+    """Chinese/Japanese/Korean queries should pass validation (bytes > 0)."""
+    resp = client.post("/recall", json={"query": "金刚经空性", "top_k": 5})
+    assert resp.status_code == 200
+
+
+def test_forget_rejects_empty_query(client):
+    resp = client.post("/forget", json={"query": "", "reason": "test"})
+    assert resp.status_code == 422

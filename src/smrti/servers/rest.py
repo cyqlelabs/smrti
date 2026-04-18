@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Optional
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from smrti import Smrti
 from smrti.servers import config as cfg
@@ -54,6 +54,13 @@ class RecallRequest(BaseModel):
     top_k: int = 10
     min_confidence: float = 0.1
 
+    @field_validator("query")
+    @classmethod
+    def _non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("query must not be empty or whitespace-only")
+        return v
+
 
 class BelieveRequest(BaseModel):
     statement: str
@@ -64,6 +71,13 @@ class BelieveRequest(BaseModel):
 class ForgetRequest(BaseModel):
     query: str
     reason: Optional[str] = None
+
+    @field_validator("query")
+    @classmethod
+    def _non_empty(cls, v: str) -> str:
+        if not v or not v.strip():
+            raise ValueError("query must not be empty or whitespace-only")
+        return v
 
 
 class PersonalityRequest(BaseModel):

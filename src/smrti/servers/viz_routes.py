@@ -158,4 +158,65 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         clear()
         return {"status": "ok"}
 
+    # ── Prometheus / OpenMetrics exposition ─────────────────────────────────
+    @router.get("/metrics")
+    async def prometheus_metrics(db: str | None = Query(None)):
+        """Export smrti status as Prometheus-format metrics.
+
+        Zero external deps — plain text/plain response matching the Prometheus
+        exposition format. Safe to scrape from Grafana / any prom-compatible
+        system. Use ?db=<path> to target a non-default on-disk database.
+        """
+        mem = _db_mem(db) if db else get_mem("default", "default")
+        s = mem.status()
+        tenant = str(s.get("personality", {}).get("tenant_id") or "default")
+        space = str(s.get("personality", {}).get("space") or "default")
+        labels = f'tenant="{tenant}",space="{space}"'
+
+        lines: list[str] = []
+
+        # total atoms
+        lines.append("# HELP smrti_atoms_total Total number of atoms in the space.")
+        lines.append("# TYPE smrti_atoms_total gauge")
+        lines.append(f'smrti_atoms_total{{{labels}}} {int(s.get("total_atoms", 0))}')
+
+        # per-type atom counts
+        lines.append("# HELP smrti_atoms_by_type Count of atoms by type.")
+        lines.append("# TYPE smrti_atoms_by_type gauge")
+        for atom_type, count in (s.get("by_type") or {}).items():
+            safe_type = str(atom_type).replace('"', '')
+            lines.append(
+                f'smrti_atoms_by_type{{{labels},type="{safe_type}"}} {int(count)}'
+            )
+
+        # epoch count
+        epoch = s.get("personality", {}).get("epoch_count")
+        if epoch is not None:
+            lines.append("# HELP smrti_epoch_count Number of reflect epochs completed.")
+            lines.append("# TYPE smrti_epoch_count counter")
+            lines.append(f'smrti_epoch_count{{{labels}}} {int(epoch)}')
+
+        # personality tuning params (useful to see drift vs baseline)
+        for key in (
+            "confidence_decay_rate",
+            "sti_decay_rate",
+            "sti_boost_on_access",
+            "lti_promotion_threshold",
+            "min_confidence_to_surface",
+            "valence_weight",
+        ):
+            val = s.get("personality", {}).get(key)
+            if val is None:
+                continue
+            metric = f"smrti_personality_{key}"
+            lines.append(f"# HELP {metric} Personality tuning parameter: {key}.")
+            lines.append(f"# TYPE {metric} gauge")
+            lines.append(f'{metric}{{{labels}}} {float(val)}')
+
+        body = "
+".join(lines) + "
+"
+        from fastapi.responses import Response
+        return Response(content=body, media_type="text/plain; version=0.0.4")
+
     return router

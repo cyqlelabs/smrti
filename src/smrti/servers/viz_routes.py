@@ -213,9 +213,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
             lines.append(f"# TYPE {metric} gauge")
             lines.append(f'{metric}{{{labels}}} {float(val)}')
 
-        body = "
-".join(lines) + "
-"
+        body = "\n".join(lines) + "\n"
         from fastapi.responses import Response
         return Response(content=body, media_type="text/plain; version=0.0.4")
 

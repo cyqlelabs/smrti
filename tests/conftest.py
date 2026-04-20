@@ -2,16 +2,10 @@
 import asyncio
 import pytest
 
-from smrti.core.db import clear_registry
-
 
 @pytest.fixture(autouse=True)
 def reset_event_loop():
-    """Create a new event loop before each test and set it as current.
-
-    Prevents asyncio.run() in one test from leaving a closed loop that breaks
-    subsequent tests using asyncio.get_event_loop().
-    """
+    """Create a new event loop before each test and set it as current."""
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     yield
@@ -23,13 +17,17 @@ def reset_event_loop():
 
 @pytest.fixture(autouse=True)
 def reset_db_registry():
-    """Close all Database connections and clear the registry after each test.
+    """Close only databases opened during this test, leaving module-scoped ones intact.
 
-    The registry is process-scoped by design (for production use), but between
-    tests every temp database must be fully released so file descriptors don't
-    accumulate. Without this, tests that unlink their db file while connections
-    remain open exhaust the fd limit and cause sqlite3.OperationalError on later
-    tests.
+    Prevents fd leaks from function-scoped tmp_db fixtures without killing
+    module-scoped DB connections that are shared across tests in a module.
     """
+    from smrti.core.db import _registry, _registry_lock
+    with _registry_lock:
+        before = set(_registry.keys())
     yield
-    clear_registry()
+    with _registry_lock:
+        new_paths = set(_registry.keys()) - before
+        entries = [(p, _registry.pop(p)) for p in new_paths]
+    for _, db in entries:
+        db.close()

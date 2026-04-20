@@ -36,8 +36,9 @@ def client(mem_instance):
     from smrti.servers import rest as rest_mod
     with patch.object(rest_mod, "get_mem", return_value=mem_instance):
         with patch("smrti.servers.rest.run_reflect_loop", new=_noop_reflect):
-            with TestClient(rest_mod.app, raise_server_exceptions=True) as c:
-                yield c
+            with patch("smrti.servers.config.EXTRACT", False):
+                with TestClient(rest_mod.app, raise_server_exceptions=True) as c:
+                    yield c
 
 
 @pytest.fixture(autouse=True)

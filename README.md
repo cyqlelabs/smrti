@@ -6,7 +6,7 @@
 [![CI](https://img.shields.io/github/actions/workflow/status/cyqlelabs/smrti/publish.yml?label=CI)](https://github.com/cyqlelabs/smrti/actions/workflows/publish.yml)
 [![Coverage](https://img.shields.io/codecov/c/github/cyqlelabs/smrti)](https://codecov.io/gh/cyqlelabs/smrti)
 
-<a href="https://wiki.opencog.org/w/AtomSpace" target="_blank">AtomSpace</a>-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing. No extra infra to maintain. Just Plug & Play.
+<a href="https://github.com/opencog/atomspace" target="_blank">AtomSpace</a>-inspired memory engine for AI agents. Stores beliefs as graph nodes with Bayesian truth values, emotional valence, and attention weights in a single SQLite file with vector indexing. No extra infra to maintain. Just Plug & Play.
 
 **Not just vector search.** Embedding similarity is only an entry point — a fast index to seed graph traversal. What gets returned and why is governed by graph topology (typed relation edges), Bayesian truth values (PLN), attentional economics (STI/LTI), and emotional valence. Similarity is one signal among five, not the ranking.
 

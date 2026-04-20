@@ -184,7 +184,8 @@ def test_store_saves_user_messages_and_assistant_reply():
         stored.append(content)
         return "atom-id"
 
-    with patch("smrti.servers.proxy._remember", capturing_remember):
+    with patch("smrti.servers.proxy._remember", capturing_remember), \
+         patch("smrti.servers.config.EXTRACT", False):
         run(_store_exchange(messages, "Python is a language.", "t1", "s1"))
 
     assert "What is Python?" in stored
@@ -205,7 +206,8 @@ def test_store_only_saves_last_user_message():
         stored.append(content)
         return "atom-id"
 
-    with patch("smrti.servers.proxy._remember", capturing_remember):
+    with patch("smrti.servers.proxy._remember", capturing_remember), \
+         patch("smrti.servers.config.EXTRACT", False):
         run(_store_exchange(messages, "Final reply", "t1", "s1"))
 
     assert "Second message" in stored
@@ -221,7 +223,8 @@ def test_store_skips_empty_assistant_text():
         stored.append(content)
         return "atom-id"
 
-    with patch("smrti.servers.proxy._remember", capturing_remember):
+    with patch("smrti.servers.proxy._remember", capturing_remember), \
+         patch("smrti.servers.config.EXTRACT", False):
         run(_store_exchange(messages, "", "t1", "s1"))
 
     assert stored == ["Hello"]
@@ -248,7 +251,8 @@ def test_store_passes_tenant_and_space():
         calls.append((tenant_id, write_space))
         return "atom-id"
 
-    with patch("smrti.servers.proxy._remember", capturing_remember):
+    with patch("smrti.servers.proxy._remember", capturing_remember), \
+         patch("smrti.servers.config.EXTRACT", False):
         run(_store_exchange(messages, "Hello back", "usr_alice", "agent:coder"))
 
     assert all(c == ("usr_alice", "agent:coder") for c in calls)

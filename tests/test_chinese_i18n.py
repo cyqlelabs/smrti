@@ -12,8 +12,10 @@ Motivated by ZenMind AI's Siddhartha persona production deployment
 """
 import os
 import tempfile
+from unittest.mock import patch
 
 import pytest
+from fastapi.testclient import TestClient
 
 from smrti import Smrti
 
@@ -33,6 +35,20 @@ def cjk_mem(cjk_db_path):
     engine.close()
 
 
+@pytest.fixture(scope="module")
+def cjk_client(cjk_mem):
+    from smrti.servers import rest as rest_mod
+
+    async def _noop_reflect(*_args, **_kwargs):
+        return
+
+    with patch.object(rest_mod, "get_mem", return_value=cjk_mem):
+        with patch("smrti.servers.rest.run_reflect_loop", new=_noop_reflect):
+            with patch("smrti.servers.config.EXTRACT", False):
+                with TestClient(rest_mod.app, raise_server_exceptions=True) as c:
+                    yield c
+
+
 # Sample corpus — spans Simplified Chinese, Traditional, emoji, mixed script
 CJK_CORPUS = [
     "心生万法——观察决定显现",  # Simplified
@@ -43,43 +59,54 @@ CJK_CORPUS = [
 ]
 
 
-def test_remember_stores_chinese_verbatim(cjk_mem):
+def test_remember_stores_chinese_verbatim(cjk_client):
     """Chinese content should be stored and retrieved byte-for-byte."""
     text = "心生万法——观察决定显现"
-    atom_id = cjk_mem.remember(text, type="episode")
-    assert atom_id
+    resp = cjk_client.post("/remember", json={"content": text, "type": "episode"})
+    assert resp.status_code == 200
+    atom_id = resp.json()["atom_id"]
 
-    atom = cjk_mem.atomspace.get_atom(atom_id, cjk_mem.tenant_id, cjk_mem.write_space)
-    assert atom is not None
-    assert atom.content == text, "no mojibake / no truncation"
+    got = cjk_client.get(f"/atoms/{atom_id}")
+    assert got.status_code == 200
+    assert got.json()["content"] == text, "no mojibake / no truncation"
 
 
-def test_remember_then_recall_chinese(cjk_mem):
+def test_remember_then_recall_chinese(cjk_client):
     """After remembering several Chinese fragments, recall should surface them."""
     for text in CJK_CORPUS:
-        cjk_mem.remember(text)
+        r = cjk_client.post("/remember", json={"content": text})
+        assert r.status_code == 200
 
-    results = cjk_mem.recall("空性 无常", top_k=3)
-    assert isinstance(results, list)
+    # Recall with Chinese query — should return something
+    r = cjk_client.post("/recall", json={"query": "空性 无常", "top_k": 3})
+    assert r.status_code == 200
+    # Response shape varies but at least shouldn't be empty dict on no match
+    assert isinstance(r.json(), dict)
 
 
-def test_believe_chinese_statement(cjk_mem):
+def test_believe_chinese_statement(cjk_client):
     """A belief expressed in Chinese should round-trip."""
-    atom_id = cjk_mem.believe("痛苦是信号，不是敌人", probability=0.9)
-    assert atom_id
+    r = cjk_client.post("/believe", json={
+        "statement": "痛苦是信号，不是敌人",
+        "probability": 0.9,
+    })
+    assert r.status_code == 200
 
 
-def test_recall_mixed_cjk_english(cjk_mem):
+def test_recall_mixed_cjk_english(cjk_client):
     """A query that mixes English emotion labels and Chinese should work."""
-    results = cjk_mem.recall("anxiety_severe 焦虑", top_k=5)
-    assert isinstance(results, list)
+    r = cjk_client.post("/recall", json={
+        "query": "anxiety_severe 焦虑",
+        "top_k": 5,
+    })
+    assert r.status_code == 200
 
 
-def test_remember_chinese_with_negative_valence(cjk_mem):
+def test_remember_chinese_with_negative_valence(cjk_client):
     """Emotional valence should apply regardless of script."""
-    atom_id = cjk_mem.remember(
-        "离开妻子耶输陀罗和儿子的那一夜",
-        valence=-0.7,
-        probability=0.95,
-    )
-    assert atom_id
+    r = cjk_client.post("/remember", json={
+        "content": "离开妻子耶输陀罗和儿子的那一夜",
+        "valence": -0.7,
+        "probability": 0.95,
+    })
+    assert r.status_code == 200

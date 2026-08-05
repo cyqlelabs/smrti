@@ -34,9 +34,10 @@ W_NEIGHBORHOOD: float = 0.2
 
 
 def _get_space_atoms(tenant_id: str, space: str, db) -> list[Atom]:
-    """Return all non-relation atoms in a space."""
+    """Return the top 500 most salient non-relation atoms in a space."""
     rows = db.fetchall(
-        "SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'",
+        """SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'
+           ORDER BY (sti + lti) DESC LIMIT 500""",
         (tenant_id, space),
     )
     return [atom_from_row(r) for r in rows]
@@ -64,12 +65,14 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
-def _entity_type_score(a: Atom, b: Atom) -> float:
-    """Return 1.0 if entity types match, 0.5 if one is None, 0.0 if they clash."""
-    if a.entity_type is None and b.entity_type is None:
-        return 0.5  # neutral — no signal either way
+def _entity_type_score(a: Atom, b: Atom) -> float | None:
+    """Return 1.0 if entity types match, 0.0 if they clash, None when unknown.
+
+    None means the signal is absent — its weight is redistributed to
+    embedding similarity by ``_contextual_similarity``.
+    """
     if a.entity_type is None or b.entity_type is None:
-        return 0.5  # one side has no type — don't penalize
+        return None
     return 1.0 if a.entity_type == b.entity_type else 0.0
 
 
@@ -89,26 +92,35 @@ def _get_neighbor_labels(atom_id: str, tenant_id: str, space: str, db) -> list[s
     return [r["label"] for r in rows]
 
 
+def _neighbor_context_embedding(
+    atom: Atom, db, embed_engine, cache: dict
+) -> list[float] | None:
+    """Embed the concatenated neighbor labels for an atom, memoized per call.
+
+    Returns None when the atom has no neighbors.
+    """
+    if atom.id in cache:
+        return cache[atom.id]
+    labels = _get_neighbor_labels(atom.id, atom.tenant_id, atom.space, db)
+    vec = list(embed_engine.embed(" ".join(labels))) if labels else None
+    cache[atom.id] = vec
+    return vec
+
+
 def _neighborhood_similarity(
-    atom_a: Atom, atom_b: Atom, db, embed_engine
-) -> float:
+    atom_a: Atom, atom_b: Atom, db, embed_engine, cache: dict
+) -> float | None:
     """Compute similarity between atoms' graph neighborhoods.
 
     Concatenates neighbor labels into a single string per atom and compares
-    their embeddings.  Returns 0.5 (neutral) when either atom has no neighbors.
+    their embeddings.  Returns None when either atom has no neighbors — the
+    signal is absent and its weight is redistributed to embedding similarity.
     """
-    labels_a = _get_neighbor_labels(atom_a.id, atom_a.tenant_id, atom_a.space, db)
-    labels_b = _get_neighbor_labels(atom_b.id, atom_b.tenant_id, atom_b.space, db)
-
-    if not labels_a or not labels_b:
-        return 0.5  # no neighborhood data — neutral, don't penalize or reward
-
-    ctx_a = " ".join(labels_a)
-    ctx_b = " ".join(labels_b)
-
-    vec_a = embed_engine.embed(ctx_a)
-    vec_b = embed_engine.embed(ctx_b)
-    return _cosine_similarity(list(vec_a), list(vec_b))
+    vec_a = _neighbor_context_embedding(atom_a, db, embed_engine, cache)
+    vec_b = _neighbor_context_embedding(atom_b, db, embed_engine, cache)
+    if vec_a is None or vec_b is None:
+        return None
+    return _cosine_similarity(vec_a, vec_b)
 
 
 def _contextual_similarity(
@@ -117,21 +129,35 @@ def _contextual_similarity(
     emb_sim: float,
     db,
     embed_engine=None,
+    neighbor_cache: dict | None = None,
 ) -> float:
     """Compute multi-signal contextual similarity between two atoms.
 
-    Blends embedding similarity, entity-type compatibility, and (optionally)
-    neighborhood similarity.  When ``embed_engine`` is None, neighborhood
-    similarity is skipped and its weight is redistributed to embedding sim.
+    Blends embedding similarity, entity-type compatibility, and neighborhood
+    similarity.  When a signal is absent (entity type unknown on either side,
+    no embed engine, or either neighborhood empty) its weight is redistributed
+    to embedding similarity, so two identical atoms always score 1.0.
     """
-    et_score = _entity_type_score(atom_a, atom_b)
+    w_emb = W_EMBEDDING
+    score = 0.0
 
-    if embed_engine is not None:
-        ns = _neighborhood_similarity(atom_a, atom_b, db, embed_engine)
-        return W_EMBEDDING * emb_sim + W_ENTITY_TYPE * et_score + W_NEIGHBORHOOD * ns
+    et_score = _entity_type_score(atom_a, atom_b)
+    if et_score is None:
+        w_emb += W_ENTITY_TYPE
     else:
-        # No embed engine — redistribute neighborhood weight to embedding
-        return (W_EMBEDDING + W_NEIGHBORHOOD) * emb_sim + W_ENTITY_TYPE * et_score
+        score += W_ENTITY_TYPE * et_score
+
+    ns = None
+    if embed_engine is not None:
+        if neighbor_cache is None:
+            neighbor_cache = {}
+        ns = _neighborhood_similarity(atom_a, atom_b, db, embed_engine, neighbor_cache)
+    if ns is None:
+        w_emb += W_NEIGHBORHOOD
+    else:
+        score += W_NEIGHBORHOOD * ns
+
+    return max(0.0, min(1.0, w_emb * emb_sim + score))
 
 
 def _match_atoms(
@@ -177,6 +203,7 @@ def _match_atoms(
     # This avoids neighborhood embedding calls for clearly-unrelated pairs.
     pre_filter = max(0.0, threshold - 0.15)
 
+    neighbor_cache: dict[str, list[float] | None] = {}
     candidates: list[tuple[float, str, str]] = []
     for aid, vec_a in emb_a.items():
         for bid, vec_b in emb_b.items():
@@ -186,6 +213,7 @@ def _match_atoms(
 
             ctx_sim = _contextual_similarity(
                 atom_a_map[aid], atom_b_map[bid], emb_sim, db, embed_engine,
+                neighbor_cache=neighbor_cache,
             )
             if ctx_sim >= threshold:
                 candidates.append((ctx_sim, aid, bid))

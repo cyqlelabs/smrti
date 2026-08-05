@@ -1,4 +1,4 @@
-"""Miscellaneous coverage: truth.pln_merge, connections, __init__ edge cases."""
+"""Miscellaneous coverage: PLN merge, connections, __init__ edge cases."""
 from __future__ import annotations
 
 import os
@@ -10,15 +10,14 @@ import pytest
 
 from smrti import Smrti
 from smrti.core.models import TruthValue
-from smrti.evolution.truth import pln_merge
 
 
-# ── truth.pln_merge ───────────────────────────────────────────────────────────
+# ── TruthValue.merge (PLN revision) ───────────────────────────────────────────
 
 def test_pln_merge_returns_truth_value():
     a = TruthValue(probability=0.8, confidence=0.6)
     b = TruthValue(probability=0.6, confidence=0.4)
-    result = pln_merge(a, b)
+    result = a.merge(b)
     assert isinstance(result, TruthValue)
     assert 0.0 <= result.probability <= 1.0
     assert 0.0 <= result.confidence <= 1.0

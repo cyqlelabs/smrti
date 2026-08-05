@@ -11,6 +11,7 @@ commutative (A∩B == B∩A always produces the same space name).
 """
 from __future__ import annotations
 
+import json
 import uuid
 
 from smrti.core.models import (
@@ -109,30 +110,32 @@ def materialize_bridge(
         return 0
 
     bridge_space = overlap.bridge_space_name
-    created = 0
+    count = 0
 
-    # Index existing bridge atoms by their source pair so we can update
+    # Index existing bridge atoms by their source pair so we can update.
+    # Keys are order-normalized so discovery from either parent space finds
+    # the same stored bridge atom.
     existing = db.fetchall(
         "SELECT id, metadata FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'",
         (tenant_id, bridge_space),
     )
     source_pair_to_id: dict[tuple[str, str], str] = {}
     for row in existing:
-        import json
         meta = json.loads(row["metadata"] or "{}")
         src_a = meta.get("bridge_source_a")
         src_b = meta.get("bridge_source_b")
         if src_a and src_b:
-            source_pair_to_id[(src_a, src_b)] = row["id"]
+            source_pair_to_id[tuple(sorted((src_a, src_b)))] = row["id"]
 
     for pair in overlap.pairs:
-        key = (pair.atom_a.id, pair.atom_b.id)
+        key = tuple(sorted((pair.atom_a.id, pair.atom_b.id)))
         bridge_atom = _merge_pair(pair, bridge_space, tenant_id)
 
         if key in source_pair_to_id:
             # Update existing bridge atom
             bridge_atom.id = source_pair_to_id[key]
             atomspace.update_atom(bridge_atom)
+            count += 1
         else:
             # Create new bridge atom + relation edges
             atom_id = atomspace.add_atom(bridge_atom)
@@ -157,6 +160,6 @@ def materialize_bridge(
                 truth=TruthValue(probability=pair.similarity, confidence=0.8),
             )
 
-            created += 1
+            count += 1
 
-    return created
+    return count

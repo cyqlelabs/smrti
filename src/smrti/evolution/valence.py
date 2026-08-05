@@ -14,19 +14,17 @@ def propagate_valence(
 ) -> None:
     """Propagate emotional valence to 1-hop connected atoms within the same space.
 
-    Uses a weighted blend controlled by ``mood_inertia`` (0–1): existing valence
-    contributes ``mood_inertia`` fraction, incoming signal contributes the rest,
-    keeping emotional drift gradual for high-inertia presets and more reactive
-    for low-inertia ones (e.g. empathetic=0.4).
+    Nudges each neighbor toward the source valence with step size
+    ``propagation_factor * (1 - mood_inertia)`` so the blend fixpoint is the
+    source valence itself — strong neighbor valence is reinforced, never eroded
+    toward zero.  High-inertia presets drift slowly; low-inertia ones
+    (e.g. empathetic=0.4) react faster.
     """
-    spread_v = valence * propagation_factor
-    spread_i = intensity * propagation_factor
-
-    if abs(spread_v) < 0.01:
+    if abs(valence) * propagation_factor < 0.01:
         return
 
     keep = max(0.0, min(1.0, mood_inertia))
-    absorb = 1.0 - keep
+    step = propagation_factor * (1.0 - keep)
 
     # Relation atoms store their endpoints in source_id/target_id columns rather
     # than as further relation edges, so the standard forward/backward query
@@ -49,8 +47,8 @@ def propagate_valence(
     for nid in neighbor_ids:
         db.execute(
             """UPDATE atoms SET
-                   valence   = (valence   * ? + ? * ?),
-                   intensity = MIN(intensity * ? + ? * ?, 1.0)
+                   valence   = MAX(-1.0, MIN(1.0, valence   + ? * (? - valence))),
+                   intensity = MAX(0.0,  MIN(1.0, intensity + ? * (? - intensity)))
                WHERE id = ? AND tenant_id = ? AND space = ?""",
-            (keep, spread_v, absorb, keep, spread_i, absorb, nid, tenant_id, space),
+            (step, valence, step, intensity, nid, tenant_id, space),
         )

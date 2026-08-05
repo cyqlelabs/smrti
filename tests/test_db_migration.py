@@ -141,6 +141,28 @@ def test_registry_normalizes_path_aliases(tmp_path):
     assert db1 is db2
 
 
+def test_content_hash_backfill_on_old_db(tmp_path):
+    import hashlib
+
+    path = str(tmp_path / "hash.db")
+    db = get_database(path)
+    db.execute(
+        "INSERT INTO atoms (id, type, label, content, tenant_id, space) "
+        "VALUES ('e1', 'episode', 'ep', 'hello world', 't1', 's1')"
+    )
+    close_database(path)
+
+    conn = sqlite3.connect(path)
+    conn.execute("DROP INDEX idx_atoms_content_hash")
+    conn.execute("ALTER TABLE atoms DROP COLUMN content_hash")
+    conn.commit()
+    conn.close()
+
+    db = get_database(path)
+    row = db.fetchone("SELECT content_hash FROM atoms WHERE id = 'e1'")
+    assert row["content_hash"] == hashlib.sha256(b"hello world").hexdigest()
+
+
 def test_u_lower_is_unicode_aware(tmp_path):
     db = get_database(str(tmp_path / "ul.db"))
     _insert_atom(db, "m1", "concept", "MÜLLER", "s1")

@@ -32,9 +32,10 @@ def compute_salience(
     # Dynamic weight scaling: severe negative-valence atoms shift weight
     # from STI to valence so old-but-critical errors outrank recent trivia.
     # valence_weight controls the strength of this shift per personality.
+    # The shift is mass-conserving: valence gains exactly what STI loses.
     if valence < -0.5:
-        boost = abs(valence) * intensity * valence_weight
-        w_sti = max(w_sti - boost, 0.0)
+        boost = min(abs(valence) * intensity * valence_weight, w_sti)
+        w_sti = w_sti - boost
         w_valence = w_valence + boost
 
     return (

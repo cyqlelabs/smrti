@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 
 from mcp.server import Server
@@ -10,10 +11,14 @@ from mcp import types
 
 from smrti import Smrti
 from smrti.extraction.sentiment import estimate_valence
+from smrti.personality.params import PersonalityProfile, load_preset
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
 from smrti.servers.tools import TOOLS
 from smrti.servers.reflect_loop import run_reflect_loop
+
+# Strong references to fire-and-forget tasks so the GC cannot cancel them mid-flight
+_background_tasks: set[asyncio.Task] = set()
 
 
 def create_smrti() -> Smrti:
@@ -33,7 +38,7 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         if mem.is_ignored(content):
             return {"status": "ignored", "atom_id": ""}
         valence = args.get("valence")
-        if valence is None or valence == 0.0:
+        if valence is None:
             valence = estimate_valence(content, mem.embed)
         atom_type = args.get("type", "episode")
         if atom_type == "belief":
@@ -93,7 +98,10 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
 
     elif name == "smrti_forget":
         forgotten = mem.forget(query=args["query"], top_k=5)
-        return {"status": "ok", "softened": forgotten}
+        result = {"status": "ok", "softened": forgotten}
+        if args.get("reason"):
+            result["reason"] = args["reason"]
+        return result
 
     elif name == "smrti_personality":
         action = args["action"]
@@ -104,9 +112,21 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             )
             return dict(row) if row else {}
         elif action in ("set", "preset"):
-            preset = args.get("preset") or "balanced"
+            preset = args.get("preset")
+            params = args.get("params")
+            if params:
+                try:
+                    base = load_preset(preset) if preset else PersonalityProfile()
+                    profile = dataclasses.replace(base, **params)
+                except (TypeError, ValueError) as exc:
+                    return {"error": f"Invalid personality params: {exc}"}
+                mem.set_personality_profile(profile, preset or "custom")
+                return {"status": "ok", "preset": preset or "custom"}
+            if not preset:
+                return {"error": "action requires a 'preset' or 'params' argument"}
             mem.set_personality(preset)
             return {"status": "ok", "preset": preset}
+        return {"error": f"Unknown action: {action}"}
 
     elif name == "smrti_status":
         result = mem.status()
@@ -156,14 +176,6 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         return {"error": f"Unknown op: {op}"}
 
     # Legacy handlers retained for backward compatibility (REST routes, direct callers)
-    elif name == "smrti_believe":
-        atom_id = mem.believe(
-            statement=args["statement"],
-            probability=args["probability"],
-            evidence=args.get("evidence"),
-        )
-        return {"status": "ok", "atom_id": atom_id}
-
     elif name == "smrti_space_overlap":
         result = mem.space_overlap(
             other_space=args["other_space"],
@@ -248,15 +260,18 @@ def run_mcp_server() -> None:
 
     @server.call_tool()
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
-        result = handle_tool(mem, name, arguments)
+        loop = asyncio.get_running_loop()
+        result = await loop.run_in_executor(None, handle_tool, mem, name, arguments)
         if name == "smrti_remember" and cfg.EXTRACT:
             episode_id = result.get("atom_id", "")
             content = arguments.get("content", "")
             if episode_id and content:
                 from smrti.extraction.extract import extract_and_link_serialized
-                asyncio.create_task(
+                task = asyncio.create_task(
                     extract_and_link_serialized(episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL, mode=cfg.EXTRACT_MODE)
                 )
+                _background_tasks.add(task)
+                task.add_done_callback(_background_tasks.discard)
         return [types.TextContent(type="text", text=json.dumps(result, default=str))]
 
     async def _main() -> None:

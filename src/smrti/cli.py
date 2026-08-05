@@ -7,6 +7,22 @@ import typer
 
 app = typer.Typer(help="Smrti memory engine CLI")
 
+_LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+
+def _warn_if_exposed(host: str) -> None:
+    """Warn once at startup when binding beyond loopback without an API key."""
+    if host in _LOOPBACK_HOSTS or os.environ.get("SMRTI_API_KEY"):
+        return
+    typer.secho(
+        f"WARNING: binding to {host} without SMRTI_API_KEY set — the API is "
+        "reachable from other machines with no authentication. "
+        "Set SMRTI_API_KEY to require a key on every request.",
+        fg=typer.colors.YELLOW,
+        err=True,
+        bold=True,
+    )
+
 
 @app.command()
 def init(
@@ -66,6 +82,7 @@ def serve_rest(
     """Start REST API server."""
     from smrti.servers.rest import run_rest_server
 
+    _warn_if_exposed(host)
     typer.echo(f"Starting Smrti REST API on http://{host}:{port}")
     run_rest_server(host=host, port=port)
 
@@ -83,6 +100,7 @@ def serve_viz(
 
     from smrti.servers.rest import run_rest_server
 
+    _warn_if_exposed(host)
     url = f"http://{host}:{port}/viz"
     typer.echo(f"Starting Smrti visualizer on {url}")
 
@@ -114,6 +132,7 @@ def serve_proxy(
 
     from smrti.servers.proxy import run_proxy_server
 
+    _warn_if_exposed(host)
     effective_upstream = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
     typer.echo(f"Starting Smrti proxy on http://{host}:{port}/v1")
     typer.echo(f"Visualizer:  http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port}/viz")

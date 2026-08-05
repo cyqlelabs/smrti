@@ -45,10 +45,11 @@ def test_remember_ignored_content(mem):
     assert result["atom_id"] == ""
 
 
-def test_remember_zero_valence_triggers_sentiment_estimate(mem):
+def test_remember_explicit_zero_valence_skips_sentiment_estimate(mem):
+    """Explicit neutral valence (0.0) is respected — only absence triggers estimation."""
     with patch("smrti.servers.mcp.estimate_valence", return_value=0.3) as mock_est:
         result = handle_tool(mem, "smrti_remember", {"content": "test", "valence": 0.0})
-    mock_est.assert_called_once()
+    mock_est.assert_not_called()
     assert result["status"] == "ok"
 
 

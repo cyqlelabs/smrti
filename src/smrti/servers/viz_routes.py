@@ -4,13 +4,15 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import os
-from pathlib import Path
+import secrets
 from typing import Callable
 
-from fastapi import APIRouter, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from smrti import Smrti
+from smrti.core.db import _registry, _resolve_path
+from smrti.servers import config as cfg
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -22,19 +24,58 @@ _db_cache: dict[str, Smrti] = {}
 _DB_CACHE_MAX = 20
 
 
+async def api_key_middleware(request: Request, call_next):
+    """Require SMRTI_API_KEY on every request when it is configured.
+
+    Accepts either `Authorization: Bearer <key>` or `X-Api-Key: <key>`, so
+    proxy clients can keep their upstream credentials in Authorization and
+    supply the smrti key via X-Api-Key.
+    """
+    key = cfg.API_KEY
+    if key:
+        supplied = request.headers.get("x-api-key") or ""
+        auth = request.headers.get("authorization", "")
+        bearer = auth[7:] if auth.startswith("Bearer ") else ""
+        if not (
+            secrets.compare_digest(supplied, key)
+            or secrets.compare_digest(bearer, key)
+        ):
+            return JSONResponse(
+                status_code=401,
+                content={
+                    "error": {
+                        "message": "Invalid or missing API key",
+                        "type": "authentication_error",
+                        "code": "invalid_api_key",
+                    }
+                },
+            )
+    return await call_next(request)
+
+
 def _db_mem(db_path: str) -> Smrti:
-    """Return a cached Smrti instance connected to *db_path* (any tenant/space)."""
-    expanded = str(Path(db_path).expanduser().resolve())
-    if expanded not in _db_cache:
+    """Return a cached Smrti instance for *db_path* — only if already registered.
+
+    Rejects paths not present in the shared Database registry so the query
+    param cannot open (or create) arbitrary filesystem paths as SQLite DBs.
+    Cache eviction only drops the wrapper — the registry owns connections.
+    """
+    resolved = _resolve_path(db_path)
+    if resolved not in _registry:
+        raise HTTPException(status_code=403, detail="db path not registered")
+    cached = _db_cache.get(resolved)
+    if cached is not None and cached.db is not _registry[resolved]:
+        _db_cache.pop(resolved)  # path was closed and re-registered — drop stale wrapper
+    if resolved not in _db_cache:
         if len(_db_cache) >= _DB_CACHE_MAX:
             _db_cache.pop(next(iter(_db_cache)))
-        _db_cache[expanded] = Smrti(
-            db_path=expanded,
+        _db_cache[resolved] = Smrti(
+            db_path=resolved,
             personality="balanced",
             tenant_id="default",
             write_space="default",
         )
-    return _db_cache[expanded]
+    return _db_cache[resolved]
 
 
 def create_viz_router(get_mem: GetMemFn) -> APIRouter:
@@ -70,7 +111,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
     async def get_graph(
         tenant_id: str = Query("default"),
         space: str = Query("default"),
-        limit: int = Query(200),
+        limit: int = Query(200, ge=1, le=1000),
         min_confidence: float = Query(0.0),
         types: str = Query("concept,belief,episode,goal"),
         db: str | None = Query(None),
@@ -98,8 +139,8 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
                 """SELECT * FROM atoms
                    WHERE tenant_id=? AND space=? AND type='relation'
                      AND source_id IS NOT NULL AND target_id IS NOT NULL
-                   LIMIT 5000""",
-                (tenant_id, space),
+                   LIMIT ?""",
+                (tenant_id, space, min(limit * 10, 5000)),
             )
             for r in edge_rows:
                 if r["source_id"] in node_ids and r["target_id"] in node_ids:
@@ -116,9 +157,15 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         return mem.status()
 
     @router.get("/atoms/{atom_id}")
-    async def get_atom(atom_id: str):
-        mem = get_mem("default", "default")
-        atom = mem.atomspace.get_atom(atom_id, mem.tenant_id, mem.write_space)
+    async def get_atom(
+        atom_id: str,
+        tenant_id: str | None = Query(None),
+        space: str | None = Query(None),
+    ):
+        tenant = tenant_id or cfg.TENANT_ID
+        spc = space or cfg.SPACE
+        mem = get_mem(tenant, spc)
+        atom = mem.atomspace.get_atom(atom_id, tenant, spc)
         if not atom:
             raise HTTPException(status_code=404, detail="Atom not found")
         return atom.model_dump()
@@ -167,10 +214,14 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         exposition format. Safe to scrape from Grafana / any prom-compatible
         system. Use ?db=<path> to target a non-default on-disk database.
         """
+        def _esc(value: str) -> str:
+            """Escape a Prometheus label value: backslash, quote, newline."""
+            return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+
         mem = _db_mem(db) if db else get_mem("default", "default")
         s = mem.status()
-        tenant = str(s.get("personality", {}).get("tenant_id") or "default")
-        space = str(s.get("personality", {}).get("space") or "default")
+        tenant = _esc(str(s.get("personality", {}).get("tenant_id") or "default"))
+        space = _esc(str(s.get("personality", {}).get("space") or "default"))
         labels = f'tenant="{tenant}",space="{space}"'
 
         lines: list[str] = []
@@ -184,7 +235,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         lines.append("# HELP smrti_atoms_by_type Count of atoms by type.")
         lines.append("# TYPE smrti_atoms_by_type gauge")
         for atom_type, count in (s.get("by_type") or {}).items():
-            safe_type = str(atom_type).replace('"', '')
+            safe_type = _esc(str(atom_type))
             lines.append(
                 f'smrti_atoms_by_type{{{labels},type="{safe_type}"}} {int(count)}'
             )

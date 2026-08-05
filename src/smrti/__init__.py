@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+import threading
 
 try:
     from smrti._version import __version__
@@ -37,6 +38,20 @@ from smrti.spaces.set_ops import (
     space_symmetric_difference as _space_symmetric_difference,
 )
 from smrti.spaces.emergence import materialize_bridge as _materialize_bridge
+
+# Per-(tenant_id, space) locks so concurrent reflect() calls (background loop +
+# REST /reflect) cannot interleave epochs on the same space.
+_reflect_locks: dict[tuple[str, str], threading.Lock] = {}
+_reflect_locks_guard = threading.Lock()
+
+
+def _get_reflect_lock(tenant_id: str, space: str) -> threading.Lock:
+    key = (tenant_id, space)
+    with _reflect_locks_guard:
+        lock = _reflect_locks.get(key)
+        if lock is None:
+            lock = _reflect_locks[key] = threading.Lock()
+    return lock
 
 
 class Smrti:
@@ -185,7 +200,8 @@ class Smrti:
         return atom_id
 
     def reflect(self) -> EpochResult:
-        return run_epoch(self.tenant_id, self.write_space, self.db, self.embed)
+        with _get_reflect_lock(self.tenant_id, self.write_space):
+            return run_epoch(self.tenant_id, self.write_space, self.db, self.embed)
 
     def forget(self, query: str, top_k: int = 5) -> list[str]:
         """Soften memories matching query by reducing their confidence."""

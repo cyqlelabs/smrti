@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import struct
 from typing import Optional
@@ -32,13 +33,13 @@ class AtomSpace:
                     id, type, label, content, probability, confidence,
                     sti, lti, valence, intensity,
                     source_id, target_id, relation,
-                    tenant_id, space, metadata, entity_type,
+                    tenant_id, space, metadata, entity_type, content_hash,
                     created_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
                     ?, ?, ?,
-                    ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?,
                     COALESCE(
                         (SELECT created_at FROM atoms WHERE id = ?),
                         datetime('now')
@@ -64,6 +65,9 @@ class AtomSpace:
                     atom.space,
                     json.dumps(atom.metadata),
                     atom.entity_type.value if atom.entity_type else None,
+                    hashlib.sha256(atom.content.encode()).hexdigest()
+                    if atom.content
+                    else None,
                     atom.id,
                 ),
             )

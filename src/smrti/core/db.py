@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import queue
 import sqlite3
@@ -77,7 +78,8 @@ CREATE TABLE IF NOT EXISTS atoms (
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
     metadata    TEXT DEFAULT '{{}}',
-    entity_type TEXT
+    entity_type TEXT,
+    content_hash TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_atoms_type ON atoms(type);
@@ -87,6 +89,7 @@ CREATE INDEX IF NOT EXISTS idx_atoms_source ON atoms(source_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_target ON atoms(target_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_label ON atoms(label);
 CREATE INDEX IF NOT EXISTS idx_atoms_sti ON atoms(sti DESC);
+CREATE INDEX IF NOT EXISTS idx_atoms_content_hash ON atoms(tenant_id, space, content_hash);
 
 {_VEC_SCHEMA_SQL};
 
@@ -176,11 +179,42 @@ class Database:
             self._read_pool.put(_make_connection(self._db_path))
         with self._write_lock:
             self._migrate_vec_atoms()
+            self._migrate_content_hash()
             for statement in _SCHEMA_SQL.strip().split(";"):
                 stmt = statement.strip()
                 if stmt:
                     self._write_conn.execute(stmt)
             self._write_conn.commit()
+
+    def _migrate_content_hash(self) -> None:
+        """Add the content_hash column to pre-existing DBs and backfill episodes."""
+        conn = self._write_conn
+        if (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'atoms'"
+            ).fetchone()
+            is None
+        ):
+            return
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(atoms)")}
+        if "content_hash" in cols:
+            return
+        try:
+            conn.execute("ALTER TABLE atoms ADD COLUMN content_hash TEXT")
+            rows = conn.execute(
+                "SELECT id, content FROM atoms WHERE type = 'episode' AND content IS NOT NULL"
+            ).fetchall()
+            conn.executemany(
+                "UPDATE atoms SET content_hash = ? WHERE id = ?",
+                [
+                    (hashlib.sha256(r["content"].encode()).hexdigest(), r["id"])
+                    for r in rows
+                ],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _migrate_vec_atoms(self) -> None:
         """Rebuild vec_atoms in place when created by a pre-space / L2 schema.

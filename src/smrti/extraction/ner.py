@@ -70,6 +70,9 @@ class NERProvider:
         of the input are not silently dropped by the transformer context window.
         Results from all chunks are merged before post-processing.
 
+        `threshold` is forwarded to GLiNER2 as the minimum span confidence;
+        real confidence scores are surfaced in the returned dicts.
+
         Returns list of {"name": str, "type": str, "score": float}.
         """
         if labels is None:
@@ -84,17 +87,31 @@ class NERProvider:
         best: dict[str, dict] = {}
 
         for chunk in _chunk_text(text):
-            raw = model.extract_entities(chunk, labels)
+            raw = model.extract_entities(
+                chunk, labels, threshold=threshold, include_confidence=True
+            )
             entities_dict = raw.get("entities", {}) if isinstance(raw, dict) else {}
-            for name in entities_dict.get("pronoun", []):
-                pronoun_tagged.add(name.lower())
-            for etype, names in entities_dict.items():
-                for name in names:
+            for etype, spans in entities_dict.items():
+                if not isinstance(spans, list):
+                    spans = [spans]
+                for span in spans:
+                    # GLiNER2 returns {"text", "confidence"} dicts with
+                    # include_confidence=True, plain strings otherwise.
+                    if isinstance(span, dict):
+                        name = span.get("text", "")
+                        score = float(span.get("confidence", 1.0))
+                    else:
+                        name = span
+                        score = 1.0
+                    if not name:
+                        continue
                     key = name.lower()
+                    if etype == "pronoun":
+                        pronoun_tagged.add(key)
                     priority = _TYPE_PRIORITY.get(etype, len(_DEFAULT_LABELS))
                     existing = best.get(key)
                     if existing is None or priority < _TYPE_PRIORITY.get(existing["type"], len(_DEFAULT_LABELS)):
-                        best[key] = {"name": name, "type": etype, "score": 1.0}
+                        best[key] = {"name": name, "type": etype, "score": score}
 
         # Restore pronoun type for any span GLiNER labelled as pronoun,
         # regardless of what the priority system selected as the winning type.
@@ -137,13 +154,19 @@ class NERProvider:
 def _is_verb_phrase(ent: dict, model) -> bool:
     """Return True if an entity span is a verb/imperative phrase rather than a noun phrase.
 
-    Only checks preference/constraint entities with 3+ words — these are the types
-    most prone to matching imperative clauses ("Avoid X", "Niemals Y").
-    Language-agnostic: delegates to GLiNER2's classify_text.
+    Only checks preference/constraint entities — these are the types most
+    prone to matching imperative clauses ("Avoid X", "Niemals Y"). The
+    classifier runs when the span has 3+ whitespace-separated words OR is a
+    single space-free run of 4+ characters, so unsegmented scripts
+    (CJK/Thai) still reach it. Language-agnostic: delegates to GLiNER2's
+    classify_text.
     """
     etype = ent.get("type", "")
     name = ent.get("name", "")
-    if etype not in ("preference", "constraint") or len(name.split()) < 3:
+    if etype not in ("preference", "constraint"):
+        return False
+    words = len(name.split())
+    if not (words >= 3 or (words == 1 and len(name) >= 4)):
         return False
     try:
         result = model.classify_text(name, {"type": ["noun_phrase", "verb_phrase"]})

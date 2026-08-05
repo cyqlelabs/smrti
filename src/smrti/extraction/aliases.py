@@ -7,10 +7,13 @@ class AliasManager:
         self.db = db
 
     def lookup(self, alias: str, tenant_id: str, spaces: list[str]) -> str | None:
-        """Returns atom_id if alias is known in any of the given spaces, else None."""
+        """Returns atom_id if alias is known in any of the given spaces, else None.
+
+        Uses u_lower for Unicode-aware case folding (SQLite LOWER is ASCII-only).
+        """
         ph = ",".join("?" * len(spaces))
         row = self.db.fetchone(
-            f"SELECT atom_id FROM aliases WHERE LOWER(alias) = LOWER(?) AND tenant_id = ? AND space IN ({ph})",
+            f"SELECT atom_id FROM aliases WHERE u_lower(alias) = u_lower(?) AND tenant_id = ? AND space IN ({ph})",
             (alias, tenant_id, *spaces),
         )
         return row["atom_id"] if row else None

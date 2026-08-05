@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import time
 from typing import TYPE_CHECKING, Optional
@@ -14,14 +15,59 @@ from .prompts import AGENT_EXTRACTION_PROMPT, CLAIMS_ONLY_PROMPT, ENTITY_TYPES, 
 if TYPE_CHECKING:
     from smrti import Smrti
 
-_http: Optional[httpx.AsyncClient] = None
+logger = logging.getLogger("smrti.extract")
 
 _VALID_TYPES = set(ENTITY_TYPES)
 
 _EXTRACT_TIMEOUT: float = float(os.environ.get("SMRTI_EXTRACT_TIMEOUT", "60.0"))
 
+# Per-loop HTTP clients: an AsyncClient is bound to the event loop it was
+# created on — reusing it from a new loop hangs. Entries for closed loops are
+# evicted lazily so the registry stays bounded.
+_http_clients: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
+
+
+class _PerLoopLocks:
+    """Session locks keyed by (event loop, session key).
+
+    An asyncio.Lock is bound to the loop that created it — awaiting one from
+    another loop hangs. Lock dicts are therefore kept per loop, and entries
+    for closed loops are evicted lazily so the registry stays bounded.
+    Dict-style access (``in``, ``[]``, ``clear``) spans all loops.
+    """
+
+    def __init__(self) -> None:
+        self._entries: dict[int, tuple[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]]] = {}
+
+    def get_lock(self, key: str) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        for loop_id, (cached_loop, _) in list(self._entries.items()):
+            if cached_loop.is_closed():
+                del self._entries[loop_id]
+        entry = self._entries.get(id(loop))
+        if entry is None:
+            entry = (loop, {})
+            self._entries[id(loop)] = entry
+        locks = entry[1]
+        if key not in locks:
+            locks[key] = asyncio.Lock()
+        return locks[key]
+
+    def __contains__(self, key: str) -> bool:
+        return any(key in locks for _, locks in self._entries.values())
+
+    def __getitem__(self, key: str) -> asyncio.Lock:
+        for _, locks in self._entries.values():
+            if key in locks:
+                return locks[key]
+        raise KeyError(key)
+
+    def clear(self) -> None:
+        self._entries.clear()
+
+
 # Per-session locks to serialize extractions within the same (tenant_id, write_space)
-_session_locks: dict[str, asyncio.Lock] = {}
+_session_locks = _PerLoopLocks()
 
 
 def _apply_thinking_mode(body: dict, mode: str) -> None:
@@ -37,10 +83,75 @@ def _apply_thinking_mode(body: dict, mode: str) -> None:
 
 
 def _get_http() -> httpx.AsyncClient:
-    global _http
-    if _http is None:
-        _http = httpx.AsyncClient(timeout=httpx.Timeout(30.0))
-    return _http
+    loop = asyncio.get_running_loop()
+    for loop_id, (cached_loop, _) in list(_http_clients.items()):
+        if cached_loop.is_closed():
+            del _http_clients[loop_id]
+    entry = _http_clients.get(id(loop))
+    if entry is None:
+        entry = (loop, httpx.AsyncClient(timeout=httpx.Timeout(30.0)))
+        _http_clients[id(loop)] = entry
+    return entry[1]
+
+
+async def aclose_extract_clients() -> None:
+    """Close the current event loop's HTTP client, if one was created."""
+    entry = _http_clients.pop(id(asyncio.get_running_loop()), None)
+    if entry is not None:
+        await entry[1].aclose()
+
+
+async def _post_chat(
+    http: httpx.AsyncClient, upstream: str, auth: str, request_body: dict
+) -> httpx.Response:
+    """POST a chat-completion request, retrying once without chat_template_kwargs.
+
+    Some OpenAI-compatible validators reject unknown fields with a 4xx; the
+    retry drops the thinking-mode hint so extraction still works.
+    """
+    headers = {"Content-Type": "application/json", "Authorization": auth}
+    resp = await http.post(
+        f"{upstream}/v1/chat/completions",
+        headers=headers, json=request_body, timeout=_EXTRACT_TIMEOUT,
+    )
+    if 400 <= resp.status_code < 500 and "chat_template_kwargs" in request_body:
+        retry_body = {k: v for k, v in request_body.items() if k != "chat_template_kwargs"}
+        resp = await http.post(
+            f"{upstream}/v1/chat/completions",
+            headers=headers, json=retry_body, timeout=_EXTRACT_TIMEOUT,
+        )
+    return resp
+
+
+_ITEM_SHAPES = {
+    "entities": ("name", "type"),
+    "claims": ("subject", "predicate", "object"),
+}
+
+
+def _validate_extraction(parsed: object) -> Optional[dict]:
+    """Validate the shape of a parsed LLM extraction response.
+
+    The top level must be a dict; "entities"/"claims" must be lists of dicts
+    with the expected string fields. Malformed items are dropped rather than
+    crashing the pipeline.
+    """
+    if not isinstance(parsed, dict):
+        return None
+    out = dict(parsed)
+    for key, fields in _ITEM_SHAPES.items():
+        if key not in out:
+            continue
+        items = out[key]
+        if not isinstance(items, list):
+            out[key] = []
+            continue
+        out[key] = [
+            item for item in items
+            if isinstance(item, dict)
+            and all(isinstance(item.get(f), str) for f in fields)
+        ]
+    return out
 
 
 async def extract_knowledge(
@@ -96,13 +207,11 @@ async def extract_knowledge(
     }
     t0 = time.monotonic()
     try:
-        resp = await http.post(
-            f"{upstream}/v1/chat/completions",
-            headers={"Content-Type": "application/json", "Authorization": auth},
-            json=request_body,
-            timeout=_EXTRACT_TIMEOUT,
-        )
+        resp = await _post_chat(http, upstream, auth, request_body)
         entry["status"] = resp.status_code
+        if not 200 <= resp.status_code < 300:
+            entry["error"] = f"upstream returned HTTP {resp.status_code}"
+            return None
         data = resp.json()
         msg = data["choices"][0]["message"]
         raw = (msg.get("content") or msg.get("reasoning_content") or "").strip()
@@ -110,7 +219,10 @@ async def extract_knowledge(
         # Strip markdown code fences if present
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        parsed = json.loads(raw)
+        parsed = _validate_extraction(json.loads(raw))
+        if parsed is None:
+            entry["error"] = "response is not a JSON object"
+            return None
         entry["response_parsed"] = parsed
         return parsed
     except Exception as exc:
@@ -124,16 +236,22 @@ async def extract_knowledge(
 _COREF_TYPES = {"person", "organization", "project", "role", "tool", "technology", "skill", "location", "event", "topic", "media", "health", "goal", "preference", "constraint"}
 
 
-def _get_salient_person(mem: "Smrti") -> tuple[str, str] | None:
-    """Return (label, atom_id) of the most salient person atom in the current space, or None."""
-    row = mem.db.fetchone(
+def _get_sole_person(mem: "Smrti") -> tuple[str, str] | None:
+    """Return (label, atom_id) of the only person atom in the write space.
+
+    Returns None when zero or multiple person atoms exist — first-person
+    claims are only attributed when the speaker is unambiguous.
+    """
+    rows = mem.db.fetchall(
         """SELECT id, label FROM atoms
            WHERE tenant_id = ? AND space = ? AND entity_type = 'person'
              AND source_id IS NULL AND type IN ('concept', 'belief', 'goal')
-           ORDER BY (sti + lti) DESC LIMIT 1""",
+           LIMIT 2""",
         (mem.tenant_id, mem.write_space),
     )
-    return (row["label"], row["id"]) if row else None
+    if len(rows) != 1:
+        return None
+    return (rows[0]["label"], rows[0]["id"])
 
 
 def _build_entity_context(mem: "Smrti") -> str:
@@ -164,18 +282,28 @@ def _build_entity_context(mem: "Smrti") -> str:
 # ── Reusable helpers ──────────────────────────────────────────────────────────
 
 
+def _register_entity(entity_ids: dict[str, str], name: str, atom_id: str) -> None:
+    """Record name → atom_id with a lowercase convenience key.
+
+    The exact-case key is always written, so when two same-message names
+    differ only in case and resolve to different atoms, exact references keep
+    resolving to their own atom; the lowercase key is first-writer-wins.
+    """
+    entity_ids[name] = atom_id
+    entity_ids.setdefault(name.lower(), atom_id)
+
+
 def _db_resolve_label(label: str, entity_ids: dict[str, str], mem: "Smrti") -> str | None:
     """Resolve a claim subject/object to an atom_id, falling back to DB lookup."""
     atom_id = entity_ids.get(label) or entity_ids.get(label.lower())
     if atom_id:
         return atom_id
     row = mem.db.fetchone(
-        "SELECT id FROM atoms WHERE LOWER(label) = LOWER(?) AND tenant_id = ? AND space = ?",
+        "SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND tenant_id = ? AND space = ? AND type NOT IN ('relation', 'episode')",
         (label, mem.tenant_id, mem.write_space),
     )
     if row:
-        entity_ids[label] = row["id"]
-        entity_ids[label.lower()] = row["id"]
+        _register_entity(entity_ids, label, row["id"])
         return row["id"]
     return None
 
@@ -219,8 +347,7 @@ def _resolve_ner_entities(
         if etype not in _VALID_TYPES:
             etype = "concept"
         atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
-        entity_ids[name] = atom_id
-        entity_ids.setdefault(name.lower(), atom_id)
+        _register_entity(entity_ids, name, atom_id)
         for alias in ent.get("aliases", []):
             if alias and alias.lower() != name.lower():
                 resolver.aliases.add(atom_id, alias, mem.tenant_id, mem.write_space)
@@ -246,50 +373,60 @@ def _resolve_ner_entities(
 
 
 def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti", episode_id: str = "") -> None:
-    """Create relation edges from claim triplets."""
+    """Create relation edges from claim triplets.
+
+    Each claim is processed independently — a malformed one (non-numeric
+    valence, non-string labels) is logged and skipped, never aborting the
+    batch. Valence is clamped to [-1, 1] and intensity to [0, 1] before any
+    DB write.
+    """
     _resolver = None
     min_valence = 0.0
     for claim in claims:
-        subj_raw = claim.get("subject", "")
-        obj_raw = claim.get("object", "")
-        subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
-        obj_id = _db_resolve_label(obj_raw, entity_ids, mem)
-        # Auto-create missing object atoms as concepts rather than silently dropping
-        if not obj_id and obj_raw:
-            if _resolver is None:
-                from .resolve import EntityResolver
-                _resolver = EntityResolver(mem.db, mem.embed)
-            obj_id = _resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
-            entity_ids[obj_raw] = obj_id
-            entity_ids.setdefault(obj_raw.lower(), obj_id)
-        if subj_id and obj_id and subj_id != obj_id:
-            predicate = claim.get("predicate", "related_to")
-            claim_valence = float(claim.get("valence") or 0.0)
-            mem.atomspace.link_atoms(
-                subj_id, obj_id, predicate,
-                mem.tenant_id, mem.write_space,
-                valence=claim_valence,
-            )
-            # Propagate negative claim valence to the target atom immediately.
-            # Epoch propagation can't do this because relation atoms have no
-            # neighbors of their own — propagate_valence finds nothing.
-            if claim_valence < -0.3:
-                mem.db.execute(
-                    "UPDATE atoms SET valence = MIN(valence, ?), intensity = MAX(intensity, ?) WHERE id = ?",
-                    (claim_valence, abs(claim_valence), obj_id),
+        try:
+            subj_raw = claim.get("subject", "")
+            obj_raw = claim.get("object", "")
+            subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
+            obj_id = _db_resolve_label(obj_raw, entity_ids, mem)
+            # Auto-create missing object atoms as concepts rather than silently dropping
+            if not obj_id and obj_raw:
+                if _resolver is None:
+                    from .resolve import EntityResolver
+                    _resolver = EntityResolver(mem.db, mem.embed)
+                obj_id = _resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
+                _register_entity(entity_ids, obj_raw, obj_id)
+            if subj_id and obj_id and subj_id != obj_id:
+                predicate = claim.get("predicate", "related_to")
+                claim_valence = max(-1.0, min(1.0, float(claim.get("valence") or 0.0)))
+                intensity = min(1.0, abs(claim_valence))
+                mem.atomspace.link_atoms(
+                    subj_id, obj_id, predicate,
+                    mem.tenant_id, mem.write_space,
+                    valence=claim_valence,
                 )
-                if claim_valence < min_valence:
-                    min_valence = claim_valence
-            # Safety net: promote target atom to goal type on has_goal claims
-            if predicate == "has_goal":
-                _promote_to_goal(obj_id, mem)
+                # Propagate negative claim valence to the target atom immediately.
+                # Epoch propagation can't do this because relation atoms have no
+                # neighbors of their own — propagate_valence finds nothing.
+                if claim_valence < -0.3:
+                    mem.db.execute(
+                        "UPDATE atoms SET valence = MIN(valence, ?), intensity = MAX(intensity, ?) WHERE id = ?",
+                        (claim_valence, intensity, obj_id),
+                    )
+                    if claim_valence < min_valence:
+                        min_valence = claim_valence
+                # Safety net: promote target atom to goal type on has_goal claims
+                if predicate == "has_goal":
+                    _promote_to_goal(obj_id, mem)
+        except Exception as exc:
+            logger.warning("skipping malformed claim %r: %s", claim, exc)
+            continue
 
     # Propagate the strongest negative claim valence to the source episode so it
     # classifies as critical_warning without relying on sentiment estimation.
     if episode_id and min_valence < -0.3:
         mem.db.execute(
             "UPDATE atoms SET valence = MIN(valence, ?), intensity = MAX(intensity, ?) WHERE id = ?",
-            (min_valence, abs(min_valence), episode_id),
+            (min_valence, min(1.0, abs(min_valence)), episode_id),
         )
 
 
@@ -394,20 +531,21 @@ async def extract_claims_only(
     }
     t0 = time.monotonic()
     try:
-        resp = await _get_http().post(
-            f"{upstream}/v1/chat/completions",
-            headers={"Content-Type": "application/json", "Authorization": auth},
-            json=request_body,
-            timeout=_EXTRACT_TIMEOUT,
-        )
+        resp = await _post_chat(_get_http(), upstream, auth, request_body)
         entry["status"] = resp.status_code
+        if not 200 <= resp.status_code < 300:
+            entry["error"] = f"upstream returned HTTP {resp.status_code}"
+            return None
         data = resp.json()
         msg = data["choices"][0]["message"]
         raw = (msg.get("content") or msg.get("reasoning_content") or "").strip()
         entry["response_raw"] = raw[:2000]
         if raw.startswith("```"):
             raw = raw.split("\n", 1)[-1].rsplit("```", 1)[0].strip()
-        parsed = json.loads(raw)
+        parsed = _validate_extraction(json.loads(raw))
+        if parsed is None:
+            entry["error"] = "response is not a JSON object"
+            return None
         entry["response_parsed"] = parsed
         return parsed
     except Exception as exc:
@@ -482,10 +620,10 @@ async def extract_and_link_hybrid(
         return
 
     # Speaker injection: for user messages, if no person atom resolved (pronoun dropped
-    # because "I" alias wasn't in the alias table), inject the most salient known person
+    # because "I" alias wasn't in the alias table), inject the sole known person
     # so claims — especially goals, preferences, and actions — can be attributed to them.
-    # This treats first-person pronouns as speaker metadata rather than entity aliases,
-    # preventing graph fragmentation when alias registration was missed in hybrid mode.
+    # Attribution only happens when exactly one person atom exists in the write
+    # space; with several candidates the speaker is ambiguous and we skip it.
     if source == "user":
         def _inject_speaker_if_missing() -> list[dict]:
             atom_ids = list(set(entity_ids.values()))
@@ -497,13 +635,16 @@ async def extract_and_link_hybrid(
                 )
                 if row:
                     return ner_entities  # person already in scope
-            person = _get_salient_person(mem)
-            if person:
-                label, atom_id = person
-                entity_ids[label] = atom_id
-                entity_ids.setdefault(label.lower(), atom_id)
-                return ner_entities + [{"name": label, "type": "person"}]
-            return ner_entities
+            person = _get_sole_person(mem)
+            if person is None:
+                logger.debug(
+                    "speaker attribution skipped: no unambiguous person atom in %s/%s",
+                    mem.tenant_id, mem.write_space,
+                )
+                return ner_entities
+            label, atom_id = person
+            _register_entity(entity_ids, label, atom_id)
+            return ner_entities + [{"name": label, "type": "person"}]
 
         ner_entities = await loop.run_in_executor(None, _inject_speaker_if_missing)
 
@@ -534,8 +675,7 @@ async def extract_and_link_hybrid(
                 if not name or etype not in _ALLOWED_NEW_TYPES:
                     continue
                 atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
-                entity_ids[name] = atom_id
-                entity_ids.setdefault(name.lower(), atom_id)
+                _register_entity(entity_ids, name, atom_id)
                 if etype in ("preference", "constraint"):
                     # Reclassify the atom: concept → belief, update entity_type
                     mem.db.execute(
@@ -569,9 +709,7 @@ async def extract_and_link_serialized(
     Cross-session concurrency is preserved (different keys = different locks).
     """
     key = f"{mem.tenant_id}:{mem.write_space}"
-    if key not in _session_locks:
-        _session_locks[key] = asyncio.Lock()
-    async with _session_locks[key]:
+    async with _session_locks.get_lock(key):
         await extract_and_link_hybrid(
             episode_id, content, mem, auth, model, upstream, source, mode
         )

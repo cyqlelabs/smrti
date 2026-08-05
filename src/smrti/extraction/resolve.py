@@ -49,9 +49,10 @@ class EntityResolver:
         """
         spaces_ph = ",".join("?" * len(read_spaces))
 
-        # Tier 0: exact label match across read_spaces
+        # Tier 0: exact label match across read_spaces (u_lower: Unicode-aware
+        # case folding — SQLite's LOWER() only folds ASCII)
         row = self.db.fetchone(
-            f"SELECT id FROM atoms WHERE LOWER(label) = LOWER(?) AND entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph})",
+            f"SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph})",
             (name, entity_type, tenant_id, *read_spaces),
         )
         if row:
@@ -65,7 +66,7 @@ class EntityResolver:
         # never merged into concept atoms.
         atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
         row = self.db.fetchone(
-            f"SELECT id FROM atoms WHERE LOWER(label) = LOWER(?) AND type = ? AND tenant_id = ? AND space IN ({spaces_ph})",
+            f"SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND type = ? AND tenant_id = ? AND space IN ({spaces_ph})",
             (name, atom_type, tenant_id, *read_spaces),
         )
         if row:
@@ -78,9 +79,10 @@ class EntityResolver:
             self._boost_sti(atom_id)
             return atom_id
 
-        # Tier 2: fuzzy match within same entity_type across read_spaces
+        # Tier 2: fuzzy match within same entity_type across read_spaces,
+        # bounded to the most salient candidates so the scan can't blow up
         candidates = self.db.fetchall(
-            f"SELECT id, label FROM atoms WHERE entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND type != 'relation'",
+            f"SELECT id, label FROM atoms WHERE entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND type != 'relation' ORDER BY (sti + lti) DESC LIMIT 500",
             (entity_type, tenant_id, *read_spaces),
         )
         if candidates:
@@ -88,31 +90,39 @@ class EntityResolver:
             match = process.extractOne(name, names_map, scorer=fuzz.WRatio)
             if match and match[1] >= self.fuzzy_threshold:
                 matched_id = match[2]
-                self.aliases.add(matched_id, name, tenant_id, write_space)
+                # Only persist the alias on near-certain matches — a threshold-level
+                # fuzzy hit would otherwise poison tier-1 resolution permanently.
+                if match[1] >= self._ALIAS_PERSIST_SCORE:
+                    self.aliases.add(matched_id, name, tenant_id, write_space)
                 self._boost_sti(matched_id)
                 return matched_id
 
-        # Tier 3: embedding cosine similarity via sqlite-vec (tenant scope)
+        # Tier 3: embedding cosine similarity via sqlite-vec. KNN filters
+        # support equality only, so probe each read space and keep the best.
         query_vec = self.embed_engine.embed(name)
         vec_bytes = struct.pack(f"{len(query_vec)}f", *query_vec)
-        vec_match = self.db.fetchone(
-            """SELECT atom_id, distance FROM vec_atoms
-               WHERE embedding MATCH ? AND tenant_id = ?
-               ORDER BY distance LIMIT 1""",
-            (vec_bytes, tenant_id),
-        )
+        vec_match = None
+        for space in read_spaces:
+            row = self.db.fetchone(
+                """SELECT atom_id, distance FROM vec_atoms
+                   WHERE embedding MATCH ? AND tenant_id = ? AND space = ?
+                   ORDER BY distance LIMIT 1""",
+                (vec_bytes, tenant_id, space),
+            )
+            if row and (vec_match is None or row["distance"] < vec_match["distance"]):
+                vec_match = row
         if vec_match and vec_match["distance"] < self.cosine_threshold:
             atom_row = self.db.fetchone(
                 "SELECT entity_type FROM atoms WHERE id = ?",
                 (vec_match["atom_id"],),
             )
             if atom_row and atom_row["entity_type"] == entity_type:
-                self.aliases.add(vec_match["atom_id"], name, tenant_id, write_space)
+                # Embedding is the least reliable tier — never persist aliases here.
                 self._boost_sti(vec_match["atom_id"])
                 return vec_match["atom_id"]
 
-        # Tier 4: create new atom in write_space
-        return self._create_atom(name, entity_type, tenant_id, write_space)
+        # Tier 4: create new atom in write_space (reusing the probe vector)
+        return self._create_atom(name, entity_type, tenant_id, write_space, vec=query_vec)
 
     def _boost_sti(self, atom_id: str) -> None:
         self.db.execute(
@@ -120,13 +130,25 @@ class EntityResolver:
             (atom_id,),
         )
 
+    # Persisting an alias below this WRatio score risks poisoning tier-1
+    # resolution — matches at fuzzy_threshold still resolve, they just
+    # aren't remembered as aliases.
+    _ALIAS_PERSIST_SCORE = 92.0
+
     _ENTITY_TYPE_TO_ATOM_TYPE = {
         "goal": "goal",
         "preference": "belief",
         "constraint": "belief",
     }
 
-    def _create_atom(self, name: str, entity_type: str, tenant_id: str, space: str) -> str:
+    def _create_atom(
+        self,
+        name: str,
+        entity_type: str,
+        tenant_id: str,
+        space: str,
+        vec: list[float] | None = None,
+    ) -> str:
         atom_id = str(uuid.uuid4())
         atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
         self.db.execute(
@@ -136,7 +158,8 @@ class EntityResolver:
         )
 
         try:
-            vec = self.embed_engine.embed(name)
+            if vec is None:
+                vec = self.embed_engine.embed(name)
             vec_bytes = struct.pack(f"{len(vec)}f", *vec)
             self.db.execute(
                 "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",

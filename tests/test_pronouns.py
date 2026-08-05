@@ -257,13 +257,20 @@ def test_retroactive_merge_same_episode(mem):
     row = mem.db.fetchone("SELECT id FROM atoms WHERE id = ?", (pronoun_id,))
     assert row is None
 
-    # "I" should be an alias of the named atom
+    # "I" must NOT be persisted as an alias — pronoun labels would poison
+    # tier-1 resolution for every later speaker
     alias_row = mem.db.fetchone(
         "SELECT atom_id FROM aliases WHERE alias = 'I' AND tenant_id = 'test'",
         (),
     )
-    assert alias_row is not None
-    assert alias_row["atom_id"] == named_id
+    assert alias_row is None
+
+    # Relation edge should be reassigned to the named atom
+    rel_row = mem.db.fetchone(
+        "SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?",
+        (named_id, target_id),
+    )
+    assert rel_row is not None
 
 
 def test_retroactive_merge_different_episode_skipped(mem):

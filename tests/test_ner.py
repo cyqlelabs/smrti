@@ -57,7 +57,7 @@ def test_ner_extract_custom_labels():
 
     results = provider.extract("I live in Berlin", labels=["city"])
     mock_model.extract_entities.assert_called_once_with(
-        "I live in Berlin", ["city"]
+        "I live in Berlin", ["city"], threshold=0.4, include_confidence=True
     )
     assert len(results) == 1
     assert results[0]["type"] == "city"

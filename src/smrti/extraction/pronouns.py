@@ -150,11 +150,12 @@ def merge_pronoun_into_named(
     tenant_id: str,
     write_space: str,
 ) -> None:
-    """Merge a pronoun atom into a named atom: reassign edges, transfer aliases, delete."""
-    # Get pronoun label to register as alias
-    row = db.fetchone("SELECT label FROM atoms WHERE id = ?", (pronoun_atom_id,))
-    pronoun_label = row["label"] if row else None
+    """Merge a pronoun atom into a named atom: reassign edges, transfer aliases, delete.
 
+    The pronoun label itself is never registered as an alias — "he"/"I" would
+    become a permanent alias of whoever merged first, poisoning tier-1
+    resolution for every later speaker.
+    """
     # Reassign relation edges (source_id and target_id) within write_space only
     db.execute(
         "UPDATE atoms SET source_id = ? WHERE source_id = ? AND tenant_id = ? AND space = ?",
@@ -170,13 +171,6 @@ def merge_pronoun_into_named(
         "UPDATE aliases SET atom_id = ? WHERE atom_id = ? AND tenant_id = ? AND space = ?",
         (named_atom_id, pronoun_atom_id, tenant_id, write_space),
     )
-
-    # Register pronoun label as alias of named entity
-    if pronoun_label:
-        db.execute(
-            "INSERT OR IGNORE INTO aliases (alias, atom_id, tenant_id, space) VALUES (?, ?, ?, ?)",
-            (pronoun_label, named_atom_id, tenant_id, write_space),
-        )
 
     # Delete self-referencing edges (e.g. "I→is→I" became "Elara→is→Elara")
     db.execute(
@@ -202,9 +196,15 @@ def merge_pronoun_into_named(
         (tenant_id, write_space, named_atom_id),
     )
 
-    # Delete pronoun atom and its vector entry
-    db.execute("DELETE FROM vec_atoms WHERE atom_id = ?", (pronoun_atom_id,))
-    db.execute("DELETE FROM atoms WHERE id = ?", (pronoun_atom_id,))
+    # Delete pronoun atom and its vector entry — scoped to tenant_id + space
+    # like the edge reassignment above, so atoms in other spaces are untouched
+    row = db.fetchone(
+        "SELECT 1 FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+        (pronoun_atom_id, tenant_id, write_space),
+    )
+    if row:
+        db.execute("DELETE FROM vec_atoms WHERE atom_id = ?", (pronoun_atom_id,))
+        db.execute("DELETE FROM atoms WHERE id = ?", (pronoun_atom_id,))
 
 
 def find_and_merge_pronoun_atoms(

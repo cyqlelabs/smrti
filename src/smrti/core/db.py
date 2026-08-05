@@ -13,9 +13,16 @@ _registry: dict[str, "Database"] = {}
 _registry_lock = threading.Lock()
 
 
+def _resolve_path(db_path: str) -> str:
+    """Normalize a db path so aliases of the same file share one registry entry."""
+    if db_path == ":memory:":
+        return db_path
+    return os.path.realpath(os.path.expanduser(db_path))
+
+
 def get_database(db_path: str) -> "Database":
     """Return a shared Database for db_path, creating it on first call."""
-    resolved = os.path.expanduser(db_path)
+    resolved = _resolve_path(db_path)
     with _registry_lock:
         if resolved not in _registry:
             db = Database(resolved)
@@ -26,7 +33,7 @@ def get_database(db_path: str) -> "Database":
 
 def close_database(db_path: str) -> None:
     """Close and evict a database from the registry. Safe to call even if not registered."""
-    resolved = os.path.expanduser(db_path)
+    resolved = _resolve_path(db_path)
     with _registry_lock:
         db = _registry.pop(resolved, None)
     if db is not None:
@@ -42,7 +49,15 @@ def clear_registry() -> None:
         db.close()
 
 
-_SCHEMA_SQL = """
+_VEC_SCHEMA_SQL = """CREATE VIRTUAL TABLE IF NOT EXISTS vec_atoms USING vec0(
+    atom_id     TEXT,
+    embedding   float[384] distance_metric=cosine,
+    tenant_id   TEXT partition key,
+    space       TEXT partition key,
+    +label      TEXT
+)"""
+
+_SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS atoms (
     id          TEXT PRIMARY KEY,
     type        TEXT NOT NULL,
@@ -61,7 +76,7 @@ CREATE TABLE IF NOT EXISTS atoms (
     space       TEXT NOT NULL,
     created_at  TEXT DEFAULT (datetime('now')),
     updated_at  TEXT DEFAULT (datetime('now')),
-    metadata    TEXT DEFAULT '{}',
+    metadata    TEXT DEFAULT '{{}}',
     entity_type TEXT
 );
 
@@ -73,12 +88,7 @@ CREATE INDEX IF NOT EXISTS idx_atoms_target ON atoms(target_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_label ON atoms(label);
 CREATE INDEX IF NOT EXISTS idx_atoms_sti ON atoms(sti DESC);
 
-CREATE VIRTUAL TABLE IF NOT EXISTS vec_atoms USING vec0(
-    atom_id     TEXT,
-    embedding   float[384],
-    tenant_id   TEXT partition key,
-    +label      TEXT
-);
+{_VEC_SCHEMA_SQL};
 
 CREATE TABLE IF NOT EXISTS evidence (
     id                   TEXT PRIMARY KEY,
@@ -134,6 +144,11 @@ CREATE INDEX IF NOT EXISTS idx_aliases_atom ON aliases(atom_id);
 _READ_POOL_SIZE = 4
 
 
+def _u_lower(value: Any) -> Any:
+    """Unicode-aware lowercase for SQL — SQLite's LOWER() only folds ASCII."""
+    return value.lower() if isinstance(value, str) else value
+
+
 def _make_connection(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
@@ -141,6 +156,7 @@ def _make_connection(db_path: str) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA cache_size=-64000")
+    conn.create_function("u_lower", 1, _u_lower, deterministic=True)
     conn.enable_load_extension(True)
     sqlite_vec.load(conn)
     conn.enable_load_extension(False)
@@ -159,22 +175,69 @@ class Database:
         for _ in range(_READ_POOL_SIZE):
             self._read_pool.put(_make_connection(self._db_path))
         with self._write_lock:
+            self._migrate_vec_atoms()
             for statement in _SCHEMA_SQL.strip().split(";"):
                 stmt = statement.strip()
                 if stmt:
                     self._write_conn.execute(stmt)
             self._write_conn.commit()
 
+    def _migrate_vec_atoms(self) -> None:
+        """Rebuild vec_atoms in place when created by a pre-space / L2 schema.
+
+        Embeddings are copied out through a backup table, the table is
+        recreated with the cosine metric and space partition key, and rows are
+        restored joined to atoms for the space value — dropping relation-atom
+        vectors and orphaned vectors in the same pass. Stored vectors are
+        unchanged, only the distance metric interpretation moves to cosine.
+        """
+        conn = self._write_conn
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_atoms'"
+        ).fetchone()
+        if row is None:
+            return
+        sql = row["sql"] or ""
+        if "space" in sql and "distance_metric=cosine" in sql:
+            return
+        try:
+            conn.execute("DROP TABLE IF EXISTS _vec_atoms_migrate")
+            conn.execute(
+                "CREATE TABLE _vec_atoms_migrate AS SELECT atom_id, embedding, tenant_id FROM vec_atoms"
+            )
+            conn.execute("DROP TABLE vec_atoms")
+            conn.execute(_VEC_SCHEMA_SQL)
+            conn.execute(
+                """INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label)
+                   SELECT m.atom_id, m.embedding, m.tenant_id, a.space, a.label
+                   FROM _vec_atoms_migrate m
+                   JOIN atoms a ON a.id = m.atom_id
+                   WHERE a.type != 'relation'"""
+            )
+            conn.execute("DROP TABLE _vec_atoms_migrate")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
     def execute(self, sql: str, params: tuple = ()) -> sqlite3.Row:
         with self._write_lock:
-            cursor = self._write_conn.execute(sql, params)
-            self._write_conn.commit()
-            return cursor
+            try:
+                cursor = self._write_conn.execute(sql, params)
+                self._write_conn.commit()
+                return cursor
+            except Exception:
+                self._write_conn.rollback()
+                raise
 
     def execute_many(self, sql: str, params_list: list[tuple]) -> None:
         with self._write_lock:
-            self._write_conn.executemany(sql, params_list)
-            self._write_conn.commit()
+            try:
+                self._write_conn.executemany(sql, params_list)
+                self._write_conn.commit()
+            except Exception:
+                self._write_conn.rollback()
+                raise
 
     def execute_batch(self, statements: list[tuple]) -> None:
         """Execute multiple (sql, params) pairs in a single transaction."""

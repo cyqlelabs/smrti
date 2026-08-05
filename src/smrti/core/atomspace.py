@@ -81,8 +81,8 @@ class AtomSpace:
             embedding = self._embed.embed(text_to_embed)
             vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
             self._db.execute(
-                "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, label) VALUES (?, ?, ?, ?)",
-                (atom.id, vec_bytes, atom.tenant_id, atom.label),
+                "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",
+                (atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
             )
 
         return atom.id

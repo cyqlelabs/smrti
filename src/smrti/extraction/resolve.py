@@ -139,8 +139,8 @@ class EntityResolver:
             vec = self.embed_engine.embed(name)
             vec_bytes = struct.pack(f"{len(vec)}f", *vec)
             self.db.execute(
-                "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, label) VALUES (?, ?, ?, ?)",
-                (atom_id, vec_bytes, tenant_id, name),
+                "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",
+                (atom_id, vec_bytes, tenant_id, space, name),
             )
         except Exception:
             pass

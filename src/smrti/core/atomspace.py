@@ -21,70 +21,87 @@ class AtomSpace:
         self._embed = embed
 
     def add_atom(self, atom: Atom) -> str:
-        self._db.execute(
-            """
-            INSERT OR REPLACE INTO atoms (
-                id, type, label, content, probability, confidence,
-                sti, lti, valence, intensity,
-                source_id, target_id, relation,
-                tenant_id, space, metadata, entity_type,
-                created_at, updated_at
-            ) VALUES (
-                ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?,
-                ?, ?, ?,
-                ?, ?, ?, ?,
-                COALESCE(
-                    (SELECT created_at FROM atoms WHERE id = ?),
-                    datetime('now')
-                ),
-                datetime('now')
-            )
-            """,
-            (
-                atom.id,
-                atom.type.value,
-                atom.label,
-                atom.content,
-                atom.truth.probability,
-                atom.truth.confidence,
-                atom.attention.sti,
-                atom.attention.lti,
-                atom.valence.valence,
-                atom.valence.intensity,
-                atom.source_id,
-                atom.target_id,
-                atom.relation,
-                atom.tenant_id,
-                atom.space,
-                json.dumps(atom.metadata),
-                atom.entity_type.value if atom.entity_type else None,
-                atom.id,
-            ),
+        prior = self._db.fetchone(
+            "SELECT label, content FROM atoms WHERE id = ?",
+            (atom.id,),
         )
+        statements: list[tuple] = [
+            (
+                """
+                INSERT OR REPLACE INTO atoms (
+                    id, type, label, content, probability, confidence,
+                    sti, lti, valence, intensity,
+                    source_id, target_id, relation,
+                    tenant_id, space, metadata, entity_type,
+                    created_at, updated_at
+                ) VALUES (
+                    ?, ?, ?, ?, ?, ?,
+                    ?, ?, ?, ?,
+                    ?, ?, ?,
+                    ?, ?, ?, ?,
+                    COALESCE(
+                        (SELECT created_at FROM atoms WHERE id = ?),
+                        datetime('now')
+                    ),
+                    datetime('now')
+                )
+                """,
+                (
+                    atom.id,
+                    atom.type.value,
+                    atom.label,
+                    atom.content,
+                    atom.truth.probability,
+                    atom.truth.confidence,
+                    atom.attention.sti,
+                    atom.attention.lti,
+                    atom.valence.valence,
+                    atom.valence.intensity,
+                    atom.source_id,
+                    atom.target_id,
+                    atom.relation,
+                    atom.tenant_id,
+                    atom.space,
+                    json.dumps(atom.metadata),
+                    atom.entity_type.value if atom.entity_type else None,
+                    atom.id,
+                ),
+            )
+        ]
 
         # Protect severe negative-valence atoms from epoch pruning
         if atom.valence.valence < -0.7 and atom.valence.intensity > 0.7:
-            self._db.execute(
-                "UPDATE atoms SET lti = MAX(lti, 0.5) WHERE id = ?",
+            statements.append(
+                ("UPDATE atoms SET lti = MAX(lti, 0.5) WHERE id = ?", (atom.id,))
+            )
+
+        # Relation atoms carry synthetic labels — keep them out of the KNN index.
+        if atom.type != AtomType.RELATION:
+            existing_vec = self._db.fetchone(
+                "SELECT atom_id FROM vec_atoms WHERE atom_id = ?",
                 (atom.id,),
             )
-
-        existing_vec = self._db.fetchone(
-            "SELECT atom_id FROM vec_atoms WHERE atom_id = ?",
-            (atom.id,),
-        )
-        if not existing_vec:
-            text_to_embed = atom.label
-            if atom.content:
-                text_to_embed = f"{atom.label} {atom.content}"
-            embedding = self._embed.embed(text_to_embed)
-            vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
-            self._db.execute(
-                "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",
-                (atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
+            content_changed = prior is not None and (
+                prior["label"] != atom.label or prior["content"] != atom.content
             )
+            if not existing_vec or content_changed:
+                text_to_embed = atom.label
+                if atom.content:
+                    text_to_embed = f"{atom.label} {atom.content}"
+                embedding = self._embed.embed(text_to_embed)
+                vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+                if existing_vec:
+                    statements.append(
+                        ("DELETE FROM vec_atoms WHERE atom_id = ?", (atom.id,))
+                    )
+                statements.append(
+                    (
+                        "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",
+                        (atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
+                    )
+                )
 
+        self._db.execute_batch(statements)
         return atom.id
 
     def get_atom(self, atom_id: str, tenant_id: str, space: str) -> Atom | None:
@@ -97,38 +114,67 @@ class AtomSpace:
         return atom_from_row(row)
 
     def update_atom(self, atom: Atom) -> None:
-        self._db.execute(
-            """
-            UPDATE atoms SET
-                type = ?, label = ?, content = ?,
-                probability = ?, confidence = ?,
-                sti = ?, lti = ?,
-                valence = ?, intensity = ?,
-                source_id = ?, target_id = ?, relation = ?,
-                metadata = ?, entity_type = ?,
-                updated_at = datetime('now')
-            WHERE id = ? AND tenant_id = ? AND space = ?
-            """,
-            (
-                atom.type.value,
-                atom.label,
-                atom.content,
-                atom.truth.probability,
-                atom.truth.confidence,
-                atom.attention.sti,
-                atom.attention.lti,
-                atom.valence.valence,
-                atom.valence.intensity,
-                atom.source_id,
-                atom.target_id,
-                atom.relation,
-                json.dumps(atom.metadata),
-                atom.entity_type.value if atom.entity_type else None,
-                atom.id,
-                atom.tenant_id,
-                atom.space,
-            ),
+        prior = self._db.fetchone(
+            "SELECT label, content FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+            (atom.id, atom.tenant_id, atom.space),
         )
+        statements: list[tuple] = [
+            (
+                """
+                UPDATE atoms SET
+                    type = ?, label = ?, content = ?,
+                    probability = ?, confidence = ?,
+                    sti = ?, lti = ?,
+                    valence = ?, intensity = ?,
+                    source_id = ?, target_id = ?, relation = ?,
+                    metadata = ?, entity_type = ?,
+                    updated_at = datetime('now')
+                WHERE id = ? AND tenant_id = ? AND space = ?
+                """,
+                (
+                    atom.type.value,
+                    atom.label,
+                    atom.content,
+                    atom.truth.probability,
+                    atom.truth.confidence,
+                    atom.attention.sti,
+                    atom.attention.lti,
+                    atom.valence.valence,
+                    atom.valence.intensity,
+                    atom.source_id,
+                    atom.target_id,
+                    atom.relation,
+                    json.dumps(atom.metadata),
+                    atom.entity_type.value if atom.entity_type else None,
+                    atom.id,
+                    atom.tenant_id,
+                    atom.space,
+                ),
+            )
+        ]
+
+        # Keep the KNN index in sync when the embedded text changes.
+        if (
+            prior is not None
+            and atom.type != AtomType.RELATION
+            and (prior["label"] != atom.label or prior["content"] != atom.content)
+        ):
+            text_to_embed = atom.label
+            if atom.content:
+                text_to_embed = f"{atom.label} {atom.content}"
+            embedding = self._embed.embed(text_to_embed)
+            vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+            statements.append(
+                ("DELETE FROM vec_atoms WHERE atom_id = ?", (atom.id,))
+            )
+            statements.append(
+                (
+                    "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",
+                    (atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
+                )
+            )
+
+        self._db.execute_batch(statements)
 
     def link_atoms(
         self,
@@ -231,23 +277,27 @@ class AtomSpace:
         tenant_id: str,
         spaces: list[str],
         entity_type: Optional[str] = None,
+        limit: int = 100,
     ) -> list[Atom]:
         ph = ",".join("?" * len(spaces))
+        escaped = (
+            label.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        )
         if entity_type:
             rows = self._db.fetchall(
-                f"SELECT * FROM atoms WHERE label LIKE ? AND tenant_id = ? AND space IN ({ph}) AND entity_type = ?",
-                (f"%{label}%", tenant_id, *spaces, entity_type),
+                f"SELECT * FROM atoms WHERE label LIKE ? ESCAPE '\\' AND tenant_id = ? AND space IN ({ph}) AND entity_type = ? LIMIT ?",
+                (f"%{escaped}%", tenant_id, *spaces, entity_type, limit),
             )
         else:
             rows = self._db.fetchall(
-                f"SELECT * FROM atoms WHERE label LIKE ? AND tenant_id = ? AND space IN ({ph})",
-                (f"%{label}%", tenant_id, *spaces),
+                f"SELECT * FROM atoms WHERE label LIKE ? ESCAPE '\\' AND tenant_id = ? AND space IN ({ph}) LIMIT ?",
+                (f"%{escaped}%", tenant_id, *spaces, limit),
             )
         return [atom_from_row(r) for r in rows]
 
     def boost_sti(self, atom_id: str, amount: float = 0.5) -> None:
         self._db.execute(
-            "UPDATE atoms SET sti = sti + ?, updated_at = datetime('now') WHERE id = ?",
+            "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ?",
             (amount, atom_id),
         )
 

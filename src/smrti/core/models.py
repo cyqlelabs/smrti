@@ -20,13 +20,20 @@ class EntityType(str, Enum):
     PERSON = "person"
     ORGANIZATION = "organization"
     PROJECT = "project"
-    TOOL = "tool"
+    ROLE = "role"
+    TOOL = "tool"  # legacy rows only — NER now maps software tools to 'technology'
+    TECHNOLOGY = "technology"
+    SKILL = "skill"
     PREFERENCE = "preference"
     CONSTRAINT = "constraint"
     LOCATION = "location"
     EVENT = "event"
+    TOPIC = "topic"
+    MEDIA = "media"
+    HEALTH = "health"
     CONCEPT = "concept"
     GOAL = "goal"
+    PRONOUN = "pronoun"
 
 
 class TruthValue(BaseModel):
@@ -142,6 +149,12 @@ def _safe_entity_type(value: str | None) -> EntityType | None:
         return EntityType.CONCEPT
 
 
+def _clamp(value: float | None, lo: float, hi: float, default: float = 0.0) -> float:
+    if value is None:
+        value = default
+    return min(hi, max(lo, value))
+
+
 def atom_from_row(row) -> Atom:
     d = dict(row)
     return Atom(
@@ -150,16 +163,16 @@ def atom_from_row(row) -> Atom:
         label=d["label"],
         content=d.get("content"),
         truth=TruthValue(
-            probability=d.get("probability", 0.5),
-            confidence=d.get("confidence", 0.0),
+            probability=_clamp(d.get("probability"), 0.0, 1.0, 0.5),
+            confidence=_clamp(d.get("confidence"), 0.0, 1.0),
         ),
         attention=AttentionValue(
-            sti=d.get("sti", 0.0),
-            lti=d.get("lti", 0.0),
+            sti=max(0.0, d.get("sti") or 0.0),
+            lti=_clamp(d.get("lti"), 0.0, 1.0),
         ),
         valence=Valence(
-            valence=d.get("valence", 0.0),
-            intensity=d.get("intensity", 0.0),
+            valence=_clamp(d.get("valence"), -1.0, 1.0),
+            intensity=_clamp(d.get("intensity"), 0.0, 1.0),
         ),
         entity_type=_safe_entity_type(d.get("entity_type")),
         source_id=d.get("source_id"),

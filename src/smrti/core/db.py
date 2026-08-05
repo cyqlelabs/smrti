@@ -200,6 +200,8 @@ class Database:
         if "content_hash" in cols:
             return
         try:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute("ALTER TABLE atoms ADD COLUMN content_hash TEXT")
             rows = conn.execute(
                 "SELECT id, content FROM atoms WHERE type = 'episode' AND content IS NOT NULL"
@@ -229,17 +231,31 @@ class Database:
         row = conn.execute(
             "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'vec_atoms'"
         ).fetchone()
-        if row is None:
-            return
-        sql = row["sql"] or ""
-        if "space" in sql and "distance_metric=cosine" in sql:
-            return
-        try:
-            conn.execute("DROP TABLE IF EXISTS _vec_atoms_migrate")
+        have_backup = (
             conn.execute(
-                "CREATE TABLE _vec_atoms_migrate AS SELECT atom_id, embedding, tenant_id FROM vec_atoms"
-            )
-            conn.execute("DROP TABLE vec_atoms")
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = '_vec_atoms_migrate'"
+            ).fetchone()
+            is not None
+        )
+        if row is None and not have_backup:
+            return
+        sql = (row["sql"] or "") if row else ""
+        current = "space" in sql and "distance_metric=cosine" in sql
+        if current and not have_backup:
+            return
+        # Explicit transaction: SQLite DDL is transactional, but Python's
+        # legacy autocommit mode would otherwise commit each DDL statement
+        # individually — a crash mid-migration must leave the old index (or a
+        # restorable backup table) intact, never a silently empty one.
+        try:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            if not have_backup:
+                conn.execute(
+                    "CREATE TABLE _vec_atoms_migrate AS SELECT atom_id, embedding, tenant_id FROM vec_atoms"
+                )
+            if row is not None:
+                conn.execute("DROP TABLE vec_atoms")
             conn.execute(_VEC_SCHEMA_SQL)
             conn.execute(
                 """INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label)

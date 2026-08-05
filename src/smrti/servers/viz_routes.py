@@ -11,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from smrti import Smrti
-from smrti.core.db import _registry, _resolve_path
+from smrti.core.db import _registry, _registry_lock, _resolve_path
 from smrti.servers import config as cfg
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
@@ -61,10 +61,12 @@ def _db_mem(db_path: str) -> Smrti:
     Cache eviction only drops the wrapper — the registry owns connections.
     """
     resolved = _resolve_path(db_path)
-    if resolved not in _registry:
+    with _registry_lock:
+        registered = _registry.get(resolved)
+    if registered is None:
         raise HTTPException(status_code=403, detail="db path not registered")
     cached = _db_cache.get(resolved)
-    if cached is not None and cached.db is not _registry[resolved]:
+    if cached is not None and cached.db is not registered:
         _db_cache.pop(resolved)  # path was closed and re-registered — drop stale wrapper
     if resolved not in _db_cache:
         if len(_db_cache) >= _DB_CACHE_MAX:

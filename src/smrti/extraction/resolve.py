@@ -25,7 +25,10 @@ class EntityResolver:
         db,
         embed_engine,
         fuzzy_threshold: float = 85.0,
-        cosine_threshold: float = 0.3,
+        # Cosine distance: 0.2 requires similarity >= 0.8 — loose enough for
+        # semantic variants ("Postgres"/"PostgreSQL"), tight enough that
+        # distinct names ("Alice"/"Alicia" ~ 0.75 sim) never silently merge.
+        cosine_threshold: float = 0.2,
     ) -> None:
         self.db = db
         self.embed_engine = embed_engine

@@ -43,7 +43,7 @@ class _PerLoopLocks:
         loop = asyncio.get_running_loop()
         for loop_id, (cached_loop, _) in list(self._entries.items()):
             if cached_loop.is_closed():
-                del self._entries[loop_id]
+                self._entries.pop(loop_id, None)
         entry = self._entries.get(id(loop))
         if entry is None:
             entry = (loop, {})
@@ -86,7 +86,7 @@ def _get_http() -> httpx.AsyncClient:
     loop = asyncio.get_running_loop()
     for loop_id, (cached_loop, _) in list(_http_clients.items()):
         if cached_loop.is_closed():
-            del _http_clients[loop_id]
+            _http_clients.pop(loop_id, None)
     entry = _http_clients.get(id(loop))
     if entry is None:
         entry = (loop, httpx.AsyncClient(timeout=httpx.Timeout(30.0)))

@@ -16,9 +16,8 @@ def propagate_valence(
 
     Nudges each neighbor toward the source valence with step size
     ``propagation_factor * (1 - mood_inertia)`` so the blend fixpoint is the
-    source valence itself — strong neighbor valence is reinforced, never eroded
-    toward zero.  High-inertia presets drift slowly; low-inertia ones
-    (e.g. empathetic=0.4) react faster.
+    source valence itself, not zero.  High-inertia presets drift slowly;
+    low-inertia ones (e.g. empathetic=0.4) react faster.
     """
     if abs(valence) * propagation_factor < 0.01:
         return

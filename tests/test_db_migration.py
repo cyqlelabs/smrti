@@ -141,6 +141,38 @@ def test_registry_normalizes_path_aliases(tmp_path):
     assert db1 is db2
 
 
+def test_migration_recovers_from_stranded_backup(tmp_path):
+    """A crash-interrupted migration leaves _vec_atoms_migrate behind; the next
+    open must restore from it instead of trusting an empty new-schema table."""
+    path = str(tmp_path / "stranded.db")
+    db = get_database(path)
+    _insert_atom(db, "c1", "concept", "alpha", "s1")
+    close_database(path)
+
+    conn = sqlite3.connect(path)
+    conn.enable_load_extension(True)
+    sqlite_vec.load(conn)
+    conn.enable_load_extension(False)
+    # Simulate the crash window: backup populated, vec_atoms empty (new schema).
+    conn.execute(
+        "CREATE TABLE _vec_atoms_migrate (atom_id TEXT, embedding BLOB, tenant_id TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO _vec_atoms_migrate VALUES (?, ?, ?)", ("c1", _vec(1.0), "t1")
+    )
+    conn.execute("DELETE FROM vec_atoms")
+    conn.commit()
+    conn.close()
+
+    db = get_database(path)
+    rows = db.fetchall("SELECT atom_id, space FROM vec_atoms")
+    assert [(r["atom_id"], r["space"]) for r in rows] == [("c1", "s1")]
+    assert (
+        db.fetchone("SELECT name FROM sqlite_master WHERE name = '_vec_atoms_migrate'")
+        is None
+    )
+
+
 def test_content_hash_backfill_on_old_db(tmp_path):
     import hashlib
 

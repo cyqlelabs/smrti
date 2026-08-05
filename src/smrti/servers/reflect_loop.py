@@ -10,7 +10,10 @@ from smrti import Smrti
 
 logger = logging.getLogger("smrti.reflect_loop")
 
-REFLECT_INTERVAL = int(os.environ.get("SMRTI_REFLECT_INTERVAL", "60"))
+try:
+    REFLECT_INTERVAL = int(os.environ.get("SMRTI_REFLECT_INTERVAL", "60"))
+except ValueError:
+    REFLECT_INTERVAL = 60
 
 
 async def run_reflect_loop(get_instances: Callable[[], Sequence[Smrti]]) -> None:

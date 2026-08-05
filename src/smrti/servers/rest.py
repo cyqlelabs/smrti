@@ -12,7 +12,7 @@ from smrti import Smrti
 from smrti.servers import config as cfg
 from smrti.servers.mcp import create_smrti, handle_tool
 from smrti.servers.reflect_loop import run_reflect_loop
-from smrti.servers.viz_routes import create_viz_router
+from smrti.servers.viz_routes import api_key_middleware, create_viz_router
 
 
 @asynccontextmanager
@@ -28,8 +28,12 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+app.middleware("http")(api_key_middleware)
 
 _mem: Optional[Smrti] = None
+
+# Strong references to fire-and-forget tasks so the GC cannot cancel them mid-flight
+_background_tasks: set[asyncio.Task] = set()
 
 
 def get_mem() -> Smrti:
@@ -39,6 +43,12 @@ def get_mem() -> Smrti:
     return _mem
 
 
+async def _run_sync(fn, *args):
+    """Run blocking work (ONNX inference, SQLite) off the event loop."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, fn, *args)
+
+
 app.include_router(create_viz_router(lambda t, s: get_mem()))
 
 
@@ -46,7 +56,7 @@ class RememberRequest(BaseModel):
     content: str
     type: str = "episode"
     probability: float = 0.8
-    valence: float = 0.0
+    valence: Optional[float] = None
 
 
 class RecallRequest(BaseModel):
@@ -88,51 +98,53 @@ class PersonalityRequest(BaseModel):
 
 @app.post("/remember")
 async def remember(req: RememberRequest, request: Request):
-    result = handle_tool(get_mem(), "smrti_remember", req.model_dump())
+    result = await _run_sync(handle_tool, get_mem(), "smrti_remember", req.model_dump())
     if cfg.EXTRACT:
         episode_id = result.get("atom_id", "")
         if episode_id:
             from smrti.extraction.extract import extract_and_link_serialized
             auth = request.headers.get("Authorization", "")
-            asyncio.create_task(
+            task = asyncio.create_task(
                 extract_and_link_serialized(episode_id, req.content, get_mem(), auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL, mode=cfg.EXTRACT_MODE)
             )
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
     return result
 
 
 @app.post("/recall")
 async def recall(req: RecallRequest):
-    return handle_tool(get_mem(), "smrti_recall", req.model_dump())
+    return await _run_sync(handle_tool, get_mem(), "smrti_recall", req.model_dump())
 
 
 @app.post("/reflect")
 async def reflect():
-    return handle_tool(get_mem(), "smrti_reflect", {})
+    return await _run_sync(handle_tool, get_mem(), "smrti_reflect", {})
 
 
 @app.post("/believe")
 async def believe(req: BelieveRequest):
-    return handle_tool(get_mem(), "smrti_believe", req.model_dump())
+    return await _run_sync(handle_tool, get_mem(), "smrti_believe", req.model_dump())
 
 
 @app.post("/forget")
 async def forget(req: ForgetRequest):
-    return handle_tool(get_mem(), "smrti_forget", req.model_dump())
+    return await _run_sync(handle_tool, get_mem(), "smrti_forget", req.model_dump())
 
 
 @app.get("/personality")
 async def get_personality():
-    return handle_tool(get_mem(), "smrti_personality", {"action": "get"})
+    return await _run_sync(handle_tool, get_mem(), "smrti_personality", {"action": "get"})
 
 
 @app.put("/personality")
 async def set_personality(req: PersonalityRequest):
-    return handle_tool(get_mem(), "smrti_personality", req.model_dump())
+    return await _run_sync(handle_tool, get_mem(), "smrti_personality", req.model_dump())
 
 
 @app.delete("/spaces/current")
 async def clear_current_space():
-    count = get_mem().clear_space()
+    count = await _run_sync(get_mem().clear_space)
     return {"status": "ok", "deleted": count}
 
 

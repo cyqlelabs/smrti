@@ -8,6 +8,17 @@ PERSONALITY: str = os.environ.get("SMRTI_PERSONALITY", "balanced")
 TENANT_ID: str = os.environ.get("SMRTI_TENANT_ID", "default")
 SPACE: str = os.environ.get("SMRTI_SPACE", "default")
 
+# Optional API key — when set, REST/proxy/viz require it on every request
+# (Authorization: Bearer <key> or X-Api-Key: <key>).
+API_KEY: str = os.environ.get("SMRTI_API_KEY", "")
+
+# CORS origins for the proxy — comma-separated; CORS middleware is only added when set
+_cors_raw: str = os.environ.get("SMRTI_CORS_ORIGINS", "")
+CORS_ORIGINS: list[str] = [o.strip() for o in _cors_raw.split(",") if o.strip()]
+
+# Max characters of a single memory text injected into the system prompt
+INJECT_MAX_CHARS: int = int(os.environ.get("SMRTI_INJECT_MAX_CHARS", "500"))
+
 _read_raw: str = os.environ.get("SMRTI_READ_SPACES", "")
 READ_SPACES: list[str] | None = [s.strip() for s in _read_raw.split(",") if s.strip()] or None
 

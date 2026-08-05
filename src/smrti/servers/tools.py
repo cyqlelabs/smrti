@@ -19,7 +19,7 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
                 "content": {"type": "string", "description": "The memory or observation to store"},
                 "type": {"type": "string", "enum": ["belief", "episode", "goal"], "default": "episode"},
                 "probability": {"type": "number", "description": "How true is this (0-1)", "default": 0.8},
-                "valence": {"type": "number", "description": "Emotional tone (-1 to 1)", "default": 0.0},
+                "valence": {"type": "number", "description": "Emotional tone (-1 to 1); omit to auto-estimate from content"},
                 "evidence": {"type": "string", "description": "Why you believe this (only used when type=belief)"},
             },
             "required": ["content"],

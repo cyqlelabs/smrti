@@ -128,8 +128,8 @@ def test_overlap_identical_content(db, embed, atomspace):
     result = space_overlap("test", "alpha", "beta", db)
     assert result.jaccard > 0.0
     assert len(result.pairs) == 1
-    # Contextual similarity: 0.8*emb(~1.0) + 0.2*entity_type(0.5) = ~0.9
-    # (no embed_engine → neighborhood weight redistributed to embedding)
+    # No embed_engine and no entity types → both absent-signal weights
+    # redistribute to embedding: similarity = 1.0 * emb(~1.0)
     assert result.pairs[0].similarity > 0.85
 
 
@@ -283,8 +283,13 @@ def test_materialize_bridge_idempotent(populated_spaces):
     count2 = materialize_bridge(
         overlap, tenant, atomspace._db, atomspace._embed, atomspace, min_jaccard=0.0,
     )
-    # Second run should not create new atoms (updates existing)
-    assert count2 == 0
+    # Second run updates the same atoms in place — counted, but no duplicates
+    assert count2 == count1
+    bridge_atoms = atomspace._db.fetchall(
+        "SELECT id FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'",
+        (tenant, overlap.bridge_space_name),
+    )
+    assert len(bridge_atoms) == count1
 
 
 def test_bridge_atom_truth_merge(db, embed, atomspace):

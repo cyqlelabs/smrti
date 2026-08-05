@@ -57,31 +57,41 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     p = dict(personality)
     lr = p.get("confidence_update_lr", 0.3)
 
-    # 1. Process pending evidence
+    # 1. Process pending evidence — each atom's truth update and its evidence
+    # marks commit in one transaction so a crash cannot double-count evidence.
     pending = db.fetchall(
         "SELECT * FROM evidence WHERE processed = 0 AND tenant_id = ? AND space = ? ORDER BY created_at",
         (tenant_id, space),
     )
+    pending_by_atom: dict[str, list] = {}
     for ev in pending:
+        pending_by_atom.setdefault(ev["atom_id"], []).append(ev)
+    for atom_id, evs in pending_by_atom.items():
         atom_row = db.fetchone(
-            "SELECT * FROM atoms WHERE id = ?", (ev["atom_id"],)
+            "SELECT * FROM atoms WHERE id = ?", (atom_id,)
         )
-        if atom_row:
-            current = TruthValue(
-                probability=atom_row["probability"],
-                confidence=atom_row["confidence"],
-            )
-            updated = update_truth(
+        if not atom_row:
+            continue
+        current = TruthValue(
+            probability=atom_row["probability"],
+            confidence=atom_row["confidence"],
+        )
+        for ev in evs:
+            current = update_truth(
                 current, ev["observed_probability"], ev["weight"], lr
             )
-            db.execute(
+        statements = [
+            (
                 "UPDATE atoms SET probability = ?, confidence = ?, updated_at = datetime('now') WHERE id = ?",
-                (updated.probability, updated.confidence, ev["atom_id"]),
-            )
-            db.execute(
-                "UPDATE evidence SET processed = 1 WHERE id = ?", (ev["id"],)
-            )
-            beliefs_updated += 1
+                (current.probability, current.confidence, atom_id),
+            ),
+        ]
+        statements += [
+            ("UPDATE evidence SET processed = 1 WHERE id = ?", (ev["id"],))
+            for ev in evs
+        ]
+        db.execute_batch(statements)
+        beliefs_updated += len(evs)
 
     # 2. Decay STI and confidence for all atoms in this space
     decay_count_row = db.fetchone(
@@ -104,7 +114,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     mood_inertia = p.get("mood_inertia", 0.8)
     if propagation_factor > 0 or valence_prop_factor > 0:
         active = db.fetchall(
-            "SELECT id, sti, valence, intensity FROM atoms WHERE tenant_id = ? AND space = ? AND (sti > 0.3 OR (valence < -0.3 AND intensity > 0.3))",
+            "SELECT id, sti, valence, intensity FROM atoms WHERE tenant_id = ? AND space = ? AND (sti > 0.3 OR (ABS(valence) > 0.3 AND intensity > 0.3))",
             (tenant_id, space),
         )
         for row in active:
@@ -116,29 +126,25 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # 2c. Heal orphaned episodes (link to most salient person)
     orphans_healed = heal_orphaned_episodes(tenant_id, space, db)
 
-    # 3. Promote high-STI atoms to LTI
-    before_lti = db.fetchone(
-        "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ? AND lti > 0",
-        (tenant_id, space),
-    )
-    db.execute(
-        "UPDATE atoms SET lti = MAX(lti, sti * 0.5) WHERE tenant_id = ? AND space = ? AND sti > ?",
+    # 3. Promote high-STI atoms to LTI (capped at 1.0)
+    promoted_rows = db.fetchall(
+        "SELECT id FROM atoms WHERE tenant_id = ? AND space = ? AND sti > ?",
         (tenant_id, space, p["lti_promotion_threshold"]),
     )
-    after_lti = db.fetchone(
-        "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ? AND lti > 0",
-        (tenant_id, space),
-    )
-    lti_promoted = max(
-        0,
-        (after_lti["n"] if after_lti else 0) - (before_lti["n"] if before_lti else 0),
-    )
+    lti_promoted = len(promoted_rows)
+    if promoted_rows:
+        db.execute(
+            "UPDATE atoms SET lti = MIN(MAX(lti, sti * 0.5), 1.0) WHERE tenant_id = ? AND space = ? AND sti > ?",
+            (tenant_id, space, p["lti_promotion_threshold"]),
+        )
 
-    # 4. Resolve contradictions within this space
+    # 4. Resolve contradictions within this space — each edge is weakened once,
+    # then marked resolved atomically so it is never re-penalized.
     contradictions = db.fetchall(
         """SELECT id, source_id, target_id FROM atoms
            WHERE type = 'relation' AND relation = 'contradicts'
-             AND tenant_id = ? AND space = ?""",
+             AND tenant_id = ? AND space = ?
+             AND json_extract(metadata, '$.resolved') IS NULL""",
         (tenant_id, space),
     )
     for c in contradictions:
@@ -156,10 +162,16 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
                 if src["confidence"] < tgt["confidence"]
                 else c["target_id"]
             )
-            db.execute(
-                "UPDATE atoms SET confidence = confidence * 0.8 WHERE id = ?",
-                (loser_id,),
-            )
+            db.execute_batch([
+                (
+                    "UPDATE atoms SET confidence = confidence * 0.8 WHERE id = ?",
+                    (loser_id,),
+                ),
+                (
+                    "UPDATE atoms SET metadata = json_set(COALESCE(metadata, '{}'), '$.resolved', 1) WHERE id = ?",
+                    (c["id"],),
+                ),
+            ])
             contradictions_resolved += 1
 
     # 5. Cross-domain connection discovery (every 10th epoch)
@@ -186,14 +198,19 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     if dead_rows:
         atom_ids = [row["id"] for row in dead_rows]
         ph = ",".join("?" * len(atom_ids))
-        db.execute(
-            f"DELETE FROM atoms WHERE type = 'relation' AND (source_id IN ({ph}) OR target_id IN ({ph}))",
-            (*atom_ids, *atom_ids),
-        )
-        db.execute(f"DELETE FROM vec_atoms WHERE atom_id IN ({ph})", tuple(atom_ids))
-        db.execute(f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(atom_ids))
-        db.execute(f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(atom_ids))
-        db.execute(f"DELETE FROM atoms WHERE id IN ({ph})", tuple(atom_ids))
+        # Relation cascade stays tenant-scoped but cross-space so bridge edges
+        # referencing pruned atoms are cleaned too; all deletes commit together
+        # so a crash cannot leave atoms invisible to KNN.
+        db.execute_batch([
+            (
+                f"DELETE FROM atoms WHERE type = 'relation' AND tenant_id = ? AND (source_id IN ({ph}) OR target_id IN ({ph}))",
+                (tenant_id, *atom_ids, *atom_ids),
+            ),
+            (f"DELETE FROM vec_atoms WHERE atom_id IN ({ph})", tuple(atom_ids)),
+            (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(atom_ids)),
+            (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(atom_ids)),
+            (f"DELETE FROM atoms WHERE id IN ({ph})", tuple(atom_ids)),
+        ])
 
     return EpochResult(
         beliefs_updated=beliefs_updated,
@@ -210,6 +227,10 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
 def _discover_bridges(tenant_id: str, space: str, db, embed_engine) -> int:
     """Find other spaces in this tenant and materialize bridges where overlap is significant."""
     from smrti.core.atomspace import AtomSpace
+
+    # Bridge spaces must not initiate bridging (would recurse into meta-bridges)
+    if "_x_" in space:
+        return 0
 
     all_spaces_rows = db.fetchall(
         "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? AND space != ?",

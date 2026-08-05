@@ -52,30 +52,28 @@ def test_propagates_to_both_directions():
     assert db.execute.call_count == 2
 
 
-# ── 80/20 blend ───────────────────────────────────────────────────────────────
+# ── inertia-scaled step toward source ─────────────────────────────────────────
 
-def test_sql_uses_80_20_blend():
-    """Default mood_inertia=0.8 → keep=0.8, absorb=0.2."""
+def test_sql_uses_inertia_scaled_step():
+    """Default mood_inertia=0.8 → step = propagation_factor * 0.2."""
     db = _mock_db(forward_ids=["n1"])
     propagate_valence("a1", valence=0.6, intensity=0.4, propagation_factor=0.5,
                       db=db, tenant_id="t", space="s")
-    sql_call = db.execute.call_args
-    args = sql_call[0][1]
-    # args: (keep, spread_v, absorb, keep, spread_i, absorb, nid, tenant_id, space)
-    keep, spread_v, absorb = args[0], args[1], args[2]
-    assert keep == 0.8
-    assert abs(absorb - 0.2) < 1e-9
+    args = db.execute.call_args[0][1]
+    # args: (step, valence, step, intensity, nid, tenant_id, space)
+    step, target_valence = args[0], args[1]
+    assert abs(step - 0.1) < 1e-9
+    assert target_valence == 0.6
 
 
-def test_custom_mood_inertia_changes_blend():
-    """mood_inertia=0.4 → keep=0.4, absorb=0.6 (more reactive)."""
+def test_custom_mood_inertia_changes_step():
+    """mood_inertia=0.4 → step = 0.5 * 0.6 = 0.3 (more reactive)."""
     db = _mock_db(forward_ids=["n1"])
     propagate_valence("a1", valence=0.6, intensity=0.4, propagation_factor=0.5,
                       db=db, tenant_id="t", space="s", mood_inertia=0.4)
     args = db.execute.call_args[0][1]
-    keep, absorb = args[0], args[2]
-    assert keep == 0.4
-    assert absorb == 0.6
+    step = args[0]
+    assert abs(step - 0.3) < 1e-9
 
 
 # ── None IDs filtered ─────────────────────────────────────────────────────────
@@ -97,9 +95,9 @@ def test_negative_valence_propagates():
     db = _mock_db(forward_ids=["n1"])
     propagate_valence("a1", valence=-0.8, intensity=0.9, propagation_factor=0.5,
                       db=db, tenant_id="t", space="s")
-    # spread_v = -0.8 * 0.5 = -0.4 — abs(-0.4) >= 0.01, should propagate
+    # abs(-0.8) * 0.5 = 0.4 >= 0.01, should propagate
     assert db.execute.call_count == 1
     args = db.execute.call_args[0][1]
-    # args: (keep, spread_v, absorb, keep, spread_i, absorb, nid, tenant_id, space)
-    spread_v = args[1]
-    assert spread_v < 0
+    # args: (step, valence, step, intensity, nid, tenant_id, space)
+    target_valence = args[1]
+    assert target_valence < 0

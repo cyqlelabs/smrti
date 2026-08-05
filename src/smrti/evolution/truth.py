@@ -16,6 +16,8 @@ def update_truth(
     Confidence grows toward 1.0 asymptotically with accumulated evidence.
     """
     w = evidence_weight * lr
+    if w <= 0:
+        return current
     new_prob = (current.probability * current.confidence + evidence_prob * w) / (
         current.confidence + w + 1e-9
     )
@@ -24,8 +26,3 @@ def update_truth(
         probability=max(0.0, min(1.0, new_prob)),
         confidence=max(0.0, min(1.0, new_conf)),
     )
-
-
-def pln_merge(a: TruthValue, b: TruthValue) -> TruthValue:
-    """PLN revision rule: merge two independent truth estimates."""
-    return a.merge(b)

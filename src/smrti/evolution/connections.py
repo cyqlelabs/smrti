@@ -8,10 +8,12 @@ import uuid
 def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
     """Find surprising associations between unconnected high-LTI atoms.
 
-    For each of the top 50 atoms by LTI in the given space, embed the atom's
-    content and search for semantically similar atoms within the same space that
-    are not yet directly linked. Creates a weak 'associated' relation atom for
-    each new pair found within the cosine distance threshold of 0.4.
+    For each of the top 50 atoms by LTI in the given space, load the atom's
+    stored embedding (re-embedding only when the vector row is missing) and
+    search for semantically similar atoms within the same space that are not
+    yet directly linked. Creates a weak 'associated' relation atom for each
+    new pair found within the cosine distance threshold of 0.4 (cosine
+    distance 0.4 corresponds to cosine similarity 0.6).
 
     Returns the count of new relation atoms created.
     """
@@ -25,15 +27,21 @@ def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
     new_count = 0
 
     for atom in high_lti:
-        text = atom["content"] or atom["label"]
-        vec = embed_engine.embed(text)
-        vec_bytes = struct.pack(f"{len(vec)}f", *vec)
+        vec_row = db.fetchone(
+            "SELECT embedding FROM vec_atoms WHERE atom_id = ?", (atom["id"],)
+        )
+        if vec_row is not None:
+            vec_bytes = vec_row["embedding"]
+        else:
+            text = atom["content"] or atom["label"]
+            vec = embed_engine.embed(text)
+            vec_bytes = struct.pack(f"{len(vec)}f", *vec)
 
         knn = db.fetchall(
             """SELECT atom_id, distance FROM vec_atoms
-               WHERE embedding MATCH ? AND tenant_id = ?
+               WHERE embedding MATCH ? AND tenant_id = ? AND space = ?
                ORDER BY distance LIMIT 10""",
-            (vec_bytes, tenant_id),
+            (vec_bytes, tenant_id, space),
         )
 
         existing_rows = db.fetchall(

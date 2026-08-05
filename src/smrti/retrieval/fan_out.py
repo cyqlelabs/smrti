@@ -20,7 +20,8 @@ def retrieve(
     """
     Full retrieval pipeline:
       1. Embed query
-      2. KNN search in vec_atoms across all read_spaces (partitioned by tenant_id)
+      2. KNN search in vec_atoms per read_space (tenant + space partitioned),
+         merged by cosine distance
       3. 1-hop graph expansion via relation atoms within read_spaces
       4. Score all candidates by salience (personality-weighted from write_space)
       5. Return top_k sorted by descending salience
@@ -28,28 +29,42 @@ def retrieve(
     query_vec = embed_engine.embed(query)
     vec_bytes = struct.pack(f"{len(query_vec)}f", *query_vec)
 
-    # Load personality weights from write_space, fall back to defaults
+    # Load personality weights from write_space, fall back to defaults.
+    # A NULL column must fall back too, not propagate None into arithmetic.
     personality = db.fetchone(
         "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
         (tenant_id, write_space),
     )
     p = dict(personality) if personality else {}
-    w_similarity = p.get("w_similarity", 0.35)
-    w_sti = p.get("w_sti", 0.25)
-    w_confidence = p.get("w_confidence", 0.20)
-    w_lti = p.get("w_lti", 0.10)
-    w_valence = p.get("w_valence", 0.10)
-    valence_weight = p.get("valence_weight", 0.2)
-    sti_boost = p.get("sti_boost_on_access", 0.5)
 
-    # Step 1: KNN entry points — search across the full tenant partition
-    knn_rows = db.fetchall(
-        """SELECT atom_id, distance FROM vec_atoms
-           WHERE embedding MATCH ? AND tenant_id = ?
-           ORDER BY distance
-           LIMIT 50""",
-        (vec_bytes, tenant_id),
-    )
+    def _pget(key: str, default: float) -> float:
+        value = p.get(key)
+        return default if value is None else value
+
+    w_similarity = _pget("w_similarity", 0.35)
+    w_sti = _pget("w_sti", 0.25)
+    w_confidence = _pget("w_confidence", 0.20)
+    w_lti = _pget("w_lti", 0.10)
+    w_valence = _pget("w_valence", 0.10)
+    valence_weight = _pget("valence_weight", 0.2)
+    sti_boost = _pget("sti_boost_on_access", 0.5)
+
+    # Step 1: KNN entry points — one probe per read_space (the space partition
+    # key only supports equality during KNN), merged by ascending distance so
+    # no space can starve the others out of the candidate budget.
+    knn_rows: list = []
+    for space in read_spaces:
+        knn_rows.extend(
+            db.fetchall(
+                """SELECT atom_id, distance FROM vec_atoms
+                   WHERE embedding MATCH ? AND tenant_id = ? AND space = ?
+                   ORDER BY distance
+                   LIMIT 50""",
+                (vec_bytes, tenant_id, space),
+            )
+        )
+    knn_rows.sort(key=lambda r: r["distance"])
+    knn_rows = knn_rows[:50]
 
     if not knn_rows:
         return []
@@ -57,30 +72,33 @@ def retrieve(
     knn_ids = [r["atom_id"] for r in knn_rows]
     knn_distances = {r["atom_id"]: r["distance"] for r in knn_rows}
 
-    # Step 2: Filter KNN hits to those within read_spaces, then 1-hop expand
+    # Step 2: 1-hop expansion via relation atoms, capped so a hub atom cannot
+    # pull an unbounded neighborhood into the scoring set.
     spaces_ph = ",".join("?" * len(read_spaces))
 
     id_ph = ",".join("?" * len(knn_ids))
     expanded_ids: set[str] = set(knn_ids)
 
     forward = db.fetchall(
-        f"SELECT target_id FROM atoms WHERE source_id IN ({id_ph}) AND type = 'relation' AND tenant_id = ? AND space IN ({spaces_ph})",
+        f"SELECT target_id FROM atoms WHERE source_id IN ({id_ph}) AND type = 'relation' AND tenant_id = ? AND space IN ({spaces_ph}) LIMIT 100",
         (*knn_ids, tenant_id, *read_spaces),
     )
     expanded_ids.update(r["target_id"] for r in forward if r["target_id"])
 
     backward = db.fetchall(
-        f"SELECT source_id FROM atoms WHERE target_id IN ({id_ph}) AND type = 'relation' AND tenant_id = ? AND space IN ({spaces_ph})",
+        f"SELECT source_id FROM atoms WHERE target_id IN ({id_ph}) AND type = 'relation' AND tenant_id = ? AND space IN ({spaces_ph}) LIMIT 100",
         (*knn_ids, tenant_id, *read_spaces),
     )
     expanded_ids.update(r["source_id"] for r in backward if r["source_id"])
     expanded_ids.discard(None)
 
-    # Always include person atoms — they anchor the knowledge graph and provide
-    # essential context ("who are these memories about?") regardless of query
-    # similarity.  Person atoms are rare (typically 1-3 per space) so this is cheap.
+    # Include the most salient person atoms — they anchor the knowledge graph
+    # ("who are these memories about?") regardless of query similarity. Capped
+    # so person-heavy spaces (e.g. simulations) cannot flood the candidate set.
     person_rows = db.fetchall(
-        f"SELECT id FROM atoms WHERE entity_type = 'person' AND tenant_id = ? AND space IN ({spaces_ph}) AND type IN ('concept', 'belief', 'goal')",
+        f"""SELECT id FROM atoms WHERE entity_type = 'person' AND tenant_id = ? AND space IN ({spaces_ph})
+            AND type IN ('concept', 'belief', 'goal')
+            ORDER BY (sti + lti) DESC LIMIT 3""",
         (tenant_id, *read_spaces),
     )
     expanded_ids.update(r["id"] for r in person_rows)

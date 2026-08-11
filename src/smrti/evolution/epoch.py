@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from smrti.core.models import EpochResult, TruthValue
+from smrti.core.provenance import ATOM_METADATA_JSON, ATOM_SOURCE
 from smrti.evolution.attention import propagate_sti
 from smrti.evolution.connections import discover_connections
 from smrti.evolution.healing import heal_orphaned_episodes
@@ -10,21 +11,19 @@ from smrti.evolution.valence import propagate_valence
 from smrti.spaces.set_ops import space_overlap
 from smrti.spaces.emergence import materialize_bridge
 
-# SQL for "who authored this atom", defaulting to the user.
-#
-# json_extract raises "malformed JSON" rather than returning NULL when the
-# column is not valid JSON, which on a whole-table pass would abort decay for
-# every atom in the space because of one bad row. CASE is used rather than
-# `json_valid(...) AND ...` because only CASE guarantees the guarded branch is
-# never evaluated. Atoms predating provenance tracking read as user-authored.
-_ATOM_SOURCE = (
-    "COALESCE(CASE WHEN json_valid(metadata) "
-    "THEN json_extract(metadata, '$.source') END, 'user')"
-)
+# Atoms are pruned below an LTI of 0.05, so a floor above that line makes a
+# memory permanent. What the user stated keeps one; what the model volunteered
+# does not, and decays to nothing unless the user later adopts it by bringing
+# it up themselves. Without this asymmetry both terms of the prune predicate
+# fall monotonically for every atom — confidence only rises on new evidence and
+# LTI only on promotion — so an unmentioned fact is on a one-way trip to
+# deletion, and core identity facts are exactly what goes unmentioned longest.
+_LTI_FLOOR_USER = 0.1
+_LTI_FLOOR_AGENT = 0.0
 
-# The same column as a writable JSON object: json_set also raises on malformed
-# input, so unreadable metadata is replaced rather than appended to.
-_ATOM_METADATA_JSON = "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END"
+# Severe negative-valence atoms carry a higher floor from creation (see
+# atomspace.add_atom) that keeps past failures out of reach of the pruner.
+_LTI_FLOOR_CRITICAL = 0.5
 
 
 def _param(personality: dict, key: str, default: float) -> float:
@@ -140,26 +139,31 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         _param(p, "lti_decay_rate", 0.01),
         _param(p, "confidence_decay_rate", 0.02),
     )
-    # Severe negative-valence atoms carry an LTI floor of 0.5 from creation
-    # (see atomspace.add_atom) that keeps past failures out of reach of the
-    # pruner. LTI decay must not erode it, or the error-avoidance guarantee
-    # expires on a timer — their STI and confidence still decay normally.
+    # LTI decays toward a floor rather than toward zero. The floor only holds
+    # an atom that already reached it — one below keeps decaying freely — so
+    # this preserves a memory that earned long-term importance without ever
+    # granting it to one that did not.
     decay_sql = f"""UPDATE atoms SET
                sti        = sti        * (1.0 - ?),
-               lti        = CASE WHEN valence < -0.7 AND intensity > 0.7
-                                 THEN MAX(lti * (1.0 - ?), 0.5)
-                                 ELSE lti * (1.0 - ?) END,
+               lti        = MAX(lti * (1.0 - ?),
+                                CASE WHEN valence < -0.7 AND intensity > 0.7 THEN ?
+                                     WHEN lti >= ? THEN ?
+                                     ELSE 0.0 END),
                confidence = confidence * (1.0 - ?),
                updated_at = datetime('now')
            WHERE tenant_id = ? AND space = ?
-             AND {_ATOM_SOURCE} {{}} 'agent'"""
-    for comparison, multiplier in (("!=", 1.0), ("=", agent_multiplier)):
+             AND {ATOM_SOURCE} {{}} 'agent'"""
+    for comparison, multiplier, floor in (
+        ("!=", 1.0, _LTI_FLOOR_USER),
+        ("=", agent_multiplier, _LTI_FLOOR_AGENT),
+    ):
         sti_rate, lti_rate, conf_rate = (
             min(rate * multiplier, 1.0) for rate in base_rates
         )
         db.execute(
             decay_sql.format(comparison),
-            (sti_rate, lti_rate, lti_rate, conf_rate, tenant_id, space),
+            (sti_rate, lti_rate, _LTI_FLOOR_CRITICAL, floor, floor,
+             conf_rate, tenant_id, space),
         )
 
     # 2b. Propagate STI and valence to 1-hop neighbors
@@ -226,7 +230,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
                     (loser_id,),
                 ),
                 (
-                    f"UPDATE atoms SET metadata = json_set({_ATOM_METADATA_JSON}, '$.resolved', 1) WHERE id = ?",
+                    f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.resolved', 1) WHERE id = ?",
                     (c["id"],),
                 ),
             ])
@@ -253,7 +257,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
              AND confidence < ? AND lti < 0.05
              AND type != 'relation'
              AND (type NOT IN ('episode', 'belief')
-                  OR {_ATOM_SOURCE} = 'agent')""",
+                  OR {ATOM_SOURCE} = 'agent')""",
         (tenant_id, space, min_conf),
     )
     atoms_pruned = len(dead_rows)

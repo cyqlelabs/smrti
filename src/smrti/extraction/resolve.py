@@ -1,10 +1,18 @@
 """Entity resolution: exact -> alias -> fuzzy -> embedding -> create."""
 from __future__ import annotations
 
+import json
 import struct
 import uuid
 
 from rapidfuzz import fuzz, process
+
+from smrti.core.provenance import (
+    ATOM_METADATA_JSON,
+    ATOM_SOURCE,
+    SOURCE_AGENT,
+    SOURCE_USER,
+)
 
 
 class EntityResolver:
@@ -29,7 +37,7 @@ class EntityResolver:
         # semantic variants ("Postgres"/"PostgreSQL"), tight enough that
         # distinct names ("Alice"/"Alicia" ~ 0.75 sim) never silently merge.
         cosine_threshold: float = 0.2,
-        source: str = "user",
+        source: str = SOURCE_USER,
         agent_trust: float = 0.5,
         episode_id: str = "",
     ) -> None:
@@ -42,7 +50,7 @@ class EntityResolver:
         # Atoms extracted from an agent turn start proportionally weaker and
         # corroborate proportionally less, so the graph reflects what the user
         # said unless the model's contribution is picked up later.
-        self.trust = agent_trust if source == "agent" else 1.0
+        self.trust = agent_trust if source == SOURCE_AGENT else 1.0
 
         from smrti.extraction.aliases import AliasManager
         self.aliases = AliasManager(db)
@@ -152,6 +160,7 @@ class EntityResolver:
             "UPDATE atoms SET sti = MIN(sti + ?, 3.0) WHERE id = ?",
             (0.5 * self.trust, atom_id),
         )
+        self._adopt_if_user_mention(atom_id, tenant_id, space)
         self.db.execute(
             """INSERT INTO evidence
                    (id, atom_id, observed_probability, weight, source_episode_id, tenant_id, space)
@@ -160,6 +169,26 @@ class EntityResolver:
                 str(uuid.uuid4()), atom_id, self._MENTION_PROBABILITY,
                 self.trust, self.episode_id or None, tenant_id, space,
             ),
+        )
+
+    def _adopt_if_user_mention(self, atom_id: str, tenant_id: str, space: str) -> None:
+        """Transfer an agent-authored atom to the user when the user mentions it.
+
+        This is the one way model output earns permanence. Something the
+        assistant volunteered starts weak and decays to nothing, but once the
+        user brings it up themselves they have incorporated it, and from that
+        point it is theirs — durable on the same terms as anything else they
+        said. Without this, an entity the assistant introduced and the user
+        adopted would keep evaporating no matter how often it came up.
+        """
+        if self.source != SOURCE_USER:
+            return
+        self.db.execute(
+            f"""UPDATE atoms
+                   SET metadata = json_set({ATOM_METADATA_JSON}, '$.source', ?)
+                 WHERE id = ? AND tenant_id = ? AND space = ?
+                   AND {ATOM_SOURCE} = ?""",
+            (SOURCE_USER, atom_id, tenant_id, space, SOURCE_AGENT),
         )
 
     # Persisting an alias below this WRatio score risks poisoning tier-1
@@ -187,7 +216,7 @@ class EntityResolver:
         # came from: the epoch decays and prunes atoms, and without a source of
         # its own an agent-extracted concept is indistinguishable from a fact
         # the user stated. Truth and attention start scaled by trust.
-        metadata = '{"source": "agent"}' if self.source == "agent" else "{}"
+        metadata = json.dumps({"source": SOURCE_AGENT}) if self.source == SOURCE_AGENT else "{}"
         self.db.execute(
             """INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, metadata,
                                   probability, confidence, sti, lti)

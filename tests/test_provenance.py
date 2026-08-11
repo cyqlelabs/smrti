@@ -323,3 +323,115 @@ def test_contradiction_resolution_survives_unparseable_metadata(mem):
 
     result = mem.reflect()  # must not raise
     assert result.contradictions_resolved == 1
+
+
+# ── durability floor: user facts persist, model output does not ───────────────
+
+def test_user_concepts_survive_indefinite_idleness(mem):
+    """A fact the user stated must not rot away just because it goes unmentioned.
+
+    Both terms of the prune predicate fall monotonically without new mentions,
+    so an unfloored LTI puts every user fact on a one-way trip to deletion —
+    and core identity facts are exactly what goes unmentioned longest.
+    """
+    mem.set_personality("maverick")
+    res = EntityResolver(mem.db, mem.embed, source="user")
+    atom_id = res.resolve("Nicolas Iglesias", "person", "t1", "s1", ["s1"])
+
+    for _ in range(1000):
+        mem.reflect()
+
+    row = _atom(mem.db, atom_id)
+    assert row is not None, "user-stated fact deleted after idle epochs"
+    assert row["lti"] >= 0.1, "user LTI floor breached"
+
+
+def test_agent_concepts_still_decay_to_nothing(mem):
+    """The floor must not resurrect the noise it was introduced alongside."""
+    mem.set_personality("maverick")
+    res = EntityResolver(mem.db, mem.embed, source="agent", agent_trust=0.5)
+    atom_id = res.resolve("Feria del Libro", "event", "t1", "s1", ["s1"])
+
+    for _ in range(300):
+        mem.reflect()
+
+    assert _atom(mem.db, atom_id) is None, "unadopted model output persisted"
+
+
+def test_lti_floor_does_not_lift_atoms_that_never_earned_it(mem):
+    """The floor holds an atom that reached it; it never promotes one to it."""
+    atom_id = mem.remember("never promoted", type="concept")
+    mem.db.execute("UPDATE atoms SET lti = 0.02, sti = 0.0 WHERE id = ?", (atom_id,))
+    mem.reflect()
+
+    row = _atom(mem.db, atom_id)
+    if row is not None:  # may be pruned outright, which is also correct
+        assert row["lti"] < 0.1
+
+
+# ── adoption: the user incorporating model output ─────────────────────────────
+
+def test_user_mention_adopts_an_agent_authored_atom(mem):
+    """Model output earns permanence exactly when the user picks it up."""
+    agent_res = EntityResolver(mem.db, mem.embed, source="agent", agent_trust=0.5)
+    atom_id = agent_res.resolve("Feria del Libro", "event", "t1", "s1", ["s1"])
+    assert json.loads(_atom(mem.db, atom_id)["metadata"])["source"] == "agent"
+
+    EntityResolver(mem.db, mem.embed, source="user").resolve(
+        "Feria del Libro", "event", "t1", "s1", ["s1"]
+    )
+    assert json.loads(_atom(mem.db, atom_id)["metadata"])["source"] == "user"
+
+
+def test_adopted_atoms_become_durable(mem):
+    """Adoption must actually change the outcome, not just the label."""
+    mem.set_personality("maverick")
+    agent_res = EntityResolver(mem.db, mem.embed, source="agent", agent_trust=0.5)
+    adopted = agent_res.resolve("Feria del Libro", "event", "t1", "s1", ["s1"])
+    ignored = agent_res.resolve("Milonga La Pagana", "event", "t1", "s1", ["s1"])
+
+    EntityResolver(mem.db, mem.embed, source="user").resolve(
+        "Feria del Libro", "event", "t1", "s1", ["s1"]
+    )
+    for _ in range(300):
+        mem.reflect()
+
+    assert _atom(mem.db, adopted) is not None, "adopted suggestion was pruned"
+    assert _atom(mem.db, ignored) is None, "unadopted suggestion survived"
+
+
+def test_agent_mention_does_not_adopt(mem):
+    """The model repeating itself is not the user incorporating anything."""
+    agent_res = EntityResolver(mem.db, mem.embed, source="agent", agent_trust=0.5)
+    atom_id = agent_res.resolve("Feria del Libro", "event", "t1", "s1", ["s1"])
+    agent_res.resolve("Feria del Libro", "event", "t1", "s1", ["s1"])
+    assert json.loads(_atom(mem.db, atom_id)["metadata"])["source"] == "agent"
+
+
+def test_adoption_preserves_other_metadata(mem):
+    """Adoption rewrites the source key only."""
+    agent_res = EntityResolver(mem.db, mem.embed, source="agent", agent_trust=0.5)
+    atom_id = agent_res.resolve("Feria del Libro", "event", "t1", "s1", ["s1"])
+    mem.db.execute(
+        """UPDATE atoms SET metadata = '{"source": "agent", "keep": "me"}' WHERE id = ?""",
+        (atom_id,),
+    )
+    EntityResolver(mem.db, mem.embed, source="user").resolve(
+        "Feria del Libro", "event", "t1", "s1", ["s1"]
+    )
+    meta = json.loads(_atom(mem.db, atom_id)["metadata"])
+    assert meta == {"source": "user", "keep": "me"}
+
+
+def test_adoption_survives_unparseable_metadata(mem):
+    """Corrupt metadata must not abort the mention path."""
+    agent_res = EntityResolver(mem.db, mem.embed, source="agent", agent_trust=0.5)
+    atom_id = agent_res.resolve("Feria del Libro", "event", "t1", "s1", ["s1"])
+    mem.db.execute("UPDATE atoms SET metadata = 'garbage' WHERE id = ?", (atom_id,))
+
+    # Unreadable provenance already reads as user-authored, so there is nothing
+    # to adopt; the call must simply not raise.
+    EntityResolver(mem.db, mem.embed, source="user").resolve(
+        "Feria del Libro", "event", "t1", "s1", ["s1"]
+    )
+    assert _atom(mem.db, atom_id) is not None

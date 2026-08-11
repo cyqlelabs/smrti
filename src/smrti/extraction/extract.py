@@ -308,10 +308,22 @@ def _db_resolve_label(label: str, entity_ids: dict[str, str], mem: "Smrti") -> s
     return None
 
 
+def _agent_trust(mem: "Smrti") -> float:
+    """Read this space's agent_source_trust, falling back to the schema default."""
+    row = mem.db.fetchone(
+        "SELECT agent_source_trust FROM personality WHERE tenant_id = ? AND space = ?",
+        (mem.tenant_id, mem.write_space),
+    )
+    if row is None or row["agent_source_trust"] is None:
+        return 0.5
+    return row["agent_source_trust"]
+
+
 def _resolve_ner_entities(
     entities: list[dict],
     episode_id: str,
     mem: "Smrti",
+    source: str = "user",
 ) -> dict[str, str]:
     """Resolve a list of {"name", "type"} dicts via the entity cascade.
 
@@ -321,7 +333,10 @@ def _resolve_ner_entities(
     """
     from .resolve import EntityResolver
 
-    resolver = EntityResolver(mem.db, mem.embed)
+    resolver = EntityResolver(
+        mem.db, mem.embed,
+        source=source, agent_trust=_agent_trust(mem), episode_id=episode_id,
+    )
     entity_ids: dict[str, str] = {}
 
     # Batch-merge pronoun entities before resolution
@@ -372,7 +387,13 @@ def _resolve_ner_entities(
     return entity_ids
 
 
-def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti", episode_id: str = "") -> None:
+def _link_claims(
+    claims: list[dict],
+    entity_ids: dict[str, str],
+    mem: "Smrti",
+    episode_id: str = "",
+    source: str = "user",
+) -> None:
     """Create relation edges from claim triplets.
 
     Each claim is processed independently — a malformed one (non-numeric
@@ -392,7 +413,10 @@ def _link_claims(claims: list[dict], entity_ids: dict[str, str], mem: "Smrti", e
             if not obj_id and obj_raw:
                 if _resolver is None:
                     from .resolve import EntityResolver
-                    _resolver = EntityResolver(mem.db, mem.embed)
+                    _resolver = EntityResolver(
+                        mem.db, mem.embed,
+                        source=source, agent_trust=_agent_trust(mem), episode_id=episode_id,
+                    )
                 obj_id = _resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
                 _register_entity(entity_ids, obj_raw, obj_id)
             if subj_id and obj_id and subj_id != obj_id:
@@ -465,8 +489,8 @@ async def extract_and_link(
         return
 
     def _sync_work() -> None:
-        entity_ids = _resolve_ner_entities(extracted.get("entities", []), episode_id, mem)
-        _link_claims(extracted.get("claims", []), entity_ids, mem, episode_id)
+        entity_ids = _resolve_ner_entities(extracted.get("entities", []), episode_id, mem, source)
+        _link_claims(extracted.get("claims", []), entity_ids, mem, episode_id, source)
 
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _sync_work)
@@ -610,7 +634,7 @@ async def extract_and_link_hybrid(
 
     # Resolve entities and create mentions edges
     def _sync_resolve() -> dict[str, str]:
-        return _resolve_ner_entities(ner_entities, episode_id, mem)
+        return _resolve_ner_entities(ner_entities, episode_id, mem, source)
 
     loop = asyncio.get_running_loop()
     entity_ids = await loop.run_in_executor(None, _sync_resolve)
@@ -668,7 +692,10 @@ async def extract_and_link_hybrid(
         new_entities = claims_result.get("entities", [])
         if new_entities:
             from .resolve import EntityResolver
-            resolver = EntityResolver(mem.db, mem.embed)
+            resolver = EntityResolver(
+                mem.db, mem.embed,
+                source=source, agent_trust=_agent_trust(mem), episode_id=episode_id,
+            )
             for ent in new_entities:
                 name = (ent.get("name") or "").strip()
                 etype = ent.get("type", "")
@@ -684,7 +711,7 @@ async def extract_and_link_hybrid(
                     )
                 elif etype not in ("goal", "preference", "constraint"):
                     mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
-        _link_claims(claims_result.get("claims", []), entity_ids, mem, episode_id)
+        _link_claims(claims_result.get("claims", []), entity_ids, mem, episode_id, source)
 
     await loop.run_in_executor(None, _sync_resolve_and_link)
 

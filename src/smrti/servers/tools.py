@@ -21,6 +21,12 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
                 "probability": {"type": "number", "description": "How true is this (0-1)", "default": 0.8},
                 "valence": {"type": "number", "description": "Emotional tone (-1 to 1); omit to auto-estimate from content"},
                 "evidence": {"type": "string", "description": "Why you believe this (only used when type=belief)"},
+                "source": {
+                    "type": "string",
+                    "enum": ["user", "agent"],
+                    "default": "user",
+                    "description": "Who authored this content. Use `agent` for your own replies — agent-authored memories are extracted conservatively, weighted lower, and decay unless the user picks them up. Use `user` (the default) for what the user actually said.",
+                },
             },
             "required": ["content"],
         },

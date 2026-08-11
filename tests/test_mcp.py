@@ -1,4 +1,5 @@
 """Tests for MCP server handle_tool dispatch (servers/mcp.py)."""
+import json
 import os
 import tempfile
 from unittest.mock import MagicMock, patch
@@ -164,3 +165,36 @@ def test_status_returns_counts(mem):
 def test_unknown_tool_returns_error(mem):
     result = handle_tool(mem, "nonexistent_tool", {})
     assert "error" in result
+
+
+# ── source provenance ─────────────────────────────────────────────────────────
+
+def test_remember_stamps_agent_source(mem):
+    """MCP clients need a way to say a memory is the model's own output.
+
+    Without it every call defaults to "user" and model chatter is stored with
+    the same standing as what the user actually said.
+    """
+    result = handle_tool(
+        mem, "smrti_remember", {"content": "Here are some ideas.", "source": "agent"}
+    )
+    row = mem.db.fetchone("SELECT metadata FROM atoms WHERE id = ?", (result["atom_id"],))
+    assert json.loads(row["metadata"])["source"] == "agent"
+
+
+def test_remember_defaults_to_user_source(mem):
+    """Omitting source must behave exactly as before this parameter existed."""
+    result = handle_tool(mem, "smrti_remember", {"content": "I use Kubernetes."})
+    row = mem.db.fetchone("SELECT metadata FROM atoms WHERE id = ?", (result["atom_id"],))
+    assert json.loads(row["metadata"]) == {}
+
+
+def test_remember_source_is_advertised_in_the_tool_schema():
+    """An undocumented parameter is one no MCP client will ever send."""
+    from smrti.servers.tools import TOOLS
+
+    schema = next(t for t in TOOLS if t["name"] == "smrti_remember")["inputSchema"]
+    source = schema["properties"]["source"]
+    assert source["enum"] == ["user", "agent"]
+    assert source["default"] == "user"
+    assert "source" not in schema["required"]

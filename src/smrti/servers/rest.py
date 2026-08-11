@@ -57,6 +57,14 @@ class RememberRequest(BaseModel):
     type: str = "episode"
     probability: float = 0.8
     valence: Optional[float] = None
+    source: str = "user"
+
+    @field_validator("source")
+    @classmethod
+    def _known_source(cls, v: str) -> str:
+        if v not in ("user", "agent"):
+            raise ValueError("source must be 'user' or 'agent'")
+        return v
 
 
 class RecallRequest(BaseModel):
@@ -105,7 +113,10 @@ async def remember(req: RememberRequest, request: Request):
             from smrti.extraction.extract import extract_and_link_serialized
             auth = request.headers.get("Authorization", "")
             task = asyncio.create_task(
-                extract_and_link_serialized(episode_id, req.content, get_mem(), auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL, mode=cfg.EXTRACT_MODE)
+                extract_and_link_serialized(
+                    episode_id, req.content, get_mem(), auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
+                    req.source, mode=cfg.EXTRACT_MODE,
+                )
             )
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)

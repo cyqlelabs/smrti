@@ -48,11 +48,13 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 evidence=args.get("evidence"),
             )
         else:
+            source = args.get("source", "user")
             atom_id = mem.remember(
                 content=content,
                 type=atom_type,
                 probability=args.get("probability", 0.8),
                 valence=valence,
+                metadata={"source": "agent"} if source == "agent" else None,
             )
         return {"status": "ok", "atom_id": atom_id}
 
@@ -268,7 +270,10 @@ def run_mcp_server() -> None:
             if episode_id and content:
                 from smrti.extraction.extract import extract_and_link_serialized
                 task = asyncio.create_task(
-                    extract_and_link_serialized(episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL, mode=cfg.EXTRACT_MODE)
+                    extract_and_link_serialized(
+                        episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
+                        arguments.get("source", "user"), mode=cfg.EXTRACT_MODE,
+                    )
                 )
                 _background_tasks.add(task)
                 task.add_done_callback(_background_tasks.discard)

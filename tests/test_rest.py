@@ -1,4 +1,5 @@
 """Tests for the FastAPI REST server (servers/rest.py)."""
+import json
 import os
 import tempfile
 from unittest.mock import patch, MagicMock
@@ -249,3 +250,47 @@ def test_recall_accepts_cjk_query(client):
 def test_forget_rejects_empty_query(client):
     resp = client.post("/forget", json={"query": "", "reason": "test"})
     assert resp.status_code == 422
+
+
+# ── source provenance ────────────────────────────────────────────────────────
+
+def test_remember_accepts_agent_source(client, mem_instance):
+    resp = client.post(
+        "/remember", json={"content": "Here are some weekend ideas.", "source": "agent"}
+    )
+    assert resp.status_code == 200
+    row = mem_instance.db.fetchone(
+        "SELECT metadata FROM atoms WHERE id = ?", (resp.json()["atom_id"],)
+    )
+    assert json.loads(row["metadata"])["source"] == "agent"
+
+
+def test_remember_without_source_stays_backward_compatible(client, mem_instance):
+    """Existing clients post no source field and must keep full user standing."""
+    resp = client.post("/remember", json={"content": "I moved to Parana."})
+    assert resp.status_code == 200
+    row = mem_instance.db.fetchone(
+        "SELECT metadata FROM atoms WHERE id = ?", (resp.json()["atom_id"],)
+    )
+    assert json.loads(row["metadata"]) == {}
+
+
+def test_remember_rejects_unknown_source(client):
+    resp = client.post("/remember", json={"content": "x", "source": "somebody-else"})
+    assert resp.status_code == 422
+
+
+def test_remember_forwards_source_to_extraction(client, mem_instance):
+    """The flag is worthless if extraction still runs the user-facing prompt."""
+    from smrti.servers import rest as rest_mod
+
+    captured = {}
+
+    async def _capture(episode_id, content, mem, auth, model, upstream, source="user", **kw):
+        captured["source"] = source
+
+    with patch("smrti.servers.config.EXTRACT", True), \
+         patch("smrti.extraction.extract.extract_and_link_serialized", new=_capture):
+        client.post("/remember", json={"content": "A reply.", "source": "agent"})
+
+    assert captured.get("source") == "agent"

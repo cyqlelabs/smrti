@@ -29,11 +29,20 @@ class EntityResolver:
         # semantic variants ("Postgres"/"PostgreSQL"), tight enough that
         # distinct names ("Alice"/"Alicia" ~ 0.75 sim) never silently merge.
         cosine_threshold: float = 0.2,
+        source: str = "user",
+        agent_trust: float = 0.5,
+        episode_id: str = "",
     ) -> None:
         self.db = db
         self.embed_engine = embed_engine
         self.fuzzy_threshold = fuzzy_threshold
         self.cosine_threshold = cosine_threshold
+        self.source = source
+        self.episode_id = episode_id
+        # Atoms extracted from an agent turn start proportionally weaker and
+        # corroborate proportionally less, so the graph reflects what the user
+        # said unless the model's contribution is picked up later.
+        self.trust = agent_trust if source == "agent" else 1.0
 
         from smrti.extraction.aliases import AliasManager
         self.aliases = AliasManager(db)
@@ -59,7 +68,7 @@ class EntityResolver:
             (name, entity_type, tenant_id, *read_spaces),
         )
         if row:
-            self._boost_sti(row["id"])
+            self._boost_sti(row["id"], tenant_id, write_space)
             return row["id"]
 
         # Tier 0b: cross-type exact label match — prevents duplicate atoms when
@@ -73,13 +82,13 @@ class EntityResolver:
             (name, atom_type, tenant_id, *read_spaces),
         )
         if row:
-            self._boost_sti(row["id"])
+            self._boost_sti(row["id"], tenant_id, write_space)
             return row["id"]
 
         # Tier 1: alias table across read_spaces
         atom_id = self.aliases.lookup(name, tenant_id, read_spaces)
         if atom_id:
-            self._boost_sti(atom_id)
+            self._boost_sti(atom_id, tenant_id, write_space)
             return atom_id
 
         # Tier 2: fuzzy match within same entity_type across read_spaces,
@@ -97,7 +106,7 @@ class EntityResolver:
                 # fuzzy hit would otherwise poison tier-1 resolution permanently.
                 if match[1] >= self._ALIAS_PERSIST_SCORE:
                     self.aliases.add(matched_id, name, tenant_id, write_space)
-                self._boost_sti(matched_id)
+                self._boost_sti(matched_id, tenant_id, write_space)
                 return matched_id
 
         # Tier 3: embedding cosine similarity via sqlite-vec. KNN filters
@@ -121,16 +130,36 @@ class EntityResolver:
             )
             if atom_row and atom_row["entity_type"] == entity_type:
                 # Embedding is the least reliable tier — never persist aliases here.
-                self._boost_sti(vec_match["atom_id"])
+                self._boost_sti(vec_match["atom_id"], tenant_id, write_space)
                 return vec_match["atom_id"]
 
         # Tier 4: create new atom in write_space (reusing the probe vector)
         return self._create_atom(name, entity_type, tenant_id, write_space, vec=query_vec)
 
-    def _boost_sti(self, atom_id: str) -> None:
+    # A re-mention asserts the entity is real and still relevant, but it is a
+    # weaker signal than an explicit belief assertion — hence short of 1.0.
+    _MENTION_PROBABILITY = 0.9
+
+    def _boost_sti(self, atom_id: str, tenant_id: str, space: str) -> None:
+        """Reinforce an atom on re-mention and log the mention as evidence.
+
+        The evidence row is what separates a fact the user keeps returning to
+        from one the model raised once and nobody picked up: user mentions
+        carry full weight, agent mentions carry ``agent_trust``, so PLN builds
+        confidence for the former roughly twice as fast as for the latter.
+        """
         self.db.execute(
-            "UPDATE atoms SET sti = MIN(sti + 0.5, 3.0) WHERE id = ?",
-            (atom_id,),
+            "UPDATE atoms SET sti = MIN(sti + ?, 3.0) WHERE id = ?",
+            (0.5 * self.trust, atom_id),
+        )
+        self.db.execute(
+            """INSERT INTO evidence
+                   (id, atom_id, observed_probability, weight, source_episode_id, tenant_id, space)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                str(uuid.uuid4()), atom_id, self._MENTION_PROBABILITY,
+                self.trust, self.episode_id or None, tenant_id, space,
+            ),
         )
 
     # Persisting an alias below this WRatio score risks poisoning tier-1
@@ -154,10 +183,19 @@ class EntityResolver:
     ) -> str:
         atom_id = str(uuid.uuid4())
         atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
+        # Provenance is recorded on the derived atom, not just the episode it
+        # came from: the epoch decays and prunes atoms, and without a source of
+        # its own an agent-extracted concept is indistinguishable from a fact
+        # the user stated. Truth and attention start scaled by trust.
+        metadata = '{"source": "agent"}' if self.source == "agent" else "{}"
         self.db.execute(
-            """INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti)
-               VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)""",
-            (atom_id, atom_type, name, entity_type, tenant_id, space),
+            """INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, metadata,
+                                  probability, confidence, sti, lti)
+               VALUES (?, ?, ?, ?, ?, ?, ?, 0.8, ?, ?, ?)""",
+            (
+                atom_id, atom_type, name, entity_type, tenant_id, space, metadata,
+                0.6 * self.trust, 1.0 * self.trust, 0.3 * self.trust,
+            ),
         )
 
         try:

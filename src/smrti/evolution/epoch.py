@@ -10,6 +10,34 @@ from smrti.evolution.valence import propagate_valence
 from smrti.spaces.set_ops import space_overlap
 from smrti.spaces.emergence import materialize_bridge
 
+# SQL for "who authored this atom", defaulting to the user.
+#
+# json_extract raises "malformed JSON" rather than returning NULL when the
+# column is not valid JSON, which on a whole-table pass would abort decay for
+# every atom in the space because of one bad row. CASE is used rather than
+# `json_valid(...) AND ...` because only CASE guarantees the guarded branch is
+# never evaluated. Atoms predating provenance tracking read as user-authored.
+_ATOM_SOURCE = (
+    "COALESCE(CASE WHEN json_valid(metadata) "
+    "THEN json_extract(metadata, '$.source') END, 'user')"
+)
+
+# The same column as a writable JSON object: json_set also raises on malformed
+# input, so unreadable metadata is replaced rather than appended to.
+_ATOM_METADATA_JSON = "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END"
+
+
+def _param(personality: dict, key: str, default: float) -> float:
+    """Read a personality hyperparameter, tolerating absent and NULL columns.
+
+    ``dict.get(key, default)`` substitutes the default only when the key is
+    missing; a column that exists but holds NULL yields None and poisons the
+    arithmetic downstream. Both shapes occur on databases carried across
+    versions, so both must fall back.
+    """
+    value = personality.get(key)
+    return default if value is None else value
+
 
 def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     """Single deterministic consolidation pass for a (tenant_id, space) pair.
@@ -55,7 +83,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         )
 
     p = dict(personality)
-    lr = p.get("confidence_update_lr", 0.3)
+    lr = _param(p, "confidence_update_lr", 0.3)
 
     # 1. Process pending evidence — each atom's truth update and its evidence
     # marks commit in one transaction so a crash cannot double-count evidence.
@@ -93,25 +121,51 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         db.execute_batch(statements)
         beliefs_updated += len(evs)
 
-    # 2. Decay STI and confidence for all atoms in this space
+    # 2. Decay STI, LTI, and confidence for all atoms in this space.
+    # LTI must decay: promotion only ever raises it, so without a downward
+    # force any atom that trends briefly salient is pinned above the prune
+    # floor permanently and the graph can never shed anything.
     decay_count_row = db.fetchone(
         "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ?",
         (tenant_id, space),
     )
     atoms_decayed = decay_count_row["n"] if decay_count_row else 0
-    db.execute(
-        """UPDATE atoms SET
+    # Agent-authored content decays faster in proportion to how little it is
+    # trusted, so model output the user never picked up fades on its own while
+    # user-stated facts persist. Atoms with no recorded source predate
+    # provenance tracking and are treated as user-authored.
+    agent_multiplier = 2.0 - _param(p, "agent_source_trust", 0.5)
+    base_rates = (
+        _param(p, "sti_decay_rate", 0.1),
+        _param(p, "lti_decay_rate", 0.01),
+        _param(p, "confidence_decay_rate", 0.02),
+    )
+    # Severe negative-valence atoms carry an LTI floor of 0.5 from creation
+    # (see atomspace.add_atom) that keeps past failures out of reach of the
+    # pruner. LTI decay must not erode it, or the error-avoidance guarantee
+    # expires on a timer — their STI and confidence still decay normally.
+    decay_sql = f"""UPDATE atoms SET
                sti        = sti        * (1.0 - ?),
+               lti        = CASE WHEN valence < -0.7 AND intensity > 0.7
+                                 THEN MAX(lti * (1.0 - ?), 0.5)
+                                 ELSE lti * (1.0 - ?) END,
                confidence = confidence * (1.0 - ?),
                updated_at = datetime('now')
-           WHERE tenant_id = ? AND space = ?""",
-        (p["sti_decay_rate"], p["confidence_decay_rate"], tenant_id, space),
-    )
+           WHERE tenant_id = ? AND space = ?
+             AND {_ATOM_SOURCE} {{}} 'agent'"""
+    for comparison, multiplier in (("!=", 1.0), ("=", agent_multiplier)):
+        sti_rate, lti_rate, conf_rate = (
+            min(rate * multiplier, 1.0) for rate in base_rates
+        )
+        db.execute(
+            decay_sql.format(comparison),
+            (sti_rate, lti_rate, lti_rate, conf_rate, tenant_id, space),
+        )
 
     # 2b. Propagate STI and valence to 1-hop neighbors
-    propagation_factor = p.get("sti_propagation_factor", 0.15)
-    valence_prop_factor = p.get("valence_propagation", 0.1)
-    mood_inertia = p.get("mood_inertia", 0.8)
+    propagation_factor = _param(p, "sti_propagation_factor", 0.15)
+    valence_prop_factor = _param(p, "valence_propagation", 0.1)
+    mood_inertia = _param(p, "mood_inertia", 0.8)
     if propagation_factor > 0 or valence_prop_factor > 0:
         active = db.fetchall(
             "SELECT id, sti, valence, intensity FROM atoms WHERE tenant_id = ? AND space = ? AND (sti > 0.3 OR (ABS(valence) > 0.3 AND intensity > 0.3))",
@@ -129,13 +183,16 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # 3. Promote high-STI atoms to LTI (capped at 1.0)
     promoted_rows = db.fetchall(
         "SELECT id FROM atoms WHERE tenant_id = ? AND space = ? AND sti > ?",
-        (tenant_id, space, p["lti_promotion_threshold"]),
+        (tenant_id, space, _param(p, "lti_promotion_threshold", 0.7)),
     )
     lti_promoted = len(promoted_rows)
     if promoted_rows:
+        # STI is clamped to 1.0 before scaling — it saturates at 3.0, so an
+        # unclamped sti * 0.5 pins LTI to its ceiling on a single promotion,
+        # which decay can then never walk back.
         db.execute(
-            "UPDATE atoms SET lti = MIN(MAX(lti, sti * 0.5), 1.0) WHERE tenant_id = ? AND space = ? AND sti > ?",
-            (tenant_id, space, p["lti_promotion_threshold"]),
+            "UPDATE atoms SET lti = MIN(MAX(lti, MIN(sti, 1.0) * 0.5), 1.0) WHERE tenant_id = ? AND space = ? AND sti > ?",
+            (tenant_id, space, _param(p, "lti_promotion_threshold", 0.7)),
         )
 
     # 4. Resolve contradictions within this space — each edge is weakened once,
@@ -144,7 +201,8 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         """SELECT id, source_id, target_id FROM atoms
            WHERE type = 'relation' AND relation = 'contradicts'
              AND tenant_id = ? AND space = ?
-             AND json_extract(metadata, '$.resolved') IS NULL""",
+             AND (CASE WHEN json_valid(metadata)
+                       THEN json_extract(metadata, '$.resolved') END) IS NULL""",
         (tenant_id, space),
     )
     for c in contradictions:
@@ -168,7 +226,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
                     (loser_id,),
                 ),
                 (
-                    "UPDATE atoms SET metadata = json_set(COALESCE(metadata, '{}'), '$.resolved', 1) WHERE id = ?",
+                    f"UPDATE atoms SET metadata = json_set({_ATOM_METADATA_JSON}, '$.resolved', 1) WHERE id = ?",
                     (c["id"],),
                 ),
             ])
@@ -184,13 +242,18 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         bridges_created = _discover_bridges(tenant_id, space, db, embed_engine)
 
     # 6. Prune atoms below both confidence and LTI floors.
-    # Episodes, beliefs, and relations are exempt from direct pruning.
-    # Relations are cascade-deleted when their endpoint atoms are pruned (see loop below).
-    min_conf = p.get("min_confidence_to_surface", 0.1)
+    # User-authored episodes and beliefs are exempt from direct pruning; their
+    # agent-authored counterparts are not, so a model turn the user never
+    # picked up can leave the graph once it has decayed. Relations are never
+    # pruned directly — they cascade with their endpoints (see loop below).
+    min_conf = _param(p, "min_confidence_to_surface", 0.1)
     dead_rows = db.fetchall(
-        """SELECT id FROM atoms
+        f"""SELECT id FROM atoms
            WHERE tenant_id = ? AND space = ?
-             AND confidence < ? AND lti < 0.05 AND type NOT IN ('episode', 'belief', 'relation')""",
+             AND confidence < ? AND lti < 0.05
+             AND type != 'relation'
+             AND (type NOT IN ('episode', 'belief')
+                  OR {_ATOM_SOURCE} = 'agent')""",
         (tenant_id, space, min_conf),
     )
     atoms_pruned = len(dead_rows)

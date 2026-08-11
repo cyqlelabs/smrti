@@ -195,6 +195,158 @@ def test_content_hash_backfill_on_old_db(tmp_path):
     assert row["content_hash"] == hashlib.sha256(b"hello world").hexdigest()
 
 
+# ── personality column migration ──────────────────────────────────────────────
+
+NEW_PERSONALITY_COLUMNS = ("lti_decay_rate", "agent_source_trust")
+
+
+def _downgrade_personality_schema(path: str) -> None:
+    """Strip columns added after release so the table looks like an older DB."""
+    conn = sqlite3.connect(path)
+    for column in NEW_PERSONALITY_COLUMNS:
+        conn.execute(f"ALTER TABLE personality DROP COLUMN {column}")
+    conn.commit()
+    conn.close()
+
+
+def _legacy_db(tmp_path, name, preset="maverick", tenant="t1", space="s1"):
+    """A DB carrying a personality row but no post-release personality columns."""
+    from smrti.personality.params import load_preset
+
+    path = str(tmp_path / name)
+    db = get_database(path)
+    profile = load_preset(preset)
+    db.execute(
+        """INSERT INTO personality (tenant_id, space, preset_name, sti_decay_rate, epoch_count)
+           VALUES (?, ?, ?, ?, ?)""",
+        (tenant, space, preset, profile.sti_decay_rate, 7),
+    )
+    _insert_atom(db, "keep1", "concept", "existing data", space, tenant=tenant)
+    # A bare insert leaves confidence at 0.0, which is legitimately prunable;
+    # give it the profile of an established atom so survival is meaningful.
+    db.execute("UPDATE atoms SET confidence = 0.7, lti = 0.4 WHERE id = 'keep1'")
+    close_database(path)
+    _downgrade_personality_schema(path)
+    return path
+
+
+def test_legacy_db_without_new_personality_columns_opens(tmp_path):
+    """Opening a pre-upgrade DB must add the columns rather than raise."""
+    path = _legacy_db(tmp_path, "legacy.db")
+    db = get_database(path)
+    cols = {r["name"] for r in db.fetchall("PRAGMA table_info(personality)")}
+    assert set(NEW_PERSONALITY_COLUMNS) <= cols
+
+
+def test_personality_migration_backfills_from_the_rows_own_preset(tmp_path):
+    """A maverick row must get maverick's values, not the generic column default."""
+    from smrti.personality.params import load_preset
+
+    path = _legacy_db(tmp_path, "preset.db", preset="maverick")
+    db = get_database(path)
+    row = db.fetchone("SELECT * FROM personality WHERE tenant_id = 't1'")
+    expected = load_preset("maverick")
+    assert row["lti_decay_rate"] == pytest.approx(expected.lti_decay_rate)
+    assert row["agent_source_trust"] == pytest.approx(expected.agent_source_trust)
+    # maverick deliberately differs from the schema default here — guard the guard.
+    assert expected.lti_decay_rate != 0.01
+
+
+def test_personality_migration_preserves_existing_data(tmp_path):
+    """Migration must not disturb atoms or the columns already on the row."""
+    path = _legacy_db(tmp_path, "preserve.db")
+    db = get_database(path)
+    row = db.fetchone("SELECT * FROM personality WHERE tenant_id = 't1'")
+    assert row["epoch_count"] == 7
+    assert row["preset_name"] == "maverick"
+    assert db.fetchone("SELECT label FROM atoms WHERE id = 'keep1'")["label"] == "existing data"
+
+
+def test_personality_migration_defaults_unknown_presets(tmp_path):
+    """A custom-tuned row has no preset to backfill from and takes the default."""
+    path = str(tmp_path / "custom.db")
+    db = get_database(path)
+    db.execute(
+        "INSERT INTO personality (tenant_id, space, preset_name) VALUES ('t1', 's1', 'custom')"
+    )
+    close_database(path)
+    _downgrade_personality_schema(path)
+
+    db = get_database(path)
+    row = db.fetchone("SELECT * FROM personality WHERE tenant_id = 't1'")
+    assert row["lti_decay_rate"] == pytest.approx(0.01)
+    assert row["agent_source_trust"] == pytest.approx(0.5)
+
+
+def test_personality_migration_is_idempotent(tmp_path):
+    path = _legacy_db(tmp_path, "idem.db")
+    get_database(path)
+    close_database(path)
+    db = get_database(path)  # second open: columns already present
+    assert db.fetchone("SELECT epoch_count FROM personality")["epoch_count"] == 7
+
+
+def test_partially_migrated_db_gains_only_the_missing_column(tmp_path):
+    """A half-applied upgrade must complete, not trip over the column it has."""
+    path = str(tmp_path / "partial.db")
+    db = get_database(path)
+    db.execute(
+        "INSERT INTO personality (tenant_id, space, preset_name) VALUES ('t1', 's1', 'balanced')"
+    )
+    close_database(path)
+    conn = sqlite3.connect(path)
+    conn.execute("ALTER TABLE personality DROP COLUMN agent_source_trust")
+    conn.commit()
+    conn.close()
+
+    db = get_database(path)
+    cols = {r["name"] for r in db.fetchall("PRAGMA table_info(personality)")}
+    assert set(NEW_PERSONALITY_COLUMNS) <= cols
+
+
+def test_migrated_db_supports_personality_writes(tmp_path):
+    """The INSERT and UPDATE paths name every column explicitly.
+
+    Without the migration these raise "no such column" on every pre-existing
+    database the moment a new space is initialised or a preset is applied.
+    """
+    from smrti import Smrti
+    from smrti.personality.params import load_preset
+
+    path = _legacy_db(tmp_path, "writes.db", tenant="t1", space="s1")
+    close_database(path)
+
+    # A new space on a migrated DB exercises the INSERT column list.
+    mem = Smrti(db_path=path, personality="analytical", tenant_id="t1", write_space="fresh")
+    row = mem.db.fetchone(
+        "SELECT * FROM personality WHERE tenant_id = 't1' AND space = 'fresh'"
+    )
+    assert row["agent_source_trust"] == pytest.approx(
+        load_preset("analytical").agent_source_trust
+    )
+
+    # set_personality_profile exercises the UPDATE column list.
+    mem.set_personality("curious")
+    row = mem.db.fetchone(
+        "SELECT * FROM personality WHERE tenant_id = 't1' AND space = 'fresh'"
+    )
+    assert row["lti_decay_rate"] == pytest.approx(load_preset("curious").lti_decay_rate)
+
+
+def test_migrated_legacy_db_can_run_an_epoch(tmp_path):
+    """End-to-end: an upgraded institutional DB must still consolidate."""
+    from smrti import Smrti
+
+    path = _legacy_db(tmp_path, "epoch.db", tenant="t1", space="s1")
+    close_database(path)
+
+    mem = Smrti(db_path=path, personality="maverick", tenant_id="t1", write_space="s1")
+    mem.remember("a fact worth keeping")
+    result = mem.reflect()
+    assert result.atoms_decayed >= 1
+    assert mem.db.fetchone("SELECT label FROM atoms WHERE id = 'keep1'") is not None
+
+
 def test_u_lower_is_unicode_aware(tmp_path):
     db = get_database(str(tmp_path / "ul.db"))
     _insert_atom(db, "m1", "concept", "MÜLLER", "s1")
@@ -204,3 +356,44 @@ def test_u_lower_is_unicode_aware(tmp_path):
     assert row is not None and row["id"] == "m1"
     # Plain LOWER() would miss this (ASCII-only folding) — guard the guard.
     assert db.fetchone("SELECT id FROM atoms WHERE LOWER(label) = ?", ("müller",)) is None
+
+
+def test_new_columns_have_defaults_for_older_writers(tmp_path):
+    """An older smrti build names columns explicitly and omits the new ones.
+
+    Mixed-version fleets are normal during a rollout, so a row written by the
+    previous release must still come out valid rather than NULL.
+    """
+    db = get_database(str(tmp_path / "mixed.db"))
+    db.execute(
+        """INSERT INTO personality (
+               tenant_id, space, confidence_decay_rate, confidence_update_lr,
+               min_confidence_to_surface, sti_decay_rate, sti_boost_on_access,
+               sti_propagation_factor, lti_promotion_threshold, valence_weight,
+               valence_propagation, mood_inertia, w_similarity, w_sti, w_confidence,
+               w_lti, w_valence, preset_name
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+        ("t1", "s1", 0.02, 0.3, 0.1, 0.1, 0.5, 0.15, 0.7, 0.2, 0.1, 0.8,
+         0.35, 0.25, 0.2, 0.1, 0.1, "balanced"),
+    )
+    row = db.fetchone("SELECT * FROM personality WHERE tenant_id = 't1'")
+    assert row["lti_decay_rate"] == pytest.approx(0.01)
+    assert row["agent_source_trust"] == pytest.approx(0.5)
+
+
+def test_epoch_tolerates_a_personality_row_missing_new_values(tmp_path):
+    """NULLs in the new columns must fall back, not poison the decay arithmetic."""
+    from smrti import Smrti
+
+    path = str(tmp_path / "nulls.db")
+    mem = Smrti(db_path=path, personality="balanced", tenant_id="t1", write_space="s1")
+    atom_id = mem.remember("a fact", type="concept")
+    mem.db.execute("UPDATE atoms SET confidence = 0.8 WHERE id = ?", (atom_id,))
+    mem.db.execute(
+        "UPDATE personality SET lti_decay_rate = NULL, agent_source_trust = NULL "
+        "WHERE tenant_id = 't1' AND space = 's1'"
+    )
+
+    mem.reflect()  # must not raise on NULL * float
+    row = mem.db.fetchone("SELECT confidence FROM atoms WHERE id = ?", (atom_id,))
+    assert row["confidence"] < 0.8

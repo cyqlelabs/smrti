@@ -115,12 +115,19 @@ def test_positive_valence_propagates_in_epoch(mem):
 
 # ── LTI promotion cap and counting ────────────────────────────────────────────
 
-def test_lti_promotion_capped_at_one_and_counts_qualifying_rows(mem):
+def test_lti_promotion_counts_qualifying_rows_without_ratcheting(mem):
+    """Promotion never raises LTI above what a saturated STI is worth (0.5).
+
+    STI caps at 3.0, so scaling it unclamped pins LTI to its own ceiling on the
+    first promotion and decay can never walk it back — the atom becomes
+    permanently unprunable no matter how irrelevant it later turns out to be.
+    """
     a = mem.remember("critical memory one")
     b = mem.remember("critical memory two")
-    mem.db.execute("UPDATE atoms SET sti = 3.0, lti = 0.9 WHERE id IN (?, ?)", (a, b))
+    mem.db.execute("UPDATE atoms SET sti = 3.0, lti = 0.4 WHERE id IN (?, ?)", (a, b))
     mem.db.execute(
-        "UPDATE personality SET sti_decay_rate = 0.0 WHERE tenant_id = ? AND space = ?",
+        "UPDATE personality SET sti_decay_rate = 0.0, lti_decay_rate = 0.0 "
+        "WHERE tenant_id = ? AND space = ?",
         ("test", "default"),
     )
 
@@ -129,7 +136,71 @@ def test_lti_promotion_capped_at_one_and_counts_qualifying_rows(mem):
     assert result.lti_promoted == 2
     for atom_id in (a, b):
         row = mem.db.fetchone("SELECT lti FROM atoms WHERE id = ?", (atom_id,))
-        assert row["lti"] == pytest.approx(1.0)
+        assert row["lti"] == pytest.approx(0.5)
+
+
+def test_lti_promotion_never_lowers_existing_lti(mem):
+    """An atom already above the promotion target keeps its higher LTI."""
+    a = mem.remember("well established fact")
+    mem.db.execute("UPDATE atoms SET sti = 3.0, lti = 0.9 WHERE id = ?", (a,))
+    mem.db.execute(
+        "UPDATE personality SET sti_decay_rate = 0.0, lti_decay_rate = 0.0 "
+        "WHERE tenant_id = ? AND space = ?",
+        ("test", "default"),
+    )
+
+    mem.reflect()
+    row = mem.db.fetchone("SELECT lti FROM atoms WHERE id = ?", (a,))
+    assert row["lti"] == pytest.approx(0.9)
+
+
+def test_lti_decays_so_stale_atoms_become_prunable(mem):
+    """LTI must fall over time, or the prune predicate is unsatisfiable.
+
+    Promotion only ever raises LTI. Without a downward force, any atom that
+    trends briefly salient sits above the prune floor forever and the graph
+    grows without bound.
+    """
+    a = mem.remember("passing mention", type="concept")
+    mem.db.execute("UPDATE atoms SET sti = 0.0, lti = 0.6 WHERE id = ?", (a,))
+    mem.db.execute(
+        "UPDATE personality SET lti_decay_rate = 0.1 WHERE tenant_id = ? AND space = ?",
+        ("test", "default"),
+    )
+
+    seen = []
+    for _ in range(5):
+        mem.reflect()
+        row = mem.db.fetchone("SELECT lti FROM atoms WHERE id = ?", (a,))
+        if row is None:
+            break
+        seen.append(row["lti"])
+
+    assert seen == sorted(seen, reverse=True), "LTI must be monotonically decreasing"
+    assert seen[-1] < 0.6
+
+
+def test_lti_decay_does_not_erode_the_critical_valence_floor(mem):
+    """Severe negative-valence atoms keep the LTI floor that shields them.
+
+    atomspace.add_atom pins these at lti >= 0.5 so past failures stay out of
+    reach of the pruner; if decay eats that floor the error-avoidance
+    guarantee simply expires on a timer.
+    """
+    critical = mem.remember("dropped the production database", valence=-0.95)
+    mem.db.execute(
+        "UPDATE personality SET lti_decay_rate = 0.3 WHERE tenant_id = ? AND space = ?",
+        ("test", "default"),
+    )
+
+    for _ in range(20):
+        mem.reflect()
+
+    row = mem.db.fetchone("SELECT lti, confidence FROM atoms WHERE id = ?", (critical,))
+    assert row is not None, "critical memory must survive"
+    assert row["lti"] >= 0.5
+    # The floor protects LTI only — confidence still decays normally.
+    assert row["confidence"] < 0.5
 
 
 # ── prune cascade tenant scoping ──────────────────────────────────────────────

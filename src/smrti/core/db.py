@@ -118,6 +118,8 @@ CREATE TABLE IF NOT EXISTS personality (
     sti_boost_on_access     REAL DEFAULT 0.5,
     sti_propagation_factor  REAL DEFAULT 0.15,
     lti_promotion_threshold REAL DEFAULT 0.7,
+    lti_decay_rate          REAL DEFAULT 0.01,
+    agent_source_trust      REAL DEFAULT 0.5,
     valence_weight          REAL DEFAULT 0.2,
     valence_propagation     REAL DEFAULT 0.1,
     mood_inertia            REAL DEFAULT 0.8,
@@ -180,6 +182,7 @@ class Database:
         with self._write_lock:
             self._migrate_vec_atoms()
             self._migrate_content_hash()
+            self._migrate_personality_columns()
             for statement in _SCHEMA_SQL.strip().split(";"):
                 stmt = statement.strip()
                 if stmt:
@@ -213,6 +216,52 @@ class Database:
                     for r in rows
                 ],
             )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    _PERSONALITY_COLUMNS = (
+        ("lti_decay_rate", 0.01),
+        ("agent_source_trust", 0.5),
+    )
+
+    def _migrate_personality_columns(self) -> None:
+        """Add personality columns introduced after a DB was first created.
+
+        ``CREATE TABLE IF NOT EXISTS`` never revises an existing table, so
+        columns are appended here and backfilled from the row's own preset —
+        a maverick row must get maverick's value, not the column default.
+        """
+        conn = self._write_conn
+        if (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'personality'"
+            ).fetchone()
+            is None
+        ):
+            return
+        existing = {r["name"] for r in conn.execute("PRAGMA table_info(personality)")}
+        missing = [(c, d) for c, d in self._PERSONALITY_COLUMNS if c not in existing]
+        if not missing:
+            return
+
+        from smrti.personality.params import PRESETS
+
+        try:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            for column, default in missing:
+                conn.execute(
+                    f"ALTER TABLE personality ADD COLUMN {column} REAL DEFAULT {default}"
+                )
+                conn.executemany(
+                    f"UPDATE personality SET {column} = ? WHERE preset_name = ?",
+                    [
+                        (getattr(profile, column), name)
+                        for name, profile in PRESETS.items()
+                    ],
+                )
             conn.commit()
         except Exception:
             conn.rollback()

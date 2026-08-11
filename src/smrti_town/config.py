@@ -140,7 +140,8 @@ DEATH_LOW_ENERGY_MULT = 2.0
 PERSONALITY_PARAMS = [
     "confidence_decay_rate", "confidence_update_lr", "min_confidence_to_surface",
     "sti_decay_rate", "sti_boost_on_access", "sti_propagation_factor",
-    "lti_promotion_threshold", "valence_weight", "valence_propagation",
+    "lti_promotion_threshold", "lti_decay_rate", "agent_source_trust",
+    "valence_weight", "valence_propagation",
     "mood_inertia", "w_similarity", "w_sti", "w_confidence", "w_lti", "w_valence",
 ]
 
@@ -152,6 +153,8 @@ PARAM_BOUNDS = {
     "sti_boost_on_access": (0.1, 1.0),
     "sti_propagation_factor": (0.01, 0.5),
     "lti_promotion_threshold": (0.3, 0.95),
+    "lti_decay_rate": (0.001, 0.05),
+    "agent_source_trust": (0.1, 0.9),
     "valence_weight": (0.01, 0.5),
     "valence_propagation": (0.01, 0.4),
     "mood_inertia": (0.2, 0.99),

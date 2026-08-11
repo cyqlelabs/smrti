@@ -100,10 +100,11 @@ class Smrti:
                 INSERT OR IGNORE INTO personality (
                     tenant_id, space, confidence_decay_rate, confidence_update_lr,
                     min_confidence_to_surface, sti_decay_rate, sti_boost_on_access,
-                    sti_propagation_factor, lti_promotion_threshold, valence_weight,
+                    sti_propagation_factor, lti_promotion_threshold, lti_decay_rate,
+                    agent_source_trust, valence_weight,
                     valence_propagation, mood_inertia, w_similarity, w_sti, w_confidence,
                     w_lti, w_valence, preset_name
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     self.tenant_id,
@@ -115,6 +116,8 @@ class Smrti:
                     profile.sti_boost_on_access,
                     profile.sti_propagation_factor,
                     profile.lti_promotion_threshold,
+                    profile.lti_decay_rate,
+                    profile.agent_source_trust,
                     profile.valence_weight,
                     profile.valence_propagation,
                     profile.mood_inertia,
@@ -228,7 +231,8 @@ class Smrti:
             UPDATE personality SET
                 confidence_decay_rate=?, confidence_update_lr=?, min_confidence_to_surface=?,
                 sti_decay_rate=?, sti_boost_on_access=?, sti_propagation_factor=?,
-                lti_promotion_threshold=?, valence_weight=?, valence_propagation=?,
+                lti_promotion_threshold=?, lti_decay_rate=?, agent_source_trust=?,
+                valence_weight=?, valence_propagation=?,
                 mood_inertia=?, w_similarity=?, w_sti=?, w_confidence=?, w_lti=?, w_valence=?,
                 preset_name=?
             WHERE tenant_id=? AND space=?
@@ -241,6 +245,8 @@ class Smrti:
                 profile.sti_boost_on_access,
                 profile.sti_propagation_factor,
                 profile.lti_promotion_threshold,
+                profile.lti_decay_rate,
+                profile.agent_source_trust,
                 profile.valence_weight,
                 profile.valence_propagation,
                 profile.mood_inertia,

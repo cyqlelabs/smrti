@@ -13,6 +13,12 @@ class PersonalityProfile:
     sti_boost_on_access: float = 0.5
     sti_propagation_factor: float = 0.15
     lti_promotion_threshold: float = 0.7
+    lti_decay_rate: float = 0.01
+    # Provenance — how much weight agent-authored content carries relative to
+    # the user's own. Scales initial truth/attention of atoms extracted from
+    # agent turns and accelerates their decay, so unincorporated model output
+    # fades while user-stated facts persist.
+    agent_source_trust: float = 0.5
     # Emotional dynamics
     valence_weight: float = 0.2
     valence_propagation: float = 0.1
@@ -35,6 +41,8 @@ PRESETS = {
         sti_decay_rate=0.05,
         sti_propagation_factor=0.05,
         lti_promotion_threshold=0.9,
+        lti_decay_rate=0.005,
+        agent_source_trust=0.3,
         valence_weight=0.05,
         mood_inertia=0.95,
         w_similarity=0.30,
@@ -51,6 +59,8 @@ PRESETS = {
         sti_boost_on_access=0.8,
         sti_propagation_factor=0.3,
         lti_promotion_threshold=0.5,
+        lti_decay_rate=0.02,
+        agent_source_trust=0.7,
         valence_weight=0.15,
         mood_inertia=0.5,
         w_similarity=0.25,
@@ -81,6 +91,7 @@ PRESETS = {
         sti_decay_rate=0.15,
         sti_propagation_factor=0.35,
         lti_promotion_threshold=0.4,
+        lti_decay_rate=0.02,
         valence_weight=0.25,
         mood_inertia=0.7,
         w_similarity=0.20,
@@ -98,6 +109,8 @@ PRESETS = {
         sti_boost_on_access=0.8,
         sti_propagation_factor=0.05,
         lti_promotion_threshold=0.85,
+        lti_decay_rate=0.003,
+        agent_source_trust=0.3,
         valence_weight=0.20,
         valence_propagation=0.05,
         mood_inertia=0.95,

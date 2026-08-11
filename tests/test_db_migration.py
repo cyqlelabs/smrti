@@ -1,4 +1,5 @@
 """Tests for the vec_atoms schema migration, transaction safety, and u_lower."""
+import os
 import sqlite3
 import struct
 
@@ -397,3 +398,83 @@ def test_epoch_tolerates_a_personality_row_missing_new_values(tmp_path):
     mem.reflect()  # must not raise on NULL * float
     row = mem.db.fetchone("SELECT confidence FROM atoms WHERE id = ?", (atom_id,))
     assert row["confidence"] < 0.8
+
+
+# ── pre-migration file backup ─────────────────────────────────────────────────
+
+def _backup_path(db_path):
+    return db_path + ".pre-migration.bak"
+
+
+def test_migration_writes_a_pre_migration_backup(tmp_path):
+    """A schema-altering open must leave a file-level snapshot of the old DB.
+
+    Transactions protect against a crashed migration; only a whole-file copy
+    protects against a bad *release* — restore it and downgrade the package.
+    """
+    path = _legacy_db(tmp_path, "bak.db")
+    get_database(path)
+
+    conn = sqlite3.connect(_backup_path(path))
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(personality)")}
+    # The snapshot is the pre-upgrade state: new columns absent, data intact.
+    assert not (set(NEW_PERSONALITY_COLUMNS) & cols)
+    assert conn.execute(
+        "SELECT epoch_count, preset_name FROM personality"
+    ).fetchone() == (7, "maverick")
+    assert conn.execute(
+        "SELECT label FROM atoms WHERE id = 'keep1'"
+    ).fetchone() == ("existing data",)
+    conn.close()
+
+
+def test_no_backup_when_no_migration_is_needed(tmp_path):
+    """Routine opens of a current-schema DB must not pay the snapshot cost."""
+    path = str(tmp_path / "current.db")
+    get_database(path)
+    assert not os.path.exists(_backup_path(path))
+
+    close_database(path)
+    get_database(path)  # reopen: schema already current
+    assert not os.path.exists(_backup_path(path))
+
+
+def test_stale_backup_file_is_replaced(tmp_path):
+    """Garbage at the backup path must not poison or abort the snapshot."""
+    path = _legacy_db(tmp_path, "stale.db")
+    with open(_backup_path(path), "w") as f:
+        f.write("not a database")
+
+    get_database(path)
+    conn = sqlite3.connect(_backup_path(path))
+    assert conn.execute("SELECT COUNT(*) FROM personality").fetchone()[0] == 1
+    conn.close()
+
+
+def test_backup_restores_and_remigrates(tmp_path):
+    """The restore drill: copy the snapshot back, reopen, and everything works.
+
+    This is the exact procedure an institutional operator would follow, so it
+    must round-trip — including the migration running again on the restored
+    file.
+    """
+    import shutil
+
+    path = _legacy_db(tmp_path, "drill.db")
+    get_database(path)
+    close_database(path)
+
+    # Restore: snapshot over the DB; stale WAL/SHM must not shadow it.
+    for suffix in ("-wal", "-shm"):
+        try:
+            os.remove(path + suffix)
+        except FileNotFoundError:
+            pass
+    shutil.copy(_backup_path(path), path)
+
+    db = get_database(path)
+    cols = {r["name"] for r in db.fetchall("PRAGMA table_info(personality)")}
+    assert set(NEW_PERSONALITY_COLUMNS) <= cols
+    row = db.fetchone("SELECT * FROM personality WHERE tenant_id = 't1'")
+    assert row["epoch_count"] == 7
+    assert db.fetchone("SELECT label FROM atoms WHERE id = 'keep1'") is not None

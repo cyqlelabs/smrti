@@ -174,6 +174,7 @@ class Database:
         self._write_conn: sqlite3.Connection | None = None
         self._write_lock = threading.Lock()
         self._read_pool: queue.Queue[sqlite3.Connection] = queue.Queue(maxsize=_READ_POOL_SIZE)
+        self._migration_backup_done = False
 
     def initialize(self) -> None:
         self._write_conn = _make_connection(self._db_path)
@@ -202,6 +203,7 @@ class Database:
         cols = {r["name"] for r in conn.execute("PRAGMA table_info(atoms)")}
         if "content_hash" in cols:
             return
+        self._backup_before_migration()
         try:
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
@@ -220,6 +222,33 @@ class Database:
         except Exception:
             conn.rollback()
             raise
+
+    def _backup_before_migration(self) -> None:
+        """Snapshot the whole DB file before the first schema-altering migration.
+
+        Each migration is transactional, but a file-level copy is the only
+        rollback that also survives downgrading the package — restore the
+        ``.pre-migration.bak`` file over the DB and the previous release runs
+        as before. The SQLite backup API is used instead of a filesystem copy
+        so the snapshot is consistent even with WAL frames not yet
+        checkpointed into the main file. At most one snapshot per open; a
+        later release's migration overwrites it, by which point this
+        snapshot's state has already been validated by a successful upgrade.
+        """
+        if self._migration_backup_done or self._db_path == ":memory:":
+            return
+        backup_path = self._db_path + ".pre-migration.bak"
+        try:
+            # A stale or corrupt leftover is not a valid backup destination.
+            os.remove(backup_path)
+        except FileNotFoundError:
+            pass
+        dest = sqlite3.connect(backup_path)
+        try:
+            self._write_conn.backup(dest)
+        finally:
+            dest.close()
+        self._migration_backup_done = True
 
     _PERSONALITY_COLUMNS = (
         ("lti_decay_rate", 0.01),
@@ -248,6 +277,7 @@ class Database:
 
         from smrti.personality.params import PRESETS
 
+        self._backup_before_migration()
         try:
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
@@ -292,6 +322,7 @@ class Database:
         current = "space" in sql and "distance_metric=cosine" in sql
         if current and not have_backup:
             return
+        self._backup_before_migration()
         # Explicit transaction: SQLite DDL is transactional, but Python's
         # legacy autocommit mode would otherwise commit each DDL statement
         # individually — a crash mid-migration must leave the old index (or a

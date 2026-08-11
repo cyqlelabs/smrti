@@ -1,0 +1,70 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A new push to the same branch supersedes the run in flight.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      # Report every interpreter's result: which versions break is the point
+      # of the matrix, and stopping at the first failure hides the pattern.
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      # hatch-vcs derives the version from tags, so the full history is needed.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      # FastEmbed pulls a ~120MB ONNX model on first embed; without this every
+      # job on every run re-downloads it from HuggingFace.
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/fastembed
+            ~/.cache/huggingface
+          key: models-${{ runner.os }}-v1
+      # The gliner extra is deliberately absent: the suite mocks the NER model
+      # and passes identically with and without it, so installing it would add
+      # a second large download and buy no coverage.
+      - run: pip install -e ".[openai]" pytest pytest-cov
+      - run: pytest tests/ -q --cov=smrti --cov-report=xml
+      # One upload is enough; the other interpreters cover the same lines.
+      - if: matrix.python-version == '3.12'
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.xml
+          # Forked PRs cannot read the token; a missing upload must not fail CI.
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build twine
+      - run: python -m build
+      # Catches a broken sdist or wheel at review time rather than on the tag
+      # push, where the same build gates publishing to PyPI.
+      - run: twine check dist/*

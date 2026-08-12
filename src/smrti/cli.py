@@ -1,13 +1,73 @@
-"""CLI for smrti: smrti serve mcp|rest|proxy, smrti init, smrti status."""
+"""CLI for smrti: smrti serve mcp|rest|proxy, smrti stop, smrti init, smrti status."""
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
+import signal
+import time
+from pathlib import Path
+from typing import Iterator
 
 import typer
 
 app = typer.Typer(help="Smrti memory engine CLI")
 
 _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
+
+_RUN_DIR = Path(os.path.expanduser(os.environ.get("SMRTI_RUN_DIR", "~/.smrti/run")))
+
+_SERVER_MODES = ("rest", "viz", "proxy", "town")
+
+
+@contextlib.contextmanager
+def _pidfile(mode: str, port: int) -> Iterator[None]:
+    """Record this process so `smrti stop` can find it.
+
+    The file is held under an exclusive advisory lock for the lifetime of the
+    server. The kernel drops that lock however the process dies, so a lock left
+    unheld marks the entry stale even after a SIGKILL or a power loss — which
+    keeps `smrti stop` from ever signalling a recycled PID.
+    """
+    _RUN_DIR.mkdir(parents=True, exist_ok=True)
+    path = _RUN_DIR / f"{mode}-{port}.pid"
+    handle = path.open("a+")
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        raise typer.BadParameter(f"a {mode} server is already running on port {port}")
+    handle.seek(0)
+    handle.truncate()
+    handle.write(str(os.getpid()))
+    handle.flush()
+    try:
+        yield
+    finally:
+        path.unlink(missing_ok=True)
+        handle.close()
+
+
+def _held(path: Path) -> bool:
+    """True while the process that wrote this pidfile is still alive."""
+    try:
+        handle = path.open("r+")
+    except OSError:
+        return False
+    try:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        return True
+    else:
+        fcntl.flock(handle, fcntl.LOCK_UN)
+        return False
+    finally:
+        handle.close()
+
+
+def _signal(pid: int, sig: int) -> None:
+    with contextlib.suppress(ProcessLookupError):
+        os.kill(pid, sig)
 
 
 def _warn_if_exposed(host: str) -> None:
@@ -62,6 +122,50 @@ def status(
     mem.close()
 
 
+@app.command()
+def stop(
+    mode: str = typer.Argument("", help="Mode to stop: rest, viz, proxy or town. All if omitted."),
+    port: int = typer.Option(0, help="Only stop the server bound to this port"),
+    timeout: float = typer.Option(10.0, help="Seconds to wait for a graceful shutdown"),
+) -> None:
+    """Stop servers started by `smrti serve`.
+
+    Sends SIGTERM so uvicorn drains connections and checkpoints the WAL, then
+    escalates to SIGKILL if the process outlives the timeout.
+    """
+    if mode and mode not in _SERVER_MODES:
+        raise typer.BadParameter(f"unknown mode {mode!r}, expected one of {', '.join(_SERVER_MODES)}")
+
+    pattern = f"{mode or '*'}-{port or '*'}.pid"
+    entries = sorted(_RUN_DIR.glob(pattern)) if _RUN_DIR.is_dir() else []
+    if not entries:
+        typer.echo("No running Smrti servers found.")
+        return
+
+    for path in entries:
+        if not _held(path):
+            path.unlink(missing_ok=True)
+            typer.echo(f"{path.stem}: not running (cleared stale pidfile)")
+            continue
+        try:
+            pid = int(path.read_text().strip())
+        except (ValueError, OSError):
+            typer.secho(f"{path.stem}: unreadable pidfile, skipping", fg=typer.colors.YELLOW)
+            continue
+
+        _signal(pid, signal.SIGTERM)
+        deadline = time.monotonic() + timeout
+        while _held(path) and time.monotonic() < deadline:
+            time.sleep(0.1)
+
+        if _held(path):
+            _signal(pid, signal.SIGKILL)
+            typer.secho(f"{path.stem}: killed (pid {pid})", fg=typer.colors.YELLOW)
+        else:
+            typer.echo(f"{path.stem}: stopped (pid {pid})")
+        path.unlink(missing_ok=True)
+
+
 serve_app = typer.Typer(help="Start a server")
 app.add_typer(serve_app, name="serve")
 
@@ -84,7 +188,8 @@ def serve_rest(
 
     _warn_if_exposed(host)
     typer.echo(f"Starting Smrti REST API on http://{host}:{port}")
-    run_rest_server(host=host, port=port)
+    with _pidfile("rest", port):
+        run_rest_server(host=host, port=port)
 
 
 @serve_app.command("viz")
@@ -111,7 +216,8 @@ def serve_viz(
 
         threading.Thread(target=_open, daemon=True).start()
 
-    run_rest_server(host=host, port=port)
+    with _pidfile("viz", port):
+        run_rest_server(host=host, port=port)
 
 
 @serve_app.command("proxy")
@@ -137,7 +243,8 @@ def serve_proxy(
     typer.echo(f"Starting Smrti proxy on http://{host}:{port}/v1")
     typer.echo(f"Visualizer:  http://{'127.0.0.1' if host == '0.0.0.0' else host}:{port}/viz")
     typer.echo(f"Upstream: {effective_upstream}")
-    run_proxy_server(host=host, port=port)
+    with _pidfile("proxy", port):
+        run_proxy_server(host=host, port=port)
 
 
 @serve_app.command("town")
@@ -175,7 +282,8 @@ def serve_town(
 
         threading.Thread(target=_open, daemon=True).start()
 
-    serve(host=host, port=port)
+    with _pidfile("town", port):
+        serve(host=host, port=port)
 
 
 if __name__ == "__main__":

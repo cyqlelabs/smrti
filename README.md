@@ -3,7 +3,7 @@
 [![PyPI version](https://img.shields.io/pypi/v/smrti)](https://pypi.org/project/smrti/)
 [![Python](https://img.shields.io/pypi/pyversions/smrti)](https://pypi.org/project/smrti/)
 [![License](https://img.shields.io/github/license/cyqlelabs/smrti)](LICENSE)
-[![CI](https://img.shields.io/github/actions/workflow/status/cyqlelabs/smrti/publish.yml?label=CI)](https://github.com/cyqlelabs/smrti/actions/workflows/publish.yml)
+[![CI](https://img.shields.io/github/actions/workflow/status/cyqlelabs/smrti/ci.yml?label=CI)](https://github.com/cyqlelabs/smrti/actions/workflows/ci.yml)
 [![Coverage](https://img.shields.io/codecov/c/github/cyqlelabs/smrti)](https://codecov.io/gh/cyqlelabs/smrti)
 
 **Long-term memory for AI agents in a single SQLite file.** Your agent remembers what matters, forgets what doesn't, and never repeats a critical mistake — no vector database, no external services, no infrastructure.
@@ -74,7 +74,10 @@ smrti serve mcp     # MCP stdio server (Claude, etc.)
 smrti serve rest    # REST API on :8420
 smrti serve viz     # REST API + memory visualizer in the browser
 smrti serve proxy   # OpenAI-compatible proxy on :8421
-smrti serve town    # town-life simulation demo on :8430
+smrti serve town    # city-builder simulation demo on :8430
+
+smrti stop          # gracefully stop all servers started by `smrti serve`
+smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow further
 ```
 
 ## How It Works
@@ -91,7 +94,7 @@ S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w
 
 When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`).
 
-**`reflect()`** — Runs automatically every 60 s (`SMRTI_REFLECT_INTERVAL`). Merges pending evidence via PLN, decays attention and confidence, propagates both to neighbors, heals orphaned episodes, promotes high-STI atoms to long-term importance, resolves contradictions, and prunes low-salience atoms. The personality profile governs every weight and threshold.
+**`reflect()`** — Runs automatically every 60 s (`SMRTI_REFLECT_INTERVAL`). Merges pending evidence via PLN, decays attention and confidence, propagates both to neighbors, heals orphaned episodes, promotes high-STI atoms to long-term importance, resolves contradictions, and prunes low-salience atoms. The personality profile governs every weight and threshold. Every atom also carries provenance (`user` vs `agent`): model-authored content decays faster and gets a lower long-term-importance floor, so what you told the agent outlives what it inferred.
 
 ## Server Modes
 
@@ -423,7 +426,7 @@ Each atom carries:
 
 ## smrti-town
 
-A living demo: [smrti-town](src/smrti_town/README.md) is a town-life simulation where agents with persistent smrti memory live, talk, form relationships, and die in a Phaser 3 canvas. Each agent's behavior is driven by what it remembers — and how its personality shapes those memories.
+A living demo: [smrti-town](src/smrti_town/README.md) is a city-builder where every citizen carries a persistent smrti memory graph. You place the Town Hall and choose a mayor; an LLM-generated council debates what to build, citizens immigrate, work, and petition — and every decision they make is driven by what they remember.
 
 ```bash
 smrti serve town   # simulation + frontend on :8430

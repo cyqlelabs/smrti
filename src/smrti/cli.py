@@ -7,7 +7,7 @@ import os
 import signal
 import time
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 import typer
 
@@ -86,13 +86,21 @@ def _warn_if_exposed(host: str) -> None:
 
 @app.command()
 def init(
-    db: str = typer.Option("~/.smrti/memory.db", help="Path to SQLite database"),
-    personality: str = typer.Option("balanced", help="Personality preset"),
-    tenant_id: str = typer.Option("default", help="Tenant ID"),
-    space: str = typer.Option("default", help="Memory space"),
+    db: Optional[str] = typer.Option(None, help="Path to SQLite database  [env: SMRTI_DB]"),
+    personality: Optional[str] = typer.Option(None, help="Personality preset  [env: SMRTI_PERSONALITY]"),
+    tenant_id: Optional[str] = typer.Option(None, help="Tenant ID  [env: SMRTI_TENANT_ID]"),
+    space: Optional[str] = typer.Option(None, help="Memory space  [env: SMRTI_SPACE]"),
 ) -> None:
     """Initialize a new Smrti memory store."""
     from smrti import Smrti
+    from smrti.servers import config as cfg
+
+    # Unset options fall back to the same env vars the servers read, so the CLI
+    # and `smrti serve` always address the same store.
+    db = db or cfg.DB
+    personality = personality or cfg.PERSONALITY
+    tenant_id = tenant_id or cfg.TENANT_ID
+    space = space or cfg.SPACE
 
     mem = Smrti(db_path=db, personality=personality, tenant_id=tenant_id, write_space=space)
     s = mem.status()
@@ -104,13 +112,17 @@ def init(
 
 @app.command()
 def status(
-    db: str = typer.Option("~/.smrti/memory.db", help="Path to SQLite database"),
-    tenant_id: str = typer.Option("default", help="Tenant ID"),
-    space: str = typer.Option("default", help="Memory space"),
+    db: Optional[str] = typer.Option(None, help="Path to SQLite database  [env: SMRTI_DB]"),
+    tenant_id: Optional[str] = typer.Option(None, help="Tenant ID  [env: SMRTI_TENANT_ID]"),
+    space: Optional[str] = typer.Option(None, help="Memory space  [env: SMRTI_SPACE]"),
 ) -> None:
     """Show memory statistics."""
     from smrti import Smrti
     from smrti.servers import config as cfg
+
+    db = db or cfg.DB
+    tenant_id = tenant_id or cfg.TENANT_ID
+    space = space or cfg.SPACE
 
     mem = Smrti(db_path=db, personality=cfg.PERSONALITY, tenant_id=tenant_id, write_space=space)
     s = mem.status()
@@ -251,8 +263,8 @@ def serve_proxy(
 def serve_town(
     host: str = typer.Option("127.0.0.1", help="Host"),
     port: int = typer.Option(8430, help="Port"),
-    db: str = typer.Option("~/.smrti/town.db", help="Path to town SQLite database"),
-    tenant_id: str = typer.Option("millbrook", help="Tenant ID for the town"),
+    db: Optional[str] = typer.Option(None, help="Path to town SQLite database  [env: SMRTI_TOWN_DB]"),
+    tenant_id: Optional[str] = typer.Option(None, help="Tenant ID for the town  [env: SMRTI_TOWN_TENANT]"),
     no_browser: bool = typer.Option(False, "--no-browser", help="Don't open browser automatically"),
 ) -> None:
     """Start the smrti-town isometric city-builder and open it in a browser.
@@ -265,6 +277,10 @@ def serve_town(
     import time
     import webbrowser
 
+    # Only an explicit option overrides the env var — assigning unconditionally
+    # would overwrite SMRTI_TOWN_DB with this command's own default.
+    db = db or os.environ.get("SMRTI_TOWN_DB", "~/.smrti/town.db")
+    tenant_id = tenant_id or os.environ.get("SMRTI_TOWN_TENANT", "millbrook")
     os.environ["SMRTI_TOWN_DB"] = db
     os.environ["SMRTI_TOWN_TENANT"] = tenant_id
 

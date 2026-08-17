@@ -8,7 +8,14 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/*
 WORKDIR /src
 COPY . .
+# Unset, the version comes from git as usual. Set, it pins the wheel — which is
+# what a build off a working tree that sits a commit or two past the release
+# tag needs, so the image does not report a dev version under a release tag.
+ARG SMRTI_VERSION=""
 RUN pip install --no-cache-dir build \
+ && if [ -n "$SMRTI_VERSION" ]; then \
+      export SETUPTOOLS_SCM_PRETEND_VERSION="$SMRTI_VERSION"; \
+    fi \
  && python -m build --wheel --outdir /dist
 
 

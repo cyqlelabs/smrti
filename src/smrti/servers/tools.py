@@ -40,6 +40,11 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
                 "query": {"type": "string", "description": "What to recall"},
                 "top_k": {"type": "integer", "default": 10},
                 "min_confidence": {"type": "number", "default": 0.1},
+                "read_spaces": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Spaces to read as an overlay; omit for this session's configured spaces. An overlay read never modifies a space other than the write space.",
+                },
             },
             "required": ["query"],
         },

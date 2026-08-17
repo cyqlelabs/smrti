@@ -4,10 +4,10 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from contextlib import asynccontextmanager
-from typing import Optional
+from typing import Annotated, Optional
 
-from fastapi import FastAPI, Request
-from pydantic import BaseModel, field_validator
+from fastapi import FastAPI, Query, Request
+from pydantic import BaseModel, Field, field_validator
 
 from smrti import Smrti
 from smrti.servers import config as cfg
@@ -49,6 +49,11 @@ def get_mem(space: Optional[str] = None) -> Smrti:
     An unset or empty space keeps the exact pre-space behavior (including the
     SMRTI_READ_SPACES overlay); any other name gets its own instance writing to
     that space and reading only it unless the request says otherwise.
+
+    Called from the event loop thread only — every route resolves its instance
+    before handing the blocking work to ``_run_sync``, so ``_space_mems`` needs
+    no lock. Keep it that way: minting also writes this space's personality
+    row, and moving that into the executor would race the cache.
     """
     global _mem
     if _mem is None:
@@ -85,13 +90,20 @@ async def _run_sync(fn, *args):
 app.include_router(create_viz_router(lambda t, s: get_mem()))
 
 
+# A space name is a partition key on every atom, a cache key for the per-space
+# instance, and a personality row of its own — long enough to be expressive,
+# capped so a malformed value cannot become any of those.
+SPACE_MAX_LEN = 128
+SpaceName = Annotated[str, Field(max_length=SPACE_MAX_LEN)]
+
+
 class RememberRequest(BaseModel):
     content: str
     type: str = "episode"
     probability: float = 0.8
     valence: Optional[float] = None
     source: str = "user"
-    space: Optional[str] = None
+    space: Optional[SpaceName] = None
 
     @field_validator("source")
     @classmethod
@@ -105,8 +117,8 @@ class RecallRequest(BaseModel):
     query: str
     top_k: int = 10
     min_confidence: float = 0.1
-    space: Optional[str] = None
-    read_spaces: Optional[list[str]] = None
+    space: Optional[SpaceName] = None
+    read_spaces: Optional[list[SpaceName]] = Field(default=None, max_length=32)
 
     @field_validator("query")
     @classmethod
@@ -120,13 +132,13 @@ class BelieveRequest(BaseModel):
     statement: str
     probability: float
     evidence: Optional[str] = None
-    space: Optional[str] = None
+    space: Optional[SpaceName] = None
 
 
 class ForgetRequest(BaseModel):
     query: str
     reason: Optional[str] = None
-    space: Optional[str] = None
+    space: Optional[SpaceName] = None
 
     @field_validator("query")
     @classmethod
@@ -137,14 +149,14 @@ class ForgetRequest(BaseModel):
 
 
 class ReflectRequest(BaseModel):
-    space: Optional[str] = None
+    space: Optional[SpaceName] = None
 
 
 class PersonalityRequest(BaseModel):
     action: str  # "get", "set", "preset"
     preset: Optional[str] = None
     params: Optional[dict] = None
-    space: Optional[str] = None
+    space: Optional[SpaceName] = None
 
 
 @app.post("/remember")
@@ -188,7 +200,7 @@ async def forget(req: ForgetRequest):
 
 
 @app.get("/personality")
-async def get_personality(space: Optional[str] = None):
+async def get_personality(space: Optional[SpaceName] = Query(None)):
     return await _run_sync(handle_tool, get_mem(space), "smrti_personality", {"action": "get"})
 
 
@@ -198,7 +210,7 @@ async def set_personality(req: PersonalityRequest):
 
 
 @app.delete("/spaces/current")
-async def clear_current_space(space: Optional[str] = None):
+async def clear_current_space(space: Optional[SpaceName] = Query(None)):
     count = await _run_sync(get_mem(space).clear_space)
     return {"status": "ok", "deleted": count}
 

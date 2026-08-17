@@ -163,6 +163,12 @@ def test_forget_softens_only_the_requested_space(client, rest_mod):
     assert _atom_confidence(rest_mod, in_main) == pytest.approx(0.5)
 
 
+def test_remember_rejects_an_overlong_space(client):
+    """A space name is a partition key and a cache key — cap it."""
+    resp = client.post("/remember", json={"content": "x", "space": "s" * 200})
+    assert resp.status_code == 422
+
+
 # ── instance cache ───────────────────────────────────────────────────────────
 
 def test_get_mem_reuses_per_space_instances(client, rest_mod):

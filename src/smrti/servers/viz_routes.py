@@ -54,17 +54,36 @@ async def api_key_middleware(request: Request, call_next):
 
 
 def _db_mem(db_path: str) -> Smrti:
-    """Return a cached Smrti instance for *db_path* — only if already registered.
+    """Return a cached Smrti instance for *db_path* — registry or allowlist only.
 
-    Rejects paths not present in the shared Database registry so the query
-    param cannot open (or create) arbitrary filesystem paths as SQLite DBs.
-    Cache eviction only drops the wrapper — the registry owns connections.
+    Accepts a path already present in the shared Database registry (the DB this
+    server was started with) or one the operator named in SMRTI_VIZ_DBS. Any
+    other path is rejected so the query param cannot open — or create —
+    arbitrary filesystem paths as SQLite DBs. An allowlisted path that does not
+    exist yet is refused too, so a typo surfaces as a 404 instead of silently
+    materializing an empty database. Cache eviction only drops the wrapper —
+    the registry owns connections.
     """
     resolved = _resolve_path(db_path)
     with _registry_lock:
         registered = _registry.get(resolved)
     if registered is None:
-        raise HTTPException(status_code=403, detail="db path not registered")
+        if resolved not in {_resolve_path(p) for p in cfg.VIZ_DBS}:
+            raise HTTPException(
+                status_code=403,
+                detail=(
+                    f"Cannot open {db_path}: this server only serves the database it "
+                    "was started with. Add the path to SMRTI_VIZ_DBS to browse it too."
+                ),
+            )
+        if not os.path.isfile(resolved):
+            raise HTTPException(
+                status_code=404,
+                detail=(
+                    f"No database file at {db_path} — allowed by SMRTI_VIZ_DBS, "
+                    "but it does not exist."
+                ),
+            )
     cached = _db_cache.get(resolved)
     if cached is not None and cached.db is not registered:
         _db_cache.pop(resolved)  # path was closed and re-registered — drop stale wrapper

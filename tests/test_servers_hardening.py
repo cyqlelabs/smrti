@@ -142,6 +142,35 @@ def test_viz_db_param_accepts_registered_path(client, db_path):
     assert isinstance(resp.json(), list)
 
 
+def test_viz_db_param_accepts_allowlisted_path(client, tmp_path):
+    """SMRTI_VIZ_DBS is the operator's opt-in for browsing a second database."""
+    from smrti.core.db import _resolve_path, close_database
+    from smrti.servers import viz_routes
+
+    other = str(tmp_path / "other.db")
+    Smrti(db_path=other, tenant_id="default", write_space="default").close()
+    close_database(other)  # not registered — only the allowlist can open the gate
+
+    resolved = _resolve_path(other)
+    viz_routes._db_cache.pop(resolved, None)
+    try:
+        assert client.get("/tenants", params={"db": other}).status_code == 403
+        with patch("smrti.servers.config.VIZ_DBS", [other]):
+            allowed = client.get("/tenants", params={"db": other})
+        assert allowed.status_code == 200
+    finally:
+        viz_routes._db_cache.pop(resolved, None)
+        close_database(other)
+
+
+def test_viz_db_param_names_the_rejected_path(client, tmp_path):
+    """The visualizer can only explain a rejection if the detail carries the path."""
+    rogue = str(tmp_path / "rogue.db")
+    resp = client.get("/tenants", params={"db": rogue})
+    assert resp.status_code == 403
+    assert rogue in resp.json()["detail"]
+
+
 # ── _format_memory sanitization ──────────────────────────────────────────────
 
 def test_format_memory_flattens_newlines_and_caps():

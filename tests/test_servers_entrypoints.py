@@ -224,9 +224,42 @@ def test_stream_reraises_cancellation():
 def test_db_mem_rejects_an_unregistered_path(tmp_path):
     from fastapi import HTTPException
 
+    rogue = str(tmp_path / "not-registered.db")
     with pytest.raises(HTTPException) as exc:
-        viz_routes._db_mem(str(tmp_path / "not-registered.db"))
+        viz_routes._db_mem(rogue)
     assert exc.value.status_code == 403
+    assert rogue in exc.value.detail
+    assert not os.path.exists(rogue)
+
+
+def test_db_mem_accepts_an_allowlisted_path_outside_the_registry(db_path):
+    """SMRTI_VIZ_DBS lets the viz browse a DB this server never opened itself."""
+    from smrti.core.db import _registry, _resolve_path, close_database
+
+    Smrti(db_path=db_path, tenant_id="default", write_space="default").close()
+    close_database(db_path)  # drop it from the registry — allowlist is the only way in
+
+    resolved = _resolve_path(db_path)
+    viz_routes._db_cache.pop(resolved, None)
+    try:
+        with patch("smrti.servers.config.VIZ_DBS", [db_path]):
+            opened = viz_routes._db_mem(db_path)
+        assert opened.db is _registry[resolved]  # bound to the allowlisted file
+    finally:
+        viz_routes._db_cache.pop(resolved, None)
+        close_database(db_path)
+
+
+def test_db_mem_rejects_an_allowlisted_path_that_does_not_exist(tmp_path):
+    """A typo in SMRTI_VIZ_DBS must 404, never materialize an empty database."""
+    from fastapi import HTTPException
+
+    missing = str(tmp_path / "typo.db")
+    with patch("smrti.servers.config.VIZ_DBS", [missing]):
+        with pytest.raises(HTTPException) as exc:
+            viz_routes._db_mem(missing)
+    assert exc.value.status_code == 404
+    assert not os.path.exists(missing)
 
 
 def test_db_mem_drops_a_wrapper_whose_database_was_reopened(mem, db_path):

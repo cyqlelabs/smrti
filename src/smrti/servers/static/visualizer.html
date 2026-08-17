@@ -729,7 +729,10 @@ const dbParamFirst = () => { const d = $('db-path').value.trim(); return d ? '?d
 // ─── API ──────────────────────────────────────────────────────────────
 async function api(path) {
   const r = await fetch(apiBase() + path);
-  if (!r.ok) throw new Error(`HTTP ${r.status}`);
+  if (!r.ok) {
+    const detail = await r.json().then(b => b && b.detail).catch(() => null);
+    throw new Error(detail || `HTTP ${r.status}`);
+  }
   return r.json();
 }
 

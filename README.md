@@ -222,6 +222,7 @@ All server modes read the same environment variables. Everything works with zero
 | -------------------- | ------- | ---------------------------------------------------------------------------------------- |
 | `SMRTI_API_KEY`      | —       | When set, every request must send `Authorization: Bearer <key>` or `X-Api-Key: <key>`    |
 | `SMRTI_CORS_ORIGINS` | —       | Comma-separated allowed origins for the proxy; CORS middleware is only added when set    |
+| `SMRTI_VIZ_DBS`      | —       | Extra SQLite paths (`:`-separated) the visualizer's DB box may open; by default only the server's own database is browsable |
 
 **Proxy:**
 

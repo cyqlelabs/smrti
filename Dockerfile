@@ -21,6 +21,12 @@ RUN pip install --no-cache-dir build \
 
 FROM python:3.12-slim
 
+# GHCR links a package to its repository through this label, and without the
+# link the image never appears under the repo's Packages.
+LABEL org.opencontainers.image.source="https://github.com/cyqlelabs/smrti" \
+      org.opencontainers.image.description="AtomSpace-inspired memory + personality engine for AI agents" \
+      org.opencontainers.image.licenses="MIT"
+
 # onnxruntime, which FastEmbed loads for the embedding model, links libgomp.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends libgomp1 \

@@ -1,6 +1,6 @@
 # smrti
 
-[![PyPI version](https://img.shields.io/pypi/v/smrti)](https://pypi.org/project/smrti/)
+[![PyPI version](https://img.shields.io/pypi/v/smrti?cacheSeconds=3600)](https://pypi.org/project/smrti/)
 [![Python](https://img.shields.io/pypi/pyversions/smrti)](https://pypi.org/project/smrti/)
 [![License](https://img.shields.io/github/license/cyqlelabs/smrti)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/cyqlelabs/smrti/ci.yml?label=CI)](https://github.com/cyqlelabs/smrti/actions/workflows/ci.yml)
@@ -35,6 +35,28 @@ Inspired by <a href="https://github.com/opencog/atomspace" target="_blank">AtomS
 ```bash
 pip install smrti
 ```
+
+### Container
+
+The image bundles the embedding model, so a fresh container recalls offline instead of stalling on a first-run download.
+
+```bash
+docker run -d -p 8420:8420 -v smrti-data:/data ghcr.io/cyqlelabs/smrti
+```
+
+That serves the REST API. Any other command replaces it, and every environment variable in the [configuration reference](#configuration-reference) works as usual:
+
+```bash
+docker run -d -p 8421:8421 -v smrti-data:/data \
+  -e SMRTI_UPSTREAM_URL=http://host.docker.internal:11434/v1 \
+  -e SMRTI_API_KEY=your-key \
+  ghcr.io/cyqlelabs/smrti serve proxy --host 0.0.0.0 --port 8421
+```
+
+- **Tags** — `latest`, `0.9`, `0.9.0`, published on every `v*` tag.
+- **Storage** — `SMRTI_DB` points at `/data/memory.db`; mount a volume or the graph dies with the container.
+- **User** — runs as non-root `smrti`.
+- **Extraction** — LLM-only. `gliner2` pulls in torch, so install it in a derived image if you want local NER.
 
 ## Quick Start
 

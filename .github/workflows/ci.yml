@@ -43,9 +43,8 @@ jobs:
             ~/.cache/fastembed
             ~/.cache/huggingface
           key: models-${{ runner.os }}-v1
-      # The gliner extra is deliberately absent: the suite mocks the NER model
-      # and passes identically with and without it, so installing it would add
-      # a second large download and buy no coverage.
+      # gliner2 is a core dependency now, so torch comes with it; the pip cache
+      # above keeps that download off every subsequent run.
       - run: pip install -e ".[openai]" pytest pytest-cov
       - run: pytest tests/ -q --cov=smrti --cov-report=xml
       # One upload is enough; the other interpreters cover the same lines.

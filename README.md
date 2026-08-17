@@ -54,7 +54,7 @@ docker run -d -p 8421:8421 -v smrti-data:/data \
 ```
 
 - **Tags** — `latest`, `0.9`, `0.9.0`, published on every `v*` tag.
-- **Storage** — `SMRTI_DB` points at `/data/memory.db`; mount a volume or the graph dies with the container.
+- **Storage** — `/data` holds the database and the NER weights that download on first extraction; mount a volume or both die with the container.
 - **User** — runs as non-root `smrti`.
 
 ## Quick Start
@@ -263,7 +263,7 @@ All server modes read the same environment variables. Everything works with zero
 | ------------------------ | -------------------------- | ---------------------------------------------------------------- |
 | `SMRTI_EXTRACT`          | `1`                        | Entity/claim extraction after every `remember` (0 = off)         |
 | `SMRTI_EXTRACT_MODE`     | `hybrid`                   | `hybrid` (GLiNER + LLM), `llm` (LLM-only), `local` (no LLM)      |
-| `SMRTI_EXTRACT_URL`      | upstream URL               | LLM endpoint for extraction calls                                |
+| `SMRTI_EXTRACT_URL`      | proxy upstream, else unset | LLM endpoint for extraction calls. `serve rest` and `serve mcp` have no upstream to inherit, so leaving it unset runs extraction in `local` mode rather than calling out to an endpoint you did not choose |
 | `SMRTI_EXTRACT_MODEL`    | request model              | Model for extraction calls                                       |
 | `SMRTI_EXTRACT_THINKING` | `disabled`                 | Chain-of-thought for extraction: `disabled` is faster and avoids token-budget exhaustion on thinking models (Qwen3, DeepSeek-R1); also `auto`, `enabled` |
 | `SMRTI_EXTRACT_TIMEOUT`  | `60`                       | Extraction request timeout in seconds                            |

@@ -36,9 +36,14 @@ IGNORE_PATTERNS: list[str] = [p.strip() for p in _ignore_raw.splitlines() if p.s
 # Extraction — entity/claim extraction after remember() calls
 EXTRACT: bool = os.environ.get("SMRTI_EXTRACT", "1") == "1"
 EXTRACT_MODE: str = os.environ.get("SMRTI_EXTRACT_MODE", "hybrid")
+# Empty when the operator named no endpoint, which downgrades extraction to
+# local mode. There is deliberately no public fallback: `serve rest` and `serve
+# mcp` have no upstream to inherit, so defaulting to a third-party API would
+# post episodes to a host nobody chose the moment a request carried a usable
+# Authorization header — and 401 on every call the rest of the time.
 EXTRACT_URL: str = (
     os.environ.get("SMRTI_EXTRACT_URL")
-    or os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
+    or os.environ.get("SMRTI_UPSTREAM_URL", "")
 )
 EXTRACT_MODEL: str = os.environ.get("SMRTI_EXTRACT_MODEL", "")
 # Thinking mode for extraction LLM calls.

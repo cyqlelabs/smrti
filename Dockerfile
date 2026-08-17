@@ -35,11 +35,17 @@ RUN apt-get update \
 ENV PYTHONUNBUFFERED=1 \
     HOME=/home/smrti \
     SMRTI_DB=/data/memory.db \
-    FASTEMBED_CACHE_PATH=/opt/smrti/models
+    FASTEMBED_CACHE_PATH=/opt/smrti/models \
+    HF_HOME=/data/models
 
 RUN useradd --system --create-home --home-dir /home/smrti --shell /usr/sbin/nologin smrti \
  && mkdir -p /data /opt/smrti/models \
  && chown smrti:smrti /data /opt/smrti/models
+
+# gliner2 drags in torch, and PyPI's default wheel bundles CUDA libraries worth
+# several GB that a CPU container never loads. Installing the CPU build first
+# leaves nothing for the wheel's own resolution to pull.
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
 
 # No extras: the image installs what `pip install smrti` installs, nothing else.
 COPY --from=build /dist /tmp/dist

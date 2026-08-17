@@ -583,6 +583,28 @@ async def extract_claims_only(
 # ── Hybrid dispatch ───────────────────────────────────────────────────────────
 
 
+_warned_no_upstream = False
+
+
+def _effective_mode(mode: str, upstream: str) -> str:
+    """Downgrade the LLM-dependent modes to local when no upstream is set.
+
+    Entities still get extracted locally; only claim extraction needs a model.
+    Warns once so the operator learns why claims stopped appearing instead of
+    discovering it in the call log.
+    """
+    global _warned_no_upstream
+    if upstream or mode == "local":
+        return mode
+    if not _warned_no_upstream:
+        _warned_no_upstream = True
+        logger.warning(
+            "no extraction endpoint configured (set SMRTI_EXTRACT_URL or "
+            "SMRTI_UPSTREAM_URL) — extracting entities locally and skipping claims"
+        )
+    return "local"
+
+
 async def extract_and_link_hybrid(
     episode_id: str,
     content: str,
@@ -601,6 +623,7 @@ async def extract_and_link_hybrid(
       - "local"  — GLiNER entities only, no LLM calls
     source == "agent" always takes the full LLM path.
     """
+    mode = _effective_mode(mode, upstream)
     if source == "agent" or mode == "llm":
         await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
         return

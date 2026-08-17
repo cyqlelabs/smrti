@@ -1,0 +1,19 @@
+# .git is intentionally NOT ignored — hatch-vcs reads the version from it.
+**/__pycache__
+*.py[cod]
+.venv
+venv
+dist
+build
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.codegraph
+node_modules
+*.db
+*.db-shm
+*.db-wal
+.github
+docs
+tests

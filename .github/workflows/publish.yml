@@ -18,6 +18,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      # FastEmbed caches under FASTEMBED_CACHE_PATH; left unset it writes to a
+      # temp dir the cache below never sees, so the model downloads every run.
+      - run: echo "FASTEMBED_CACHE_PATH=$HOME/.cache/fastembed" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
         with:
           path: |
@@ -60,8 +63,48 @@ jobs:
           path: dist/
       - uses: pypa/gh-action-pypi-publish@release/v1
 
+  docker:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      # The image builds the wheel itself, and hatch-vcs needs the tag history.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          # `latest` comes from the default latest=auto flavor, which skips
+          # prerelease tags — v1.2.0-rc1 must not become the default pull.
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # Labels land on each image; the multi-arch index needs annotations
+          # for GHCR to link the package back to this repository.
+          annotations: ${{ steps.meta.outputs.annotations }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   release:
-    needs: publish
+    needs: [publish, docker]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

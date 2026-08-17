@@ -33,7 +33,10 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       # FastEmbed pulls a ~120MB ONNX model on first embed; without this every
-      # job on every run re-downloads it from HuggingFace.
+      # job on every run re-downloads it from HuggingFace. The cache only sees
+      # it once FASTEMBED_CACHE_PATH points somewhere other than the temp dir
+      # FastEmbed defaults to.
+      - run: echo "FASTEMBED_CACHE_PATH=$HOME/.cache/fastembed" >> "$GITHUB_ENV"
       - uses: actions/cache@v4
         with:
           path: |

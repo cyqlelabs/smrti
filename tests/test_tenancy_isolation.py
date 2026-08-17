@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+import uuid
 
 import pytest
 
@@ -234,6 +235,80 @@ def test_add_atom_still_updates_in_place_within_the_same_partition(atomspace, db
     assert db.fetchone(
         "SELECT COUNT(*) n FROM vec_atoms WHERE atom_id = ?", (atom.id,)
     )["n"] == 1
+
+
+def test_boost_sti_is_a_no_op_outside_the_given_partition(atomspace, db):
+    """The optional tenant/space arguments confine the write to one partition.
+
+    A caller that resolved an ID out of an overlay space holds a perfectly
+    valid ID for an atom it must not touch; passing the partition it is
+    allowed to write turns that into a no-op instead of a silent reach-in.
+    """
+    mine = _concept("shared label", "t", "mine")
+    theirs = _concept("shared label", "t", "other")
+    atomspace.add_atom(mine)
+    atomspace.add_atom(theirs)
+
+    atomspace.boost_sti(mine.id, 0.5, tenant_id="t", space="mine")
+    atomspace.boost_sti(theirs.id, 0.5, tenant_id="t", space="mine")
+
+    assert _row(db, mine.id, "sti")["sti"] == pytest.approx(0.5)
+    assert _row(db, theirs.id, "sti")["sti"] == 0.0
+
+
+def test_boost_sti_without_a_partition_stays_unscoped(atomspace, db):
+    """Omitting the arguments keeps the pre-existing behaviour for old callers."""
+    atom = _concept("note", "t", "s")
+    atomspace.add_atom(atom)
+
+    atomspace.boost_sti(atom.id, 1.0)
+
+    assert _row(db, atom.id, "sti")["sti"] == pytest.approx(1.0)
+
+
+def test_epoch_skips_a_contradiction_edge_with_a_missing_endpoint(atomspace, db, embed):
+    """A dangling contradiction edge is skipped, not dereferenced.
+
+    The pruner deletes relations alongside their endpoints, but a row written
+    directly — or left by an older release — can still carry a NULL endpoint.
+    """
+    src = _belief("mine", "t", "mine", confidence=0.9)
+    atomspace.add_atom(src)
+    db.execute(
+        """INSERT INTO atoms (id, type, label, source_id, target_id, relation, tenant_id, space)
+           VALUES (?, 'relation', 'contradicts', ?, NULL, 'contradicts', 't', 'mine')""",
+        (str(uuid.uuid4()), src.id),
+    )
+    _personality(db, "t", "mine", confidence_decay_rate=0.0)
+
+    result = run_epoch("t", "mine", db, embed)
+
+    assert result.contradictions_resolved == 0
+    assert _row(db, src.id, "confidence")["confidence"] == pytest.approx(0.9)
+
+
+def test_a_bridge_space_does_not_initiate_further_bridging(atomspace, db, embed):
+    """Bridging out of a bridge space would build meta-bridges without end."""
+    from smrti.evolution.epoch import _discover_bridges
+
+    text = "Postgres is the database we run in production"
+    atomspace.add_atom(_concept(text, "t", "a"))
+    atomspace.add_atom(_concept(text, "t", "a_x_b"))
+
+    assert _discover_bridges("t", "a_x_b", db, embed) == 0
+
+
+def test_bridge_discovery_skips_spaces_that_are_already_bridges(atomspace, db, embed):
+    """A parent space bridges its siblings, never their bridges."""
+    from smrti.evolution.epoch import _discover_bridges
+
+    text = "Postgres is the database we run in production"
+    atomspace.add_atom(_concept(text, "t", "a"))
+    atomspace.add_atom(_concept(text, "t", "a_x_b"))
+
+    assert _discover_bridges("t", "a", db, embed) == 0
+    spaces = db.fetchall("SELECT DISTINCT space FROM atoms WHERE tenant_id = 't' ORDER BY space")
+    assert [r["space"] for r in spaces] == ["a", "a_x_b"]
 
 
 def test_clear_space_leaves_other_tenants_intact(db_path, embed):
@@ -676,6 +751,35 @@ def test_identity_laws_for_a_space_against_itself(laws):
     assert space_symmetric_difference("t", "a", "a", db, 0.85, embed).atoms == []
     assert _labels(space_union("t", "a", "a", db, 0.85, embed)) == everything
     assert space_overlap("t", "a", "a", db, 0.85, embed).jaccard == pytest.approx(1.0)
+
+
+def test_facade_set_operations_run_against_the_write_space(db_path):
+    """The Smrti wrappers pass write_space as the left operand of each op."""
+    shared = "Postgres is the database we run in production"
+    a = Smrti(db_path=db_path, tenant_id="t", write_space="a")
+    b = Smrti(db_path=db_path, tenant_id="t", write_space="b")
+    a.remember(shared)
+    a.remember("sourdough starter feeding schedule")
+    b.remember(shared)
+    b.remember("tide tables for the north sea")
+
+    union = a.space_union("b", threshold=0.8)
+    assert union.spaces == ["a", "b"]
+    assert sorted(atom.label for atom in union.atoms) == sorted(
+        [shared, "sourdough starter feeding schedule", "tide tables for the north sea"]
+    )
+
+    sym = a.space_symmetric_difference("b", threshold=0.8)
+    assert sym.spaces == ["a", "b"]
+    assert sorted(atom.label for atom in sym.atoms) == [
+        "sourdough starter feeding schedule",
+        "tide tables for the north sea",
+    ]
+
+    # Left operand is the caller's write space, so b sees the mirror image.
+    assert [atom.label for atom in b.space_difference("a", threshold=0.8).atoms] == [
+        "tide tables for the north sea"
+    ]
 
 
 def test_a_space_is_not_bridged_to_itself(db_path):

@@ -58,11 +58,25 @@ def test_promote_lti_at_threshold_no_promote():
 
 # ── propagate_sti ─────────────────────────────────────────────────────────────
 
-def _mock_db(forward_ids=None, backward_ids=None):
+def _mock_db(forward_ids=None, backward_ids=None, in_space=None):
+    """Mock the three reads propagate_sti performs: forward, backward, membership.
+
+    ``in_space`` names the neighbors that actually live in the space being
+    propagated; the default is "all of them". Anything left out stands for an
+    endpoint in another space (a bridge edge, say), which the UPDATE cannot
+    reach.
+    """
     db = MagicMock()
     forward = [{"target_id": tid} for tid in (forward_ids or [])]
     backward = [{"source_id": sid} for sid in (backward_ids or [])]
-    db.fetchall.side_effect = [forward, backward]
+    if in_space is None:
+        in_space = [tid for tid in (forward_ids or []) if tid]
+        in_space += [sid for sid in (backward_ids or []) if sid]
+    db.fetchall.side_effect = [
+        forward,
+        backward,
+        [{"id": nid} for nid in dict.fromkeys(in_space)],
+    ]
     return db
 
 
@@ -175,7 +189,33 @@ def test_propagate_sti_none_ids_filtered():
     db.fetchall.side_effect = [
         [{"target_id": None}, {"target_id": "n1"}],
         [{"source_id": None}],
+        [{"id": "n1"}],
     ]
     propagate_sti("atom1", boost=1.0, propagation_factor=0.2, db=db, tenant_id="t", space="s")
     # Only "n1" is a valid neighbor, plus the deduction from the source.
     assert db.execute.call_count == 2
+
+
+def test_propagate_sti_ignores_neighbors_outside_the_space():
+    """A neighbor in another space gets nothing, and is not charged for.
+
+    The per-neighbor UPDATE is partitioned by tenant and space, so an endpoint
+    elsewhere silently receives no activation. Counting it in the split would
+    both shrink every in-space share and deduct STI from the source that no
+    atom ever received — propagation would destroy activation instead of
+    moving it.
+    """
+    db = _mock_db(forward_ids=["mine", "theirs"], in_space=["mine"])
+    propagate_sti("hub", boost=1.0, propagation_factor=0.4, db=db, tenant_id="t", space="s")
+
+    calls = db.execute.call_args_list
+    assert len(calls) == 2  # one neighbor credit + the source deduction
+    assert calls[0].args[1][1] == "mine"
+    assert calls[0].args[1][0] == 0.4  # whole budget, not a half share
+    assert calls[-1].args[1][0] == 0.4  # deduction equals what was handed out
+
+
+def test_propagate_sti_no_op_when_every_neighbor_is_out_of_space():
+    db = _mock_db(forward_ids=["theirs"], in_space=[])
+    propagate_sti("hub", boost=1.0, propagation_factor=0.4, db=db, tenant_id="t", space="s")
+    db.execute.assert_not_called()

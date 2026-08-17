@@ -85,9 +85,10 @@ def _get_neighbor_labels(atom_id: str, tenant_id: str, space: str, db) -> list[s
                OR (r.target_id = ? AND r.source_id = a.id)
            )
            WHERE r.type = 'relation' AND r.tenant_id = ? AND r.space = ?
+             AND a.tenant_id = ? AND a.space = ?
              AND a.type != 'relation'
            LIMIT 20""",
-        (atom_id, atom_id, tenant_id, space),
+        (atom_id, atom_id, tenant_id, space, tenant_id, space),
     )
     return [r["label"] for r in rows]
 

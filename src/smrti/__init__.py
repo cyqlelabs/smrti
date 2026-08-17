@@ -74,7 +74,11 @@ class Smrti:
         self.atomspace = AtomSpace(self.db, self.embed)
         self.tenant_id = tenant_id
         self.write_space = write_space
-        self.read_spaces = read_spaces if read_spaces is not None else [write_space]
+        # Copied, not aliased: the caller's list must not be able to change
+        # this instance's read overlay after construction.
+        self.read_spaces = (
+            list(read_spaces) if read_spaces is not None else [write_space]
+        )
         self.extractor = extractor
         try:
             self._ignore_re: list[re.Pattern] = [
@@ -280,21 +284,45 @@ class Smrti:
             "personality": dict(personality) if personality else {},
         }
 
+    # Deleting in chunks keeps the generated ``IN (...)`` lists well under
+    # SQLite's variable limit on spaces holding tens of thousands of atoms.
+    _CLEAR_CHUNK = 400
+
     def clear_space(self) -> int:
         """Hard-delete all atoms, evidence, and aliases in write_space. Returns deleted atom count."""
-        count_row = self.db.fetchone(
-            "SELECT COUNT(*) as n FROM atoms WHERE tenant_id=? AND space=?",
-            (self.tenant_id, self.write_space),
-        )
-        count = count_row["n"] if count_row else 0
+        ids = [
+            row["id"]
+            for row in self.db.fetchall(
+                "SELECT id FROM atoms WHERE tenant_id=? AND space=?",
+                (self.tenant_id, self.write_space),
+            )
+        ]
+        count = len(ids)
 
-        ids = self.db.fetchall(
-            "SELECT id FROM atoms WHERE tenant_id=? AND space=?",
-            (self.tenant_id, self.write_space),
-        )
-        for row in ids:
-            self.db.execute("DELETE FROM vec_atoms WHERE atom_id=?", (row["id"],))
+        # Rows outside this space can still reference its atoms: a bridge space
+        # links back to both parents, and evidence or aliases may have been
+        # filed elsewhere. ``atoms.source_id``/``target_id``, ``evidence`` and
+        # ``aliases`` are all real foreign keys with enforcement on, so those
+        # references have to go first or the delete aborts with an integrity
+        # error and the space is left half-cleared. The cascade stays inside
+        # this tenant — another tenant can never hold a reference to begin with.
+        for start in range(0, count, self._CLEAR_CHUNK):
+            chunk = ids[start : start + self._CLEAR_CHUNK]
+            ph = ",".join("?" * len(chunk))
+            self.db.execute_batch([
+                (
+                    f"DELETE FROM atoms WHERE type = 'relation' AND tenant_id = ? "
+                    f"AND (source_id IN ({ph}) OR target_id IN ({ph}))",
+                    (self.tenant_id, *chunk, *chunk),
+                ),
+                (f"DELETE FROM vec_atoms WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM atoms WHERE id IN ({ph})", tuple(chunk)),
+            ])
 
+        # Relation atoms are in ``ids`` too, but rows filed against the space
+        # rather than against a surviving atom still need sweeping.
         self.db.execute(
             "DELETE FROM evidence WHERE tenant_id=? AND space=?",
             (self.tenant_id, self.write_space),
@@ -342,7 +370,7 @@ class Smrti:
     def list_spaces(self) -> list[str]:
         """Return all spaces for this tenant."""
         rows = self.db.fetchall(
-            "SELECT DISTINCT space FROM atoms WHERE tenant_id = ?",
+            "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? ORDER BY space",
             (self.tenant_id,),
         )
         return [r["space"] for r in rows]

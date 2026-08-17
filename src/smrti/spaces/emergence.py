@@ -109,6 +109,11 @@ def materialize_bridge(
     if overlap.jaccard < min_jaccard or not overlap.pairs:
         return 0
 
+    # A space overlaps itself completely, so bridging it would mint a duplicate
+    # of every atom into an "X_x_X" space that means nothing.
+    if overlap.space_a == overlap.space_b:
+        return 0
+
     bridge_space = overlap.bridge_space_name
     count = 0
 

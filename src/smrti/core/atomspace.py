@@ -23,9 +23,22 @@ class AtomSpace:
 
     def add_atom(self, atom: Atom) -> str:
         prior = self._db.fetchone(
-            "SELECT label, content FROM atoms WHERE id = ?",
+            "SELECT label, content, tenant_id, space FROM atoms WHERE id = ?",
             (atom.id,),
         )
+        # ``INSERT OR REPLACE`` keys on the primary key alone, so re-adding an
+        # atom under a different partition silently moves it — carrying its
+        # vector row with it — and one tenant's memory lands in another's graph.
+        # IDs are UUIDs, so this only happens when a caller reuses one, and when
+        # it does the write is a mistake, not a relocation request.
+        if prior is not None and (
+            prior["tenant_id"] != atom.tenant_id or prior["space"] != atom.space
+        ):
+            raise ValueError(
+                f"atom {atom.id} already exists in "
+                f"tenant={prior['tenant_id']!r} space={prior['space']!r}; "
+                f"refusing to move it to tenant={atom.tenant_id!r} space={atom.space!r}"
+            )
         statements: list[tuple] = [
             (
                 """
@@ -299,7 +312,26 @@ class AtomSpace:
             )
         return [atom_from_row(r) for r in rows]
 
-    def boost_sti(self, atom_id: str, amount: float = 0.5) -> None:
+    def boost_sti(
+        self,
+        atom_id: str,
+        amount: float = 0.5,
+        tenant_id: str | None = None,
+        space: str | None = None,
+    ) -> None:
+        """Raise an atom's STI, optionally constrained to a tenant/space.
+
+        Passing ``tenant_id``/``space`` makes the write a no-op for atoms
+        outside that partition, so a caller holding an ID from an overlay space
+        cannot reach into it.
+        """
+        if tenant_id is not None and space is not None:
+            self._db.execute(
+                "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') "
+                "WHERE id = ? AND tenant_id = ? AND space = ?",
+                (amount, atom_id, tenant_id, space),
+            )
+            return
         self._db.execute(
             "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ?",
             (amount, atom_id),

@@ -45,10 +45,12 @@ def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
         )
 
         existing_rows = db.fetchall(
-            """SELECT target_id AS neighbor FROM atoms WHERE source_id = ? AND type = 'relation'
+            """SELECT target_id AS neighbor FROM atoms
+               WHERE source_id = ? AND type = 'relation' AND tenant_id = ? AND space = ?
                UNION
-               SELECT source_id AS neighbor FROM atoms WHERE target_id = ? AND type = 'relation'""",
-            (atom["id"], atom["id"]),
+               SELECT source_id AS neighbor FROM atoms
+               WHERE target_id = ? AND type = 'relation' AND tenant_id = ? AND space = ?""",
+            (atom["id"], tenant_id, space, atom["id"], tenant_id, space),
         )
         existing_ids = {r["neighbor"] for r in existing_rows if r["neighbor"]}
 

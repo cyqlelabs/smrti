@@ -41,9 +41,9 @@ RUN useradd --system --create-home --home-dir /home/smrti --shell /usr/sbin/nolo
  && mkdir -p /data /opt/smrti/models \
  && chown smrti:smrti /data /opt/smrti/models
 
+# No extras: the image installs what `pip install smrti` installs, nothing else.
 COPY --from=build /dist /tmp/dist
-RUN WHEEL="$(ls /tmp/dist/*.whl)" \
- && pip install --no-cache-dir "${WHEEL}[openai]" \
+RUN pip install --no-cache-dir /tmp/dist/*.whl \
  && rm -rf /tmp/dist
 
 USER smrti
@@ -51,8 +51,7 @@ USER smrti
 # Bake the ~120MB embedding model into the image: without it the first recall
 # stalls on a HuggingFace download, and an offline host never recalls at all.
 # Runs as the runtime user so the files land owned by it — a later chown -R
-# would copy every one of them into a second layer. gliner2 is deliberately
-# left out: it pulls torch, and extraction falls back to LLM-only without it.
+# would copy every one of them into a second layer.
 RUN python -c "from smrti.core.embed import get_embedding_provider; get_embedding_provider().embed('warmup')"
 
 VOLUME ["/data"]

@@ -38,7 +38,7 @@ pip install smrti
 
 ### Container
 
-The image bundles the embedding model, so a fresh container recalls offline instead of stalling on a first-run download.
+Same package as `pip install smrti`, with the embedding model bundled so a fresh container recalls offline instead of stalling on a first-run download.
 
 ```bash
 docker run -d -p 8420:8420 -v smrti-data:/data ghcr.io/cyqlelabs/smrti
@@ -56,7 +56,6 @@ docker run -d -p 8421:8421 -v smrti-data:/data \
 - **Tags** — `latest`, `0.9`, `0.9.0`, published on every `v*` tag.
 - **Storage** — `SMRTI_DB` points at `/data/memory.db`; mount a volume or the graph dies with the container.
 - **User** — runs as non-root `smrti`.
-- **Extraction** — LLM-only. `gliner2` pulls in torch, so install it in a derived image if you want local NER.
 
 ## Quick Start
 

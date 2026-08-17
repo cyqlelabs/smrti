@@ -284,6 +284,14 @@ def test_status_reports_spaces_and_version(client):
     assert data["version"]
 
 
+def test_status_reports_the_configured_write_space(client):
+    """Clients need this to tell whether their own space config agrees with the
+    server's — a mismatch would send writes to a space the graph is not in."""
+    resp = client.get("/status")
+    assert resp.status_code == 200
+    assert resp.json()["space"] == "main"
+
+
 def test_mcp_status_reports_version(client, rest_mod):
     from smrti.servers.mcp import handle_tool
     result = handle_tool(rest_mod.get_mem(), "smrti_status", {})

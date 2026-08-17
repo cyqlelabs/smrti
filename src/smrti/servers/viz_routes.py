@@ -188,10 +188,14 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
     @router.get("/status")
     async def status(db: str | None = Query(None)):
         # `spaces` doubles as the capability signal: clients treat its presence
-        # as proof the server understands per-request space routing.
+        # as proof the server understands per-request space routing. `space`
+        # names the space this server writes to when a request does not say —
+        # a client whose own config disagrees would otherwise route writes away
+        # from the graph it has been building.
         mem = _db_mem(db) if db else _configured_mem()
         result = mem.status()
         result["spaces"] = mem.list_spaces()
+        result["space"] = mem.write_space
         result["version"] = __version__
         return result
 

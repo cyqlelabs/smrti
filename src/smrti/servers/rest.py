@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Optional
 
@@ -32,15 +33,40 @@ app.middleware("http")(api_key_middleware)
 
 _mem: Optional[Smrti] = None
 
+# Per-space Smrti instances minted for requests naming a space other than the
+# configured one — bounded LRU, oldest evicted on overflow (wrapper only; the
+# registry owns the underlying Database connections).
+_space_mems: OrderedDict[str, Smrti] = OrderedDict()
+_SPACE_MEMS_MAX = 64
+
 # Strong references to fire-and-forget tasks so the GC cannot cancel them mid-flight
 _background_tasks: set[asyncio.Task] = set()
 
 
-def get_mem() -> Smrti:
+def get_mem(space: Optional[str] = None) -> Smrti:
+    """Return the Smrti instance for *space* — the env-configured one when unset.
+
+    An unset or empty space keeps the exact pre-space behavior (including the
+    SMRTI_READ_SPACES overlay); any other name gets its own instance writing to
+    that space and reading only it unless the request says otherwise.
+    """
     global _mem
     if _mem is None:
         _mem = create_smrti()
-    return _mem
+    if not space or space == _mem.write_space:
+        return _mem
+    if space not in _space_mems:
+        while len(_space_mems) >= _SPACE_MEMS_MAX:
+            _space_mems.popitem(last=False)
+        _space_mems[space] = Smrti(
+            db_path=cfg.DB,
+            personality=cfg.PERSONALITY,
+            tenant_id=cfg.TENANT_ID,
+            write_space=space,
+            ignore_patterns=cfg.IGNORE_PATTERNS or None,
+        )
+    _space_mems.move_to_end(space)
+    return _space_mems[space]
 
 
 async def _run_sync(fn, *args):
@@ -58,6 +84,7 @@ class RememberRequest(BaseModel):
     probability: float = 0.8
     valence: Optional[float] = None
     source: str = "user"
+    space: Optional[str] = None
 
     @field_validator("source")
     @classmethod
@@ -71,6 +98,8 @@ class RecallRequest(BaseModel):
     query: str
     top_k: int = 10
     min_confidence: float = 0.1
+    space: Optional[str] = None
+    read_spaces: Optional[list[str]] = None
 
     @field_validator("query")
     @classmethod
@@ -84,11 +113,13 @@ class BelieveRequest(BaseModel):
     statement: str
     probability: float
     evidence: Optional[str] = None
+    space: Optional[str] = None
 
 
 class ForgetRequest(BaseModel):
     query: str
     reason: Optional[str] = None
+    space: Optional[str] = None
 
     @field_validator("query")
     @classmethod
@@ -106,7 +137,8 @@ class PersonalityRequest(BaseModel):
 
 @app.post("/remember")
 async def remember(req: RememberRequest, request: Request):
-    result = await _run_sync(handle_tool, get_mem(), "smrti_remember", req.model_dump())
+    mem = get_mem(req.space)
+    result = await _run_sync(handle_tool, mem, "smrti_remember", req.model_dump())
     if cfg.EXTRACT:
         episode_id = result.get("atom_id", "")
         if episode_id:
@@ -114,7 +146,7 @@ async def remember(req: RememberRequest, request: Request):
             auth = request.headers.get("Authorization", "")
             task = asyncio.create_task(
                 extract_and_link_serialized(
-                    episode_id, req.content, get_mem(), auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
+                    episode_id, req.content, mem, auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
                     req.source, mode=cfg.EXTRACT_MODE,
                 )
             )
@@ -125,7 +157,7 @@ async def remember(req: RememberRequest, request: Request):
 
 @app.post("/recall")
 async def recall(req: RecallRequest):
-    return await _run_sync(handle_tool, get_mem(), "smrti_recall", req.model_dump())
+    return await _run_sync(handle_tool, get_mem(req.space), "smrti_recall", req.model_dump())
 
 
 @app.post("/reflect")
@@ -135,12 +167,12 @@ async def reflect():
 
 @app.post("/believe")
 async def believe(req: BelieveRequest):
-    return await _run_sync(handle_tool, get_mem(), "smrti_believe", req.model_dump())
+    return await _run_sync(handle_tool, get_mem(req.space), "smrti_believe", req.model_dump())
 
 
 @app.post("/forget")
 async def forget(req: ForgetRequest):
-    return await _run_sync(handle_tool, get_mem(), "smrti_forget", req.model_dump())
+    return await _run_sync(handle_tool, get_mem(req.space), "smrti_forget", req.model_dump())
 
 
 @app.get("/personality")

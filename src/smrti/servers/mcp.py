@@ -36,7 +36,7 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     if name == "smrti_remember":
         content = args["content"]
         if mem.is_ignored(content):
-            return {"status": "ignored", "atom_id": ""}
+            return {"status": "ignored", "atom_id": "", "space": mem.write_space}
         valence = args.get("valence")
         if valence is None:
             valence = estimate_valence(content, mem.embed)
@@ -56,13 +56,14 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 valence=valence,
                 metadata={"source": "agent"} if source == "agent" else None,
             )
-        return {"status": "ok", "atom_id": atom_id}
+        return {"status": "ok", "atom_id": atom_id, "space": mem.write_space}
 
     elif name == "smrti_recall":
         results = mem.recall(
             query=args["query"],
             top_k=args.get("top_k", 10),
             min_confidence=args.get("min_confidence", 0.1),
+            read_spaces=args.get("read_spaces") or None,
         )
         return {
             "memories": [
@@ -96,7 +97,7 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             probability=args["probability"],
             evidence=args.get("evidence"),
         )
-        return {"status": "ok", "atom_id": atom_id}
+        return {"status": "ok", "atom_id": atom_id, "space": mem.write_space}
 
     elif name == "smrti_forget":
         forgotten = mem.forget(query=args["query"], top_k=5)

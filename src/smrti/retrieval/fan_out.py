@@ -26,6 +26,11 @@ def retrieve(
       4. Score all candidates by salience (personality-weighted from write_space)
       5. Return top_k sorted by descending salience
     """
+    # One KNN probe is issued per read space, so a repeated name is repeated
+    # work — and read_spaces can arrive straight from a request header.
+    # Deduplicating in order also keeps the ``space IN (...)`` lists tight.
+    read_spaces = list(dict.fromkeys(read_spaces))
+
     query_vec = embed_engine.embed(query)
     vec_bytes = struct.pack(f"{len(query_vec)}f", *query_vec)
 

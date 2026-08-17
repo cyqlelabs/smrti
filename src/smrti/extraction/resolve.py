@@ -66,7 +66,11 @@ class EntityResolver:
         """Return atom_id for the named entity, creating one if needed.
 
         Searches across read_spaces; new atoms are created in write_space.
+        Only atoms in write_space are ever written to — a match found in a
+        space this session merely reads is returned untouched.
         """
+        # Tier 3 probes once per space, so a repeated name is repeated ONNX work.
+        read_spaces = list(dict.fromkeys(read_spaces))
         spaces_ph = ",".join("?" * len(read_spaces))
 
         # Tier 0: exact label match across read_spaces (u_lower: Unicode-aware
@@ -155,10 +159,18 @@ class EntityResolver:
         from one the model raised once and nobody picked up: user mentions
         carry full weight, agent mentions carry ``agent_trust``, so PLN builds
         confidence for the former roughly twice as fast as for the latter.
+
+        Only atoms in the write space are reinforced. Resolution reads across
+        the whole overlay, so a match may live in a space this session merely
+        reads — boosting it there would let one agent's mentions drive another
+        space's attention weights and, via the evidence row, its epoch would
+        rewrite that space's truth values. Reads never mutate what they read.
         """
+        if not self._in_write_space(atom_id, tenant_id, space):
+            return
         self.db.execute(
-            "UPDATE atoms SET sti = MIN(sti + ?, 3.0) WHERE id = ?",
-            (0.5 * self.trust, atom_id),
+            "UPDATE atoms SET sti = MIN(sti + ?, 3.0) WHERE id = ? AND tenant_id = ? AND space = ?",
+            (0.5 * self.trust, atom_id, tenant_id, space),
         )
         self._adopt_if_user_mention(atom_id, tenant_id, space)
         self.db.execute(
@@ -169,6 +181,15 @@ class EntityResolver:
                 str(uuid.uuid4()), atom_id, self._MENTION_PROBABILITY,
                 self.trust, self.episode_id or None, tenant_id, space,
             ),
+        )
+
+    def _in_write_space(self, atom_id: str, tenant_id: str, space: str) -> bool:
+        return (
+            self.db.fetchone(
+                "SELECT 1 FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+                (atom_id, tenant_id, space),
+            )
+            is not None
         )
 
     def _adopt_if_user_mention(self, atom_id: str, tenant_id: str, space: str) -> None:

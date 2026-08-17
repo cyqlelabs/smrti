@@ -87,6 +87,19 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
     """
     router = APIRouter()
 
+    def _configured_mem() -> Smrti:
+        """Return the instance for this server's configured tenant/space.
+
+        Read-only endpoints route their queries through this one handle and
+        pass the requested tenant/space as SQL parameters instead of asking
+        ``get_mem`` for an instance per requested pair: on the proxy every
+        distinct pair mints a Smrti and writes a personality row, so browsing
+        the graph would create rows for tenants that do not exist. It also
+        keeps ``/status`` and ``/metrics`` reporting the tenant the server was
+        actually started for rather than a hardcoded "default".
+        """
+        return get_mem(cfg.TENANT_ID, cfg.SPACE)
+
     @router.get("/viz", include_in_schema=False)
     async def visualizer():
         path = os.path.join(_STATIC_DIR, "visualizer.html")
@@ -96,13 +109,13 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
 
     @router.get("/tenants")
     async def list_tenants(db: str | None = Query(None)):
-        mem = _db_mem(db) if db else get_mem("default", "default")
+        mem = _db_mem(db) if db else _configured_mem()
         rows = mem.db.fetchall("SELECT DISTINCT tenant_id FROM atoms ORDER BY tenant_id")
         return [r["tenant_id"] for r in rows]
 
     @router.get("/spaces")
     async def list_spaces(tenant_id: str = Query("default"), db: str | None = Query(None)):
-        mem = _db_mem(db) if db else get_mem(tenant_id, "default")
+        mem = _db_mem(db) if db else _configured_mem()
         rows = mem.db.fetchall(
             "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? ORDER BY space",
             (tenant_id,),
@@ -122,7 +135,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
             "concept", "belief", "episode", "goal"
         ]
         ph = ",".join("?" * len(type_list))
-        mem = _db_mem(db) if db else get_mem(tenant_id, space)
+        mem = _db_mem(db) if db else _configured_mem()
         rows = mem.db.fetchall(
             f"""SELECT * FROM atoms
                 WHERE tenant_id=? AND space=? AND type IN ({ph})
@@ -155,7 +168,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
 
     @router.get("/status")
     async def status(db: str | None = Query(None)):
-        mem = _db_mem(db) if db else get_mem("default", "default")
+        mem = _db_mem(db) if db else _configured_mem()
         return mem.status()
 
     @router.get("/atoms/{atom_id}")
@@ -166,7 +179,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
     ):
         tenant = tenant_id or cfg.TENANT_ID
         spc = space or cfg.SPACE
-        mem = get_mem(tenant, spc)
+        mem = _configured_mem()
         atom = mem.atomspace.get_atom(atom_id, tenant, spc)
         if not atom:
             raise HTTPException(status_code=404, detail="Atom not found")
@@ -220,7 +233,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
             """Escape a Prometheus label value: backslash, quote, newline."""
             return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
-        mem = _db_mem(db) if db else get_mem("default", "default")
+        mem = _db_mem(db) if db else _configured_mem()
         s = mem.status()
         tenant = _esc(str(s.get("personality", {}).get("tenant_id") or "default"))
         space = _esc(str(s.get("personality", {}).get("space") or "default"))

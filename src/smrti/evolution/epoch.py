@@ -94,10 +94,21 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     for ev in pending:
         pending_by_atom.setdefault(ev["atom_id"], []).append(ev)
     for atom_id, evs in pending_by_atom.items():
+        # The atom must live in the space being consolidated. Evidence filed
+        # against an atom elsewhere — an overlay read recorded before the
+        # resolver was scoped, or a row left behind by a since-moved atom —
+        # would otherwise let this epoch rewrite another space's truth values.
+        # Such rows are retired rather than skipped: leaving them pending makes
+        # every future epoch re-scan them forever.
         atom_row = db.fetchone(
-            "SELECT * FROM atoms WHERE id = ?", (atom_id,)
+            "SELECT * FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+            (atom_id, tenant_id, space),
         )
         if not atom_row:
+            db.execute_many(
+                "UPDATE evidence SET processed = 1 WHERE id = ?",
+                [(ev["id"],) for ev in evs],
+            )
             continue
         current = TruthValue(
             probability=atom_row["probability"],
@@ -109,8 +120,9 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             )
         statements = [
             (
-                "UPDATE atoms SET probability = ?, confidence = ?, updated_at = datetime('now') WHERE id = ?",
-                (current.probability, current.confidence, atom_id),
+                "UPDATE atoms SET probability = ?, confidence = ?, updated_at = datetime('now') "
+                "WHERE id = ? AND tenant_id = ? AND space = ?",
+                (current.probability, current.confidence, atom_id, tenant_id, space),
             ),
         ]
         statements += [
@@ -212,11 +224,16 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     for c in contradictions:
         if not c["source_id"] or not c["target_id"]:
             continue
+        # Both endpoints must be in this space. A contradiction edge can point
+        # at an atom in another space (bridge edges do exactly that), and
+        # weakening it here would let one space adjudicate another's beliefs.
         src = db.fetchone(
-            "SELECT probability, confidence FROM atoms WHERE id = ?", (c["source_id"],)
+            "SELECT probability, confidence FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+            (c["source_id"], tenant_id, space),
         )
         tgt = db.fetchone(
-            "SELECT probability, confidence FROM atoms WHERE id = ?", (c["target_id"],)
+            "SELECT probability, confidence FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+            (c["target_id"], tenant_id, space),
         )
         if src and tgt:
             loser_id = (
@@ -226,8 +243,9 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             )
             db.execute_batch([
                 (
-                    "UPDATE atoms SET confidence = confidence * 0.8 WHERE id = ?",
-                    (loser_id,),
+                    "UPDATE atoms SET confidence = confidence * 0.8 "
+                    "WHERE id = ? AND tenant_id = ? AND space = ?",
+                    (loser_id, tenant_id, space),
                 ),
                 (
                     f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.resolved', 1) WHERE id = ?",

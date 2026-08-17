@@ -65,6 +65,20 @@ def propagate_sti(
 
     # Deduplicate: an atom linked twice must not collect twice the share.
     unique_ids = list(dict.fromkeys(neighbor_ids))
+    # Keep only neighbors this space can actually credit. A relation atom's
+    # endpoints — and a bridge edge's in particular — may sit in another space,
+    # where the UPDATE below is a no-op; charging the source for a share nobody
+    # received would make propagation destroy activation instead of moving it.
+    if unique_ids:
+        ph = ",".join("?" * len(unique_ids))
+        in_space = {
+            r["id"]
+            for r in db.fetchall(
+                f"SELECT id FROM atoms WHERE id IN ({ph}) AND tenant_id = ? AND space = ?",
+                (*unique_ids, tenant_id, space),
+            )
+        }
+        unique_ids = [nid for nid in unique_ids if nid in in_space]
     if not unique_ids:
         return
     spread = budget / len(unique_ids)

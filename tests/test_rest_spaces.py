@@ -29,16 +29,20 @@ def rest_mod():
     return rest
 
 
-@pytest.fixture()
-def client(tmp_path, monkeypatch, rest_mod):
+def _configure(tmp_path, monkeypatch, rest_mod, tenant_id="default"):
     from smrti.servers import config as cfg
     monkeypatch.setattr(cfg, "DB", str(tmp_path / "mem.db"))
-    monkeypatch.setattr(cfg, "TENANT_ID", "default")
+    monkeypatch.setattr(cfg, "TENANT_ID", tenant_id)
     monkeypatch.setattr(cfg, "SPACE", "main")
     monkeypatch.setattr(cfg, "READ_SPACES", None)
     monkeypatch.setattr(cfg, "EXTRACT", False)
     monkeypatch.setattr(cfg, "IGNORE_PATTERNS", [])
     _reset(rest_mod)
+
+
+@pytest.fixture()
+def client(tmp_path, monkeypatch, rest_mod):
+    _configure(tmp_path, monkeypatch, rest_mod)
     with patch("smrti.servers.rest.run_reflect_loop", new=_noop_reflect):
         with TestClient(rest_mod.app, raise_server_exceptions=True) as c:
             yield c
@@ -181,6 +185,89 @@ def test_space_instances_are_bounded(client, rest_mod):
     assert len(rest_mod._space_mems) == rest_mod._SPACE_MEMS_MAX
     assert "space-0" not in rest_mod._space_mems
     assert f"space-{rest_mod._SPACE_MEMS_MAX}" in rest_mod._space_mems
+
+
+# ── /reflect ─────────────────────────────────────────────────────────────────
+
+def _epoch_count(rest_mod, space):
+    row = rest_mod.get_mem().db.fetchone(
+        "SELECT epoch_count FROM personality WHERE tenant_id = 'default' AND space = ?",
+        (space,),
+    )
+    return row["epoch_count"] if row else None
+
+
+def test_reflect_targets_the_requested_space(client, rest_mod):
+    client.post("/remember", json={"content": "Work epoch fodder.", "space": "work"})
+
+    resp = client.post("/reflect", json={"space": "work"})
+    assert resp.status_code == 200
+    assert "beliefs_updated" in resp.json()
+    assert _epoch_count(rest_mod, "work") == 1
+    assert _epoch_count(rest_mod, "main") == 0
+
+
+def test_reflect_without_body_stays_backward_compatible(client, rest_mod):
+    resp = client.post("/reflect")
+    assert resp.status_code == 200
+    assert "beliefs_updated" in resp.json()
+    assert _epoch_count(rest_mod, "main") == 1
+
+
+def test_reflect_with_empty_body_reflects_the_configured_space(client, rest_mod):
+    resp = client.post("/reflect", json={})
+    assert resp.status_code == 200
+    assert _epoch_count(rest_mod, "main") == 1
+
+
+# ── /personality ─────────────────────────────────────────────────────────────
+
+def test_personality_routes_to_the_requested_space(client):
+    resp = client.put(
+        "/personality",
+        json={"action": "preset", "preset": "analytical", "space": "work"},
+    )
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "ok"
+
+    got = client.get("/personality", params={"space": "work"})
+    assert got.json()["preset_name"] == "analytical"
+
+    main = client.get("/personality")
+    assert main.json()["preset_name"] == "balanced"
+
+
+# ── DELETE /spaces/current ───────────────────────────────────────────────────
+
+def test_clear_space_param_deletes_only_that_space(client, rest_mod):
+    client.post("/remember", json={"content": "Work atom to clear.", "space": "work"})
+    kept = client.post("/remember", json={"content": "Main atom to keep."}).json()["atom_id"]
+
+    resp = client.delete("/spaces/current", params={"space": "work"})
+    assert resp.status_code == 200
+    assert resp.json()["deleted"] >= 1
+
+    db = rest_mod.get_mem().db
+    left = db.fetchone("SELECT COUNT(*) AS n FROM atoms WHERE space = 'work'", ())
+    assert left["n"] == 0
+    assert _atom_space(rest_mod, kept) == "main"
+
+
+# ── reflect loop coverage ────────────────────────────────────────────────────
+
+def test_reflect_loop_covers_every_touched_space(tmp_path, monkeypatch, rest_mod):
+    _configure(tmp_path, monkeypatch, rest_mod)
+    captured = {}
+
+    async def _capture(get_instances):
+        captured["get"] = get_instances
+
+    with patch("smrti.servers.rest.run_reflect_loop", new=_capture):
+        with TestClient(rest_mod.app, raise_server_exceptions=True) as c:
+            c.post("/remember", json={"content": "Work atom.", "space": "work"})
+            mems = captured["get"]()
+            assert {m.write_space for m in mems} == {"main", "work"}
+    _reset(rest_mod)
 
 
 # ── extraction follows the routed instance ───────────────────────────────────

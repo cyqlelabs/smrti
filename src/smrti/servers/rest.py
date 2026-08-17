@@ -18,7 +18,7 @@ from smrti.servers.viz_routes import api_key_middleware, create_viz_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    task = asyncio.create_task(run_reflect_loop(lambda: [get_mem()]))
+    task = asyncio.create_task(run_reflect_loop(_all_mems))
     yield
     task.cancel()
 
@@ -67,6 +67,13 @@ def get_mem(space: Optional[str] = None) -> Smrti:
         )
     _space_mems.move_to_end(space)
     return _space_mems[space]
+
+
+def _all_mems() -> list[Smrti]:
+    """Every live instance, for the reflect loop — each space gets its own epochs."""
+    mems: list[Smrti] = [get_mem()]
+    mems.extend(_space_mems.values())
+    return mems
 
 
 async def _run_sync(fn, *args):
@@ -129,10 +136,15 @@ class ForgetRequest(BaseModel):
         return v
 
 
+class ReflectRequest(BaseModel):
+    space: Optional[str] = None
+
+
 class PersonalityRequest(BaseModel):
     action: str  # "get", "set", "preset"
     preset: Optional[str] = None
     params: Optional[dict] = None
+    space: Optional[str] = None
 
 
 @app.post("/remember")
@@ -161,8 +173,8 @@ async def recall(req: RecallRequest):
 
 
 @app.post("/reflect")
-async def reflect():
-    return await _run_sync(handle_tool, get_mem(), "smrti_reflect", {})
+async def reflect(req: Optional[ReflectRequest] = None):
+    return await _run_sync(handle_tool, get_mem(req.space if req else None), "smrti_reflect", {})
 
 
 @app.post("/believe")
@@ -176,18 +188,18 @@ async def forget(req: ForgetRequest):
 
 
 @app.get("/personality")
-async def get_personality():
-    return await _run_sync(handle_tool, get_mem(), "smrti_personality", {"action": "get"})
+async def get_personality(space: Optional[str] = None):
+    return await _run_sync(handle_tool, get_mem(space), "smrti_personality", {"action": "get"})
 
 
 @app.put("/personality")
 async def set_personality(req: PersonalityRequest):
-    return await _run_sync(handle_tool, get_mem(), "smrti_personality", req.model_dump())
+    return await _run_sync(handle_tool, get_mem(req.space), "smrti_personality", req.model_dump())
 
 
 @app.delete("/spaces/current")
-async def clear_current_space():
-    count = await _run_sync(get_mem().clear_space)
+async def clear_current_space(space: Optional[str] = None):
+    count = await _run_sync(get_mem(space).clear_space)
     return {"status": "ok", "deleted": count}
 
 

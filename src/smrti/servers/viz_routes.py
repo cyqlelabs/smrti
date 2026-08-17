@@ -10,7 +10,7 @@ from typing import Callable
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
-from smrti import Smrti
+from smrti import Smrti, __version__
 from smrti.core.db import _registry, _registry_lock, _resolve_path
 from smrti.servers import config as cfg
 
@@ -133,11 +133,11 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         return [r["tenant_id"] for r in rows]
 
     @router.get("/spaces")
-    async def list_spaces(tenant_id: str = Query("default"), db: str | None = Query(None)):
+    async def list_spaces(tenant_id: str | None = Query(None), db: str | None = Query(None)):
         mem = _db_mem(db) if db else _configured_mem()
         rows = mem.db.fetchall(
             "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? ORDER BY space",
-            (tenant_id,),
+            (tenant_id or cfg.TENANT_ID,),
         )
         return [r["space"] for r in rows]
 
@@ -187,8 +187,13 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
 
     @router.get("/status")
     async def status(db: str | None = Query(None)):
+        # `spaces` doubles as the capability signal: clients treat its presence
+        # as proof the server understands per-request space routing.
         mem = _db_mem(db) if db else _configured_mem()
-        return mem.status()
+        result = mem.status()
+        result["spaces"] = mem.list_spaces()
+        result["version"] = __version__
+        return result
 
     @router.get("/atoms/{atom_id}")
     async def get_atom(

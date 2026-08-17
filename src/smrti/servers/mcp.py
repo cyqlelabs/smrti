@@ -132,8 +132,10 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         return {"error": f"Unknown action: {action}"}
 
     elif name == "smrti_status":
+        from smrti import __version__
         result = mem.status()
         result["spaces"] = mem.list_spaces()
+        result["version"] = __version__
         return result
 
     elif name == "smrti_space_query":

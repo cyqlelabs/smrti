@@ -270,6 +270,41 @@ def test_reflect_loop_covers_every_touched_space(tmp_path, monkeypatch, rest_mod
     _reset(rest_mod)
 
 
+# ── /status capability signal ────────────────────────────────────────────────
+
+def test_status_reports_spaces_and_version(client):
+    """The `spaces` key is how clients detect per-request space support."""
+    client.post("/remember", json={"content": "Work atom.", "space": "work"})
+    client.post("/remember", json={"content": "Main atom."})
+
+    resp = client.get("/status")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert set(data["spaces"]) >= {"main", "work"}
+    assert data["version"]
+
+
+def test_mcp_status_reports_version(client, rest_mod):
+    from smrti.servers.mcp import handle_tool
+    result = handle_tool(rest_mod.get_mem(), "smrti_status", {})
+    assert result["version"]
+    assert "spaces" in result
+
+
+# ── GET /spaces tenant default ───────────────────────────────────────────────
+
+def test_list_spaces_defaults_to_the_configured_tenant(tmp_path, monkeypatch, rest_mod):
+    """A server started for tenant `acme` must list acme's spaces, not `default`'s."""
+    _configure(tmp_path, monkeypatch, rest_mod, tenant_id="acme")
+    with patch("smrti.servers.rest.run_reflect_loop", new=_noop_reflect):
+        with TestClient(rest_mod.app, raise_server_exceptions=True) as c:
+            c.post("/remember", json={"content": "Acme memory."})
+            resp = c.get("/spaces")
+            assert resp.status_code == 200
+            assert resp.json() == ["main"]
+    _reset(rest_mod)
+
+
 # ── extraction follows the routed instance ───────────────────────────────────
 
 def test_extraction_uses_the_requested_space_instance(client):

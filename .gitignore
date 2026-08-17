@@ -12,3 +12,4 @@ venv/
 src/smrti/_version.py
 .coverage
 coverage.xml
+coverage.json

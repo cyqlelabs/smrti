@@ -2,6 +2,7 @@
 import asyncio
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -22,19 +23,21 @@ def mem():
 # ── NERProvider unit tests ────────────────────────────────────────────────────
 
 
+def _span(text, label, score=1.0):
+    """One entity as the ONNX runtime returns it."""
+    return SimpleNamespace(text=text, label=label, score=score, start=0, end=len(text))
+
+
 def test_ner_extract_deduplicates():
     """One entry per (name_lower, type) pair."""
     from smrti.extraction.ner import NERProvider
 
     provider = NERProvider()
     mock_model = MagicMock()
-    mock_model.extract_entities.return_value = {
-        "entities": {
-            "tool": ["Python", "python", "Django"],
-        }
-    }
+    mock_model.extract_entities.return_value = [
+        _span("Python", "tool"), _span("python", "tool"), _span("Django", "tool"),
+    ]
     provider._model = mock_model
-    provider._has_classify = False
 
     results = provider.extract("I use Python and Django")
     assert len(results) == 2
@@ -44,20 +47,17 @@ def test_ner_extract_deduplicates():
 
 
 def test_ner_extract_custom_labels():
-    """Custom labels are forwarded to GLiNER2."""
+    """Custom labels and the threshold are forwarded to the model."""
     from smrti.extraction.ner import NERProvider
 
     provider = NERProvider()
     mock_model = MagicMock()
-    mock_model.extract_entities.return_value = {
-        "entities": {"city": ["Berlin"]}
-    }
+    mock_model.extract_entities.return_value = [_span("Berlin", "city")]
     provider._model = mock_model
-    provider._has_classify = False
 
     results = provider.extract("I live in Berlin", labels=["city"])
     mock_model.extract_entities.assert_called_once_with(
-        "I live in Berlin", ["city"], threshold=0.4, include_confidence=True
+        "I live in Berlin", ["city"], threshold=0.4
     )
     assert len(results) == 1
     assert results[0]["type"] == "city"
@@ -69,42 +69,38 @@ def test_ner_extract_empty_text():
 
     provider = NERProvider()
     mock_model = MagicMock()
-    mock_model.extract_entities.return_value = {"entities": {}}
+    mock_model.extract_entities.return_value = []
     provider._model = mock_model
-    provider._has_classify = False
 
     results = provider.extract("")
     assert results == []
 
 
-def test_classify_pronoun_with_classify_text():
-    """classify_pronoun delegates to model.classify_text when available."""
+def test_classify_pronoun_uses_the_lexicon():
+    """Pronouns are a closed class — membership, not inference."""
     from smrti.extraction.ner import NERProvider
 
     provider = NERProvider()
     mock_model = MagicMock()
-    mock_model.classify_text.return_value = {"type": "pronoun"}
     provider._model = mock_model
-    provider._has_classify = True
 
     assert provider.classify_pronoun("I") is True
     assert provider.classify_pronoun("my") is True
-
-    mock_model.classify_text.return_value = {"type": "proper_name"}
+    assert provider.classify_pronoun("THEY") is True  # case-insensitive
     assert provider.classify_pronoun("Elara") is False
+    # No inference is involved, so a model that cannot load cannot break it.
+    mock_model.extract_entities.assert_not_called()
 
 
-def test_classify_pronoun_without_classify_text():
-    """classify_pronoun returns False when model lacks classify_text."""
+def test_classify_pronoun_spans_languages():
+    """The lexicon covers the languages the multilingual model does."""
     from smrti.extraction.ner import NERProvider
 
     provider = NERProvider()
-    mock_model = MagicMock(spec=[])  # no classify_text
-    provider._model = mock_model
-    provider._has_classify = False
-
-    assert provider.classify_pronoun("I") is False
-    assert provider.classify_pronoun("Elara") is False
+    for pronoun in ("ella", "ellos", "sie", "nous", "彼女", "我们"):
+        assert provider.classify_pronoun(pronoun) is True, pronoun
+    assert provider.classify_pronoun("") is False
+    assert provider.classify_pronoun("   ") is False
 
 
 # ── Hybrid dispatch tests ────────────────────────────────────────────────────

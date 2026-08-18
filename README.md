@@ -267,7 +267,7 @@ All server modes read the same environment variables. Everything works with zero
 | `SMRTI_EXTRACT_MODEL`    | request model              | Model for extraction calls                                       |
 | `SMRTI_EXTRACT_THINKING` | `disabled`                 | Chain-of-thought for extraction: `disabled` is faster and avoids token-budget exhaustion on thinking models (Qwen3, DeepSeek-R1); also `auto`, `enabled` |
 | `SMRTI_EXTRACT_TIMEOUT`  | `60`                       | Extraction request timeout in seconds                            |
-| `SMRTI_NER_MODEL`        | `fastino/gliner2-multi-v1` | GLiNER2 model for local zero-shot NER                            |
+| `SMRTI_NER_MODEL`        | `lmo3/gliner2-multi-v1-onnx` | GLiNER2 ONNX export for local zero-shot NER — runs on ONNX Runtime, so no PyTorch and no AVX/SSE4.1 floor |
 
 ### Ignoring Automated Messages
 

@@ -341,8 +341,8 @@ def test_pronoun_gate_skips_creation(mem):
 # ── Graceful fallback without GLiNER2 ────────────────────────────────────────
 
 
-def test_no_gliner2_graceful_fallback(mem):
-    """Without GLiNER2 installed, pronoun handling is disabled but resolve works."""
+def test_no_ner_runtime_graceful_fallback(mem):
+    """Without the NER runtime installed, pronoun handling is disabled but resolve works."""
     from smrti.extraction.extract import _resolve_ner_entities
 
     episode_id = mem.remember("test episode", type="episode")
@@ -352,7 +352,7 @@ def test_no_gliner2_graceful_fallback(mem):
         {"name": "I", "type": "person", "aliases": []},
     ]
 
-    with patch("smrti.extraction.ner.get_ner", side_effect=ImportError("no gliner2")):
+    with patch("smrti.extraction.ner.get_ner", side_effect=ImportError("no gliner2_onnx")):
         entity_ids = _resolve_ner_entities(entities, episode_id, mem)
 
     # Both should be resolved (no pronoun filtering without GLiNER2)

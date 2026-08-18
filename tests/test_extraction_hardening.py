@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 import tempfile
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -366,14 +367,19 @@ def test_embedding_tier_is_space_scoped(resolver):
 # ── CJK verb-phrase gate ─────────────────────────────────────────────────────
 
 
+def _span(text, label, score=1.0):
+    """One entity as the ONNX runtime returns it."""
+    return SimpleNamespace(text=text, label=label, score=score, start=0, end=len(text))
+
+
 def test_cjk_constraint_span_reaches_classifier():
     from smrti.extraction.ner import _is_verb_phrase
 
     model = MagicMock()
-    model.classify_text.return_value = {"type": "verb_phrase"}
+    model.extract_entities.return_value = [_span("绝对不要删除数据库", "verb_phrase", 0.8)]
     ent = {"name": "绝对不要删除数据库", "type": "constraint"}
     assert _is_verb_phrase(ent, model) is True
-    model.classify_text.assert_called_once()
+    model.extract_entities.assert_called_once()
 
 
 def test_short_cjk_span_skips_classifier():
@@ -382,7 +388,7 @@ def test_short_cjk_span_skips_classifier():
     model = MagicMock()
     ent = {"name": "冥想", "type": "preference"}
     assert _is_verb_phrase(ent, model) is False
-    model.classify_text.assert_not_called()
+    model.extract_entities.assert_not_called()
 
 
 def test_two_word_english_span_skips_classifier():
@@ -391,7 +397,7 @@ def test_two_word_english_span_skips_classifier():
     model = MagicMock()
     ent = {"name": "dark mode", "type": "preference"}
     assert _is_verb_phrase(ent, model) is False
-    model.classify_text.assert_not_called()
+    model.extract_entities.assert_not_called()
 
 
 def test_ner_extract_filters_cjk_verb_phrase():
@@ -399,12 +405,14 @@ def test_ner_extract_filters_cjk_verb_phrase():
 
     provider = NERProvider()
     mock_model = MagicMock()
-    mock_model.extract_entities.return_value = {
-        "entities": {"constraint": ["绝对不要删除数据库"]}
-    }
-    mock_model.classify_text.return_value = {"type": "verb_phrase"}
+
+    def entities(text, labels, threshold=0.4):
+        if labels == ["noun_phrase", "verb_phrase"]:
+            return [_span(text, "verb_phrase", 0.8)]
+        return [_span("绝对不要删除数据库", "constraint")]
+
+    mock_model.extract_entities.side_effect = entities
     provider._model = mock_model
-    provider._has_classify = True
 
     results = provider.extract("绝对不要删除数据库")
     assert results == []
@@ -415,16 +423,13 @@ def test_ner_extract_surfaces_real_confidence():
 
     provider = NERProvider()
     mock_model = MagicMock()
-    mock_model.extract_entities.return_value = {
-        "entities": {"person": [{"text": "Alice", "confidence": 0.87}]}
-    }
+    mock_model.extract_entities.return_value = [_span("Alice", "person", 0.87)]
     provider._model = mock_model
-    provider._has_classify = False
 
     results = provider.extract("Alice is here")
     assert results == [{"name": "Alice", "type": "person", "score": 0.87}]
     _, kwargs = mock_model.extract_entities.call_args
-    assert kwargs == {"threshold": 0.4, "include_confidence": True}
+    assert kwargs == {"threshold": 0.4}
 
 
 # ── Speaker attribution ──────────────────────────────────────────────────────

@@ -1,9 +1,22 @@
-"""Zero-shot NER via GLiNER2 — lazy-loaded, thread-safe singleton."""
+"""Zero-shot NER via GLiNER2 on ONNX Runtime — lazy-loaded, thread-safe singleton.
+
+ONNX Runtime is the only backend. The PyTorch build of GLiNER2 executes SSE4.1
+instructions inside oneDNN the moment it is imported, which is an illegal
+instruction — not a missing feature — on pre-2012 x86 hardware, and SIGILL is a
+signal Python cannot catch: one import takes the whole engine down. ONNX Runtime
+carries no such floor, so the same model runs everywhere, and the image sheds
+torch's ~800MB with it.
+"""
 from __future__ import annotations
 
 import os
 import threading
 from typing import Optional
+
+# The ONNX export of the multilingual GLiNER2 model, published alongside the
+# runtime. Override with SMRTI_NER_MODEL to use another export (fp16 variants,
+# the larger English model, or a local path).
+_DEFAULT_MODEL = "lmo3/gliner2-multi-v1-onnx"
 
 # GLiNER transformer context window is ~386–512 sub-word tokens.
 # At UTF-8 encoding rates this maps to roughly 1 500 bytes for mixed-script
@@ -33,29 +46,20 @@ def _chunk_text(text: str) -> list[str]:
 
 
 class NERProvider:
-    """Wraps GLiNER2 with lazy initialization. Thread-safe singleton."""
+    """Wraps GLiNER2's ONNX runtime with lazy initialization. Thread-safe singleton."""
 
     def __init__(self, model_name: str | None = None) -> None:
-        self._model_name = model_name or os.environ.get(
-            "SMRTI_NER_MODEL", "fastino/gliner2-multi-v1"
-        )
+        self._model_name = model_name or os.environ.get("SMRTI_NER_MODEL", _DEFAULT_MODEL)
         self._model = None
         self._lock = threading.Lock()
-        self._has_classify = False
 
     def _get_model(self):
         if self._model is None:
             with self._lock:
                 if self._model is None:
-                    from gliner2 import GLiNER2
+                    from gliner2_onnx import GLiNER2ONNXRuntime
 
-                    try:
-                        self._model = GLiNER2.from_pretrained(
-                            self._model_name, local_files_only=True
-                        )
-                    except Exception:
-                        self._model = GLiNER2.from_pretrained(self._model_name)
-                    self._has_classify = hasattr(self._model, "classify_text")
+                    self._model = GLiNER2ONNXRuntime.from_pretrained(self._model_name)
         return self._model
 
     def extract(
@@ -70,8 +74,8 @@ class NERProvider:
         of the input are not silently dropped by the transformer context window.
         Results from all chunks are merged before post-processing.
 
-        `threshold` is forwarded to GLiNER2 as the minimum span confidence;
-        real confidence scores are surfaced in the returned dicts.
+        `threshold` is the minimum span confidence; real confidence scores are
+        surfaced in the returned dicts.
 
         Returns list of {"name": str, "type": str, "score": float}.
         """
@@ -79,39 +83,26 @@ class NERProvider:
             labels = _DEFAULT_LABELS
         model = self._get_model()
 
-        # Collect raw entity dicts across all chunks, merging as we go.
-        # Track every span GLiNER tagged as "pronoun" before priority
-        # deduplication discards that label.  Deduplicate: keep one entry per
-        # name_lower, preferring the highest-priority (most specific) type.
+        # Collect entities across all chunks, merging as we go. Track every span
+        # GLiNER tagged as "pronoun" before priority deduplication discards that
+        # label. Deduplicate: keep one entry per name_lower, preferring the
+        # highest-priority (most specific) type.
         pronoun_tagged: set[str] = set()
         best: dict[str, dict] = {}
 
         for chunk in _chunk_text(text):
-            raw = model.extract_entities(
-                chunk, labels, threshold=threshold, include_confidence=True
-            )
-            entities_dict = raw.get("entities", {}) if isinstance(raw, dict) else {}
-            for etype, spans in entities_dict.items():
-                if not isinstance(spans, list):
-                    spans = [spans]
-                for span in spans:
-                    # GLiNER2 returns {"text", "confidence"} dicts with
-                    # include_confidence=True, plain strings otherwise.
-                    if isinstance(span, dict):
-                        name = span.get("text", "")
-                        score = float(span.get("confidence", 1.0))
-                    else:
-                        name = span
-                        score = 1.0
-                    if not name:
-                        continue
-                    key = name.lower()
-                    if etype == "pronoun":
-                        pronoun_tagged.add(key)
-                    priority = _TYPE_PRIORITY.get(etype, len(_DEFAULT_LABELS))
-                    existing = best.get(key)
-                    if existing is None or priority < _TYPE_PRIORITY.get(existing["type"], len(_DEFAULT_LABELS)):
-                        best[key] = {"name": name, "type": etype, "score": score}
+            for span in model.extract_entities(chunk, labels, threshold=threshold):
+                name = span.text
+                if not name:
+                    continue
+                etype = span.label
+                key = name.lower()
+                if etype == "pronoun":
+                    pronoun_tagged.add(key)
+                priority = _TYPE_PRIORITY.get(etype, len(_DEFAULT_LABELS))
+                existing = best.get(key)
+                if existing is None or priority < _TYPE_PRIORITY.get(existing["type"], len(_DEFAULT_LABELS)):
+                    best[key] = {"name": name, "type": etype, "score": float(span.score)}
 
         # Restore pronoun type for any span GLiNER labelled as pronoun,
         # regardless of what the priority system selected as the winning type.
@@ -120,35 +111,21 @@ class NERProvider:
             if ent["name"].lower() in pronoun_tagged:
                 ent["type"] = "pronoun"
         # Filter out verb phrases misidentified as preference/constraint entities.
-        # Uses classify_text (multilingual) to distinguish noun phrases from
+        # Uses the span head (multilingual) to distinguish noun phrases from
         # imperative clauses like "Avoid at all costs" / "Niemals löschen".
-        if self._has_classify:
-            result = [
-                ent for ent in result
-                if not _is_verb_phrase(ent, self._get_model())
-            ]
-        return result
+        return [ent for ent in result if not _is_verb_phrase(ent, model)]
 
     def classify_pronoun(self, name: str) -> bool:
         """Return True if `name` is a pronoun rather than a proper name.
 
-        Uses GLiNER2's classify_text when available, otherwise returns False.
+        A lexicon rather than a model call. Pronouns are a closed class — every
+        language has a few dozen and coins no more — so a lookup is exact where
+        zero-shot inference is not: asked to choose between `proper_name` and
+        `pronoun`, the model answers `proper_name` for "she", "he", "they" and
+        "my" alike, on both the ONNX and the PyTorch build. Membership needs no
+        weights, no context and no inference call.
         """
-        if not name or not name.strip():
-            return False
-        try:
-            model = self._get_model()
-        except Exception:
-            return False
-        if not self._has_classify:
-            return False
-        try:
-            result = model.classify_text(name.strip(), {"type": ["proper_name", "pronoun"]})
-            if isinstance(result, dict):
-                return result.get("type") == "pronoun"
-            return False
-        except Exception:
-            return False
+        return name.strip().casefold() in _PRONOUNS
 
 
 def _is_verb_phrase(ent: dict, model) -> bool:
@@ -156,10 +133,15 @@ def _is_verb_phrase(ent: dict, model) -> bool:
 
     Only checks preference/constraint entities — these are the types most
     prone to matching imperative clauses ("Avoid X", "Niemals Y"). The
-    classifier runs when the span has 3+ whitespace-separated words OR is a
+    model runs when the span has 3+ whitespace-separated words OR is a
     single space-free run of 4+ characters, so unsegmented scripts
-    (CJK/Thai) still reach it. Language-agnostic: delegates to GLiNER2's
-    classify_text.
+    (CJK/Thai) still reach it.
+
+    Asks the span head rather than the classifier head: given the two labels as
+    entity types it separates "Avoid at all costs" (verb 0.86 / noun 0.45) from
+    "strong black coffee" (verb 0.03 / noun 0.58), while the classifier head
+    answers `noun_phrase` for both. Language-agnostic — the same margin holds
+    for German imperatives.
     """
     etype = ent.get("type", "")
     name = ent.get("name", "")
@@ -168,14 +150,41 @@ def _is_verb_phrase(ent: dict, model) -> bool:
     words = len(name.split())
     if not (words >= 3 or (words == 1 and len(name) >= 4)):
         return False
-    try:
-        result = model.classify_text(name, {"type": ["noun_phrase", "verb_phrase"]})
-        if isinstance(result, dict):
-            return result.get("type") == "verb_phrase"
-    except Exception:
-        pass
-    return False
+    best: dict[str, float] = {}
+    for span in model.extract_entities(name, ["noun_phrase", "verb_phrase"], threshold=0.0):
+        best[span.label] = max(best.get(span.label, 0.0), float(span.score))
+    return best.get("verb_phrase", 0.0) > best.get("noun_phrase", 0.0)
 
+
+# Personal, possessive and reflexive pronouns across the languages the
+# multilingual model covers. Closed class: this list is complete per language
+# by definition, which is what makes a lookup the right instrument.
+_PRONOUNS: frozenset[str] = frozenset(
+    # English
+    "i me my mine myself you your yours yourself yourselves he him his himself "
+    "she her hers herself it its itself we us our ours ourselves they them "
+    "their theirs themselves"
+    # Spanish
+    " yo me mi mis mío mía míos mías tú te tu tus tuyo tuya usted ustedes él "
+    "ella ello lo la le su sus suyo suya nosotros nosotras nos nuestro nuestra "
+    "vosotros vosotras os ellos ellas les"
+    # Portuguese
+    " eu mim meu minha meus minhas tu ti teu tua você vocês ele ela dele dela "
+    "nós nosso nossa eles elas deles delas"
+    # French
+    " je moi mon ma mes tu toi ton ta tes vous votre vos il elle lui son sa ses "
+    "nous notre nos ils elles leur leurs"
+    # German
+    " ich mich mir mein meine du dich dir dein deine er ihn ihm sein seine sie "
+    "ihr ihre es wir uns unser unsere ihnen"
+    # Italian
+    " io me mio mia miei mie tu te tuo tua lui lei suo sua noi nostro nostra "
+    "voi vostro vostra loro"
+    # Japanese
+    " 私 わたし 僕 ぼく 俺 おれ 彼 彼女 彼ら 私たち あなた"
+    # Chinese
+    " 我 你 您 他 她 它 我们 你们 他们 她们 它们".split()
+)
 
 _DEFAULT_LABELS = [
     "person",

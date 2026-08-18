@@ -43,8 +43,8 @@ jobs:
             ~/.cache/fastembed
             ~/.cache/huggingface
           key: models-${{ runner.os }}-v2
-      # gliner2 is a core dependency now, so torch comes with it; the pip cache
-      # above keeps that download off every subsequent run.
+      # NER runs on ONNX Runtime, so the install is wheels only — no torch, and
+      # the HuggingFace half of the cache above holds the exported NER model.
       - run: pip install -e ".[openai]" pytest pytest-cov
       - run: pytest tests/ -q --cov=smrti --cov-report=xml
       # One upload is enough; the other interpreters cover the same lines.

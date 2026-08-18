@@ -42,11 +42,6 @@ RUN useradd --system --create-home --home-dir /home/smrti --shell /usr/sbin/nolo
  && mkdir -p /data /opt/smrti/models \
  && chown smrti:smrti /data /opt/smrti/models
 
-# gliner2 drags in torch, and PyPI's default wheel bundles CUDA libraries worth
-# several GB that a CPU container never loads. Installing the CPU build first
-# leaves nothing for the wheel's own resolution to pull.
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch
-
 # No extras: the image installs what `pip install smrti` installs, nothing else.
 COPY --from=build /dist /tmp/dist
 RUN pip install --no-cache-dir /tmp/dist/*.whl \
@@ -54,11 +49,12 @@ RUN pip install --no-cache-dir /tmp/dist/*.whl \
 
 USER smrti
 
-# Bake the ~120MB embedding model into the image: without it the first recall
-# stalls on a HuggingFace download, and an offline host never recalls at all.
-# Runs as the runtime user so the files land owned by it — a later chown -R
-# would copy every one of them into a second layer.
-RUN python -c "from smrti.core.embed import get_embedding_provider; get_embedding_provider().embed('warmup')"
+# Bake the models into the image: without them the first recall and the first
+# extraction each stall on a HuggingFace download, and an offline host never
+# recalls at all. Runs as the runtime user so the files land owned by it — a
+# later chown -R would copy every one of them into a second layer.
+RUN python -c "from smrti.core.embed import get_embedding_provider; get_embedding_provider().embed('warmup')" \
+ && python -c "from smrti.extraction.ner import get_ner; get_ner().extract('warmup', ['person'])"
 
 VOLUME ["/data"]
 EXPOSE 8420

@@ -1,6 +1,6 @@
 # smrti
 
-[![PyPI version](https://img.shields.io/pypi/v/smrti?cacheSeconds=3600)](https://pypi.org/project/smrti/)
+[![PyPI version](https://img.shields.io/pypi/v/smrti)](https://pypi.org/project/smrti/)
 [![Python](https://img.shields.io/pypi/pyversions/smrti)](https://pypi.org/project/smrti/)
 [![License](https://img.shields.io/github/license/cyqlelabs/smrti)](LICENSE)
 [![CI](https://img.shields.io/github/actions/workflow/status/cyqlelabs/smrti/ci.yml?label=CI)](https://github.com/cyqlelabs/smrti/actions/workflows/ci.yml)

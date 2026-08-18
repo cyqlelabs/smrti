@@ -26,7 +26,7 @@ jobs:
           path: |
             ~/.cache/fastembed
             ~/.cache/huggingface
-          key: models-${{ runner.os }}-v1
+          key: models-${{ runner.os }}-v2
       - run: pip install -e ".[openai]" pytest pytest-cov
       - run: pytest tests/ -x -q --cov=smrti --cov-report=xml
       - uses: codecov/codecov-action@v4

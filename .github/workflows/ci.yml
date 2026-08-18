@@ -42,7 +42,7 @@ jobs:
           path: |
             ~/.cache/fastembed
             ~/.cache/huggingface
-          key: models-${{ runner.os }}-v1
+          key: models-${{ runner.os }}-v2
       # gliner2 is a core dependency now, so torch comes with it; the pip cache
       # above keeps that download off every subsequent run.
       - run: pip install -e ".[openai]" pytest pytest-cov

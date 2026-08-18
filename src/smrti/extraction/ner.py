@@ -104,11 +104,14 @@ class NERProvider:
                 if existing is None or priority < _TYPE_PRIORITY.get(existing["type"], len(_DEFAULT_LABELS)):
                     best[key] = {"name": name, "type": etype, "score": float(span.score)}
 
-        # Restore pronoun type for any span GLiNER labelled as pronoun,
-        # regardless of what the priority system selected as the winning type.
+        # Restore pronoun type for spans GLiNER labelled as pronoun, but only
+        # when the lexicon agrees: the model also noise-tags proper names as
+        # pronoun ("Factor", "Cyqle"), and an unchecked restore clobbers the
+        # real type the priority merge selected, after which the pronoun merge
+        # drops the entity entirely.
         result = list(best.values())
         for ent in result:
-            if ent["name"].lower() in pronoun_tagged:
+            if ent["name"].lower() in pronoun_tagged and self.classify_pronoun(ent["name"]):
                 ent["type"] = "pronoun"
         # Filter out verb phrases misidentified as preference/constraint entities.
         # Uses the span head (multilingual) to distinguish noun phrases from

@@ -146,6 +146,24 @@ def test_extract_restores_the_pronoun_type_after_priority_merge():
     assert results == [{"name": "she", "type": "pronoun", "score": 1.0}]
 
 
+def test_extract_keeps_the_real_type_when_pronoun_tag_is_noise():
+    """A proper name tagged both `technology` and `pronoun` keeps `technology`.
+
+    The model noise-tags product names as pronoun; only lexicon membership
+    may turn a span into one.
+    """
+    provider = NERProvider()
+    model = MagicMock()
+    model.extract_entities.return_value = [
+        _span("Factor", "technology", 0.6), _span("Factor", "pronoun", 0.5),
+    ]
+    provider._model = model
+
+    assert provider.extract("Factor runs on the desktop") == [
+        {"name": "Factor", "type": "technology", "score": 0.6}
+    ]
+
+
 def test_extract_filters_verb_phrases():
     provider = NERProvider()
     model = MagicMock()

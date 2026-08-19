@@ -203,6 +203,87 @@ def test_lti_decay_does_not_erode_the_critical_valence_floor(mem):
     assert row["confidence"] < 0.5
 
 
+# ── user-testimony confidence floor ───────────────────────────────────────────
+
+def _surface_floor(mem) -> float:
+    return mem.db.fetchone(
+        "SELECT min_confidence_to_surface FROM personality WHERE tenant_id = ? AND space = ?",
+        ("test", "default"),
+    )["min_confidence_to_surface"]
+
+
+def test_user_memory_confidence_decays_to_the_surfacing_floor_not_zero(mem):
+    """What the user stated stays recallable forever.
+
+    Recall filters out atoms below min_confidence_to_surface, and a memory
+    that cannot surface can never be restated and re-evidenced — decay to
+    zero is a one-way trip to invisibility for exactly the facts that go
+    unmentioned longest (family, identity). User episodes and beliefs
+    therefore hold at the surfacing line.
+    """
+    episode = mem.remember("Nicolás lives with Roxana and Esmeralda")
+    belief = mem.believe("Lourdes is Nicolás's daughter", probability=0.95)
+    mem.db.execute(
+        "UPDATE personality SET confidence_decay_rate = 0.5 WHERE tenant_id = ? AND space = ?",
+        ("test", "default"),
+    )
+
+    for _ in range(20):
+        mem.reflect()
+
+    floor = _surface_floor(mem)
+    for atom_id in (episode, belief):
+        row = mem.db.fetchone("SELECT confidence FROM atoms WHERE id = ?", (atom_id,))
+        assert row["confidence"] == pytest.approx(floor)
+
+
+def test_agent_memory_confidence_still_decays_to_nothing(mem):
+    """Model-volunteered content the user never adopted keeps fading out."""
+    a = mem.remember("the model guessed the user likes jazz", metadata={"source": "agent"})
+    mem.db.execute(
+        "UPDATE personality SET confidence_decay_rate = 0.5 WHERE tenant_id = ? AND space = ?",
+        ("test", "default"),
+    )
+
+    for _ in range(20):
+        mem.reflect()
+
+    row = mem.db.fetchone("SELECT confidence FROM atoms WHERE id = ?", (a,))
+    assert row is None or row["confidence"] < _surface_floor(mem)
+
+
+def test_forgotten_user_memory_is_not_lifted_back_to_the_floor(mem):
+    """The floor only holds an atom still at or above it.
+
+    forget() sinks a memory to 0.3× its confidence on purpose; a floor that
+    reached down would undo every deliberate forget one epoch later.
+    """
+    a = mem.remember("outdated fact the user corrected")
+    floor = _surface_floor(mem)
+    mem.db.execute("UPDATE atoms SET confidence = ? WHERE id = ?", (floor * 0.3, a))
+
+    mem.reflect()
+
+    row = mem.db.fetchone("SELECT confidence FROM atoms WHERE id = ?", (a,))
+    assert row["confidence"] < floor * 0.3
+
+
+def test_concept_confidence_is_not_floored(mem):
+    """Concepts are derived index nodes, not testimony — they decay freely,
+    which is what keeps them prunable once nothing references them."""
+    c = _add_atom(mem, "familia", type_="concept", confidence=0.5, sti=0.0, lti=0.0)
+    mem.db.execute(
+        "UPDATE personality SET confidence_decay_rate = 0.5 WHERE tenant_id = ? AND space = ?",
+        ("test", "default"),
+    )
+
+    for _ in range(20):
+        mem.reflect()
+
+    row = mem.db.fetchone("SELECT confidence FROM atoms WHERE id = ?", (c,))
+    assert row is None or row["confidence"] < _surface_floor(mem)
+
+
 # ── prune cascade tenant scoping ──────────────────────────────────────────────
 
 def test_prune_relation_cascade_is_tenant_scoped_but_cross_space(mem):

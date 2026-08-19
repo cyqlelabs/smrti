@@ -43,7 +43,9 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
 
     Executes in order:
       1. Apply pending evidence to update belief probabilities/confidence
-      2. Decay STI and confidence for all atoms in this space
+      2. Decay STI, LTI, and confidence for all atoms in this space
+         (user-stated episodes/beliefs hold a confidence floor at the
+         surfacing threshold so they stay recallable)
       3. Propagate STI and valence to 1-hop neighbors of active atoms
       4. Heal orphaned episodes (link to most salient person)
       5. Promote high-STI atoms to LTI
@@ -155,19 +157,36 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # an atom that already reached it — one below keeps decaying freely — so
     # this preserves a memory that earned long-term importance without ever
     # granting it to one that did not.
+    #
+    # Confidence gates surfacing the way LTI gates pruning: recall filters
+    # out atoms below min_confidence_to_surface, so once decay carries an
+    # atom past that line it can never be recalled — and what cannot surface
+    # cannot be restated, so no new evidence ever lifts it back. That is the
+    # LTI floor's one-way trip again, aimed at visibility instead of
+    # deletion. User-stated episodes and beliefs therefore decay toward the
+    # surfacing line, not zero: direct testimony never stops being grounds
+    # for a belief. Like the LTI floor, it only holds an atom still at or
+    # above it — forget() sinks memories below on purpose, and a floor that
+    # reached down would undo every deliberate forget one epoch later.
+    # Concepts and goals are derived index nodes, not testimony, and keep
+    # decaying freely, as does everything agent-authored.
+    min_conf = _param(p, "min_confidence_to_surface", 0.1)
     decay_sql = f"""UPDATE atoms SET
                sti        = sti        * (1.0 - ?),
                lti        = MAX(lti * (1.0 - ?),
                                 CASE WHEN valence < -0.7 AND intensity > 0.7 THEN ?
                                      WHEN lti >= ? THEN ?
                                      ELSE 0.0 END),
-               confidence = confidence * (1.0 - ?),
+               confidence = MAX(confidence * (1.0 - ?),
+                                CASE WHEN type IN ('episode', 'belief')
+                                          AND confidence >= ? THEN ?
+                                     ELSE 0.0 END),
                updated_at = datetime('now')
            WHERE tenant_id = ? AND space = ?
              AND {ATOM_SOURCE} {{}} 'agent'"""
-    for comparison, multiplier, floor in (
-        ("!=", 1.0, _LTI_FLOOR_USER),
-        ("=", agent_multiplier, _LTI_FLOOR_AGENT),
+    for comparison, multiplier, floor, conf_floor in (
+        ("!=", 1.0, _LTI_FLOOR_USER, min_conf),
+        ("=", agent_multiplier, _LTI_FLOOR_AGENT, 0.0),
     ):
         sti_rate, lti_rate, conf_rate = (
             min(rate * multiplier, 1.0) for rate in base_rates
@@ -175,7 +194,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         db.execute(
             decay_sql.format(comparison),
             (sti_rate, lti_rate, _LTI_FLOOR_CRITICAL, floor, floor,
-             conf_rate, tenant_id, space),
+             conf_rate, conf_floor, conf_floor, tenant_id, space),
         )
 
     # 2b. Propagate STI and valence to 1-hop neighbors
@@ -268,7 +287,6 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # agent-authored counterparts are not, so a model turn the user never
     # picked up can leave the graph once it has decayed. Relations are never
     # pruned directly — they cascade with their endpoints (see loop below).
-    min_conf = _param(p, "min_confidence_to_surface", 0.1)
     dead_rows = db.fetchall(
         f"""SELECT id FROM atoms
            WHERE tenant_id = ? AND space = ?

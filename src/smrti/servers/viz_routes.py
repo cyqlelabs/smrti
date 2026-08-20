@@ -145,7 +145,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
     async def get_graph(
         tenant_id: str = Query("default"),
         space: str = Query("default"),
-        limit: int = Query(200, ge=1, le=1000),
+        limit: int = Query(200, ge=0),
         min_confidence: float = Query(0.0),
         types: str = Query("concept,belief,episode,goal"),
         db: str | None = Query(None),
@@ -155,29 +155,33 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         ]
         ph = ",".join("?" * len(type_list))
         mem = _db_mem(db) if db else _configured_mem()
-        rows = mem.db.fetchall(
-            f"""SELECT * FROM atoms
-                WHERE tenant_id=? AND space=? AND type IN ({ph})
-                  AND confidence >= ?
-                ORDER BY (sti + lti) DESC
-                LIMIT ?""",
-            (tenant_id, space, *type_list, min_confidence, limit),
-        )
+        node_sql = f"""SELECT * FROM atoms
+                        WHERE tenant_id=? AND space=? AND type IN ({ph})
+                          AND confidence >= ?
+                        ORDER BY (sti + lti) DESC
+                        LIMIT ?"""
+        # limit=0 asks for the whole space; SQLite reads a negative LIMIT as
+        # unbounded.
+        node_params = (tenant_id, space, *type_list, min_confidence, limit or -1)
+        rows = mem.db.fetchall(node_sql, node_params)
         nodes = [dict(r) for r in rows]
         node_ids = {n["id"] for n in nodes}
         node_labels = {n["id"]: n["label"] for n in nodes}
 
         edges = []
         if node_ids:
+            # Anchor the edge query to the node window instead of reading a
+            # capped slice of every relation in the space: that cap silently
+            # dropped edges once a space held more relations than it allowed.
             edge_rows = mem.db.fetchall(
-                """SELECT * FROM atoms
-                   WHERE tenant_id=? AND space=? AND type='relation'
-                     AND source_id IS NOT NULL AND target_id IS NOT NULL
-                   LIMIT ?""",
-                (tenant_id, space, min(limit * 10, 5000)),
+                f"""WITH sel AS ({node_sql})
+                    SELECT * FROM atoms
+                    WHERE tenant_id=? AND space=? AND type='relation'
+                      AND source_id IN (SELECT id FROM sel)""",
+                (*node_params, tenant_id, space),
             )
             for r in edge_rows:
-                if r["source_id"] in node_ids and r["target_id"] in node_ids:
+                if r["target_id"] in node_ids:
                     e = dict(r)
                     e["source_label"] = node_labels.get(r["source_id"])
                     e["target_label"] = node_labels.get(r["target_id"])

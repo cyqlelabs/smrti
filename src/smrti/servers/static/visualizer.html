@@ -728,11 +728,20 @@ const dbParam = () => { const d = $('db-path').value.trim(); return d ? '&db=' +
 const dbParamFirst = () => { const d = $('db-path').value.trim(); return d ? '?db=' + encodeURIComponent(d) : ''; };
 
 // ─── API ──────────────────────────────────────────────────────────────
+// FastAPI reports validation errors as a list of {loc, msg} objects, which the
+// default string coercion renders as "[object Object]".
+function fmtDetail(d) {
+  if (!d) return '';
+  if (typeof d === 'string') return d;
+  const one = e => e && e.msg ? `${(e.loc || []).slice(-1)[0]}: ${e.msg}` : JSON.stringify(e);
+  return Array.isArray(d) ? d.map(one).join('; ') : one(d);
+}
+
 async function api(path) {
   const r = await fetch(apiBase() + path);
   if (!r.ok) {
     const detail = await r.json().then(b => b && b.detail).catch(() => null);
-    throw new Error(detail || `HTTP ${r.status}`);
+    throw new Error(fmtDetail(detail) || `HTTP ${r.status}`);
   }
   return r.json();
 }

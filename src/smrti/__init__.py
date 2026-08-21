@@ -15,6 +15,7 @@ from smrti.core.db import Database, get_database
 from smrti.core.embed import EmbeddingProvider, get_embedding_provider
 from smrti.core.atomspace import AtomSpace
 from smrti.core.models import (
+    PERMANENT_PROBABILITY,
     Atom,
     AtomType,
     AttentionValue,
@@ -186,14 +187,23 @@ class Smrti:
         statement: str,
         probability: float,
         evidence: str = None,
+        valence: float = 0.0,
+        source: str = "user",
     ) -> str:
+        # A permanent assertion is born certain. Starting it at the ordinary
+        # 0.3 leaves a fact the caller stated as settled ranked below the
+        # conversational froth stored beside it, which reads to the caller as
+        # never having stored it at all.
+        confidence = probability if probability >= PERMANENT_PROBABILITY else 0.3
         atom = Atom(
             type=AtomType.BELIEF,
             label=statement[:100],
             content=statement,
-            truth=TruthValue(probability=probability, confidence=0.3),
+            truth=TruthValue(probability=probability, confidence=confidence),
+            valence=Valence(valence=valence, intensity=abs(valence)),
             tenant_id=self.tenant_id,
             space=self.write_space,
+            metadata={"source": "agent"} if source == "agent" else {},
         )
         atom_id = self.atomspace.add_atom(atom)
         if evidence:

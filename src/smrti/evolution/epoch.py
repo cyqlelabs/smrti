@@ -1,7 +1,7 @@
 """Consolidation epoch: the main memory evolution loop."""
 from __future__ import annotations
 
-from smrti.core.models import EpochResult, TruthValue
+from smrti.core.models import PERMANENT_PROBABILITY, EpochResult, TruthValue
 from smrti.core.provenance import ATOM_METADATA_JSON, ATOM_SOURCE
 from smrti.evolution.attention import propagate_sti
 from smrti.evolution.connections import discover_connections
@@ -25,6 +25,12 @@ _LTI_FLOOR_AGENT = 0.0
 # atomspace.add_atom) that keeps past failures out of reach of the pruner.
 _LTI_FLOOR_CRITICAL = 0.5
 
+# Permanence is a property of testimony, so it is withheld from the agent's own
+# beliefs by passing a threshold no probability can reach. Otherwise a model
+# asserting certainty about its own output could mint itself a memory that
+# never fades — the one thing agent-source decay exists to prevent.
+_PERMANENCE_UNREACHABLE = 2.0
+
 
 def _param(personality: dict, key: str, default: float) -> float:
     """Read a personality hyperparameter, tolerating absent and NULL columns.
@@ -45,7 +51,8 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
       1. Apply pending evidence to update belief probabilities/confidence
       2. Decay STI, LTI, and confidence for all atoms in this space
          (user-stated episodes/beliefs hold a confidence floor at the
-         surfacing threshold so they stay recallable)
+         surfacing threshold so they stay recallable, and one asserted as
+         permanent keeps the confidence it was asserted with)
       3. Propagate STI and valence to 1-hop neighbors of active atoms
       4. Heal orphaned episodes (link to most salient person)
       5. Promote high-STI atoms to LTI
@@ -170,6 +177,16 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # reached down would undo every deliberate forget one epoch later.
     # Concepts and goals are derived index nodes, not testimony, and keep
     # decaying freely, as does everything agent-authored.
+    #
+    # A belief asserted at PERMANENT_PROBABILITY is exempt from confidence
+    # decay outright rather than merely floored. The floor keeps a memory
+    # reachable; it does not keep it competitive, because it pins every aged
+    # atom to the same value while anything stored in the last hour still
+    # carries several times that — and confidence is the heaviest term in
+    # salience on most presets. A permanent fact that recall can find but
+    # never ranks is one the caller experiences as forgotten. forget() still
+    # reaches these atoms: it lowers confidence directly rather than through
+    # decay, and what it sets is then left standing.
     min_conf = _param(p, "min_confidence_to_surface", 0.1)
     decay_sql = f"""UPDATE atoms SET
                sti        = sti        * (1.0 - ?),
@@ -177,16 +194,18 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
                                 CASE WHEN valence < -0.7 AND intensity > 0.7 THEN ?
                                      WHEN lti >= ? THEN ?
                                      ELSE 0.0 END),
-               confidence = MAX(confidence * (1.0 - ?),
+               confidence = MAX(CASE WHEN type = 'belief' AND probability >= ?
+                                     THEN confidence
+                                     ELSE confidence * (1.0 - ?) END,
                                 CASE WHEN type IN ('episode', 'belief')
                                           AND confidence >= ? THEN ?
                                      ELSE 0.0 END),
                updated_at = datetime('now')
            WHERE tenant_id = ? AND space = ?
              AND {ATOM_SOURCE} {{}} 'agent'"""
-    for comparison, multiplier, floor, conf_floor in (
-        ("!=", 1.0, _LTI_FLOOR_USER, min_conf),
-        ("=", agent_multiplier, _LTI_FLOOR_AGENT, 0.0),
+    for comparison, multiplier, floor, conf_floor, permanent_at in (
+        ("!=", 1.0, _LTI_FLOOR_USER, min_conf, PERMANENT_PROBABILITY),
+        ("=", agent_multiplier, _LTI_FLOOR_AGENT, 0.0, _PERMANENCE_UNREACHABLE),
     ):
         sti_rate, lti_rate, conf_rate = (
             min(rate * multiplier, 1.0) for rate in base_rates
@@ -194,7 +213,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         db.execute(
             decay_sql.format(comparison),
             (sti_rate, lti_rate, _LTI_FLOOR_CRITICAL, floor, floor,
-             conf_rate, conf_floor, conf_floor, tenant_id, space),
+             permanent_at, conf_rate, conf_floor, conf_floor, tenant_id, space),
         )
 
     # 2b. Propagate STI and valence to 1-hop neighbors

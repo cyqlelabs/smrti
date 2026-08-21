@@ -36,6 +36,14 @@ class EntityType(str, Enum):
     PRONOUN = "pronoun"
 
 
+# A belief asserted at this probability or above is the caller's standing
+# testimony rather than an estimate that might grow stale. It is born already
+# certain and confidence decay leaves it alone, because "permanent" that does
+# not survive the passage of time means nothing. Anything below is an ordinary
+# claim, born unsure and earning confidence through evidence.
+PERMANENT_PROBABILITY = 0.95
+
+
 class TruthValue(BaseModel):
     probability: float = Field(0.5, ge=0.0, le=1.0)
     confidence: float = Field(0.0, ge=0.0, le=1.0)

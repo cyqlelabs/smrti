@@ -41,14 +41,21 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         if valence is None:
             valence = estimate_valence(content, mem.embed)
         atom_type = args.get("type", "episode")
+        # Provenance and valence are read once and handed to both writers. The
+        # belief branch used to drop them, so every belief in the graph read as
+        # source-less and unemotional however it was stored — which cost
+        # beliefs the agent-source discount at ranking and the faster decay
+        # that goes with it.
+        source = args.get("source", "user")
         if atom_type == "belief":
             atom_id = mem.believe(
                 statement=content,
                 probability=args.get("probability", 0.8),
                 evidence=args.get("evidence"),
+                valence=valence,
+                source=source,
             )
         else:
-            source = args.get("source", "user")
             atom_id = mem.remember(
                 content=content,
                 type=atom_type,

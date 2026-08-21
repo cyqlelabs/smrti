@@ -220,9 +220,13 @@ def test_user_memory_confidence_decays_to_the_surfacing_floor_not_zero(mem):
     zero is a one-way trip to invisibility for exactly the facts that go
     unmentioned longest (family, identity). User episodes and beliefs
     therefore hold at the surfacing line.
+
+    A belief asserted at PERMANENT_PROBABILITY is a stronger case with its
+    own contract — it keeps the confidence it was asserted with, not the
+    floor — so the ordinary belief here is deliberately below that line.
     """
     episode = mem.remember("Nicolás lives with Roxana and Esmeralda")
-    belief = mem.believe("Lourdes is Nicolás's daughter", probability=0.95)
+    belief = mem.believe("Lourdes is Nicolás's daughter", probability=0.9)
     mem.db.execute(
         "UPDATE personality SET confidence_decay_rate = 0.5 WHERE tenant_id = ? AND space = ?",
         ("test", "default"),

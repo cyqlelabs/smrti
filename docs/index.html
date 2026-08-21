@@ -997,7 +997,7 @@
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
               <span class="arch-layer-name">personality</span>
-              <span class="arch-layer-files">params.py &middot; presets/</span>
+              <span class="arch-layer-files">params.py &middot; presets.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -1012,7 +1012,7 @@
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
               <span class="arch-layer-name">extraction</span>
-              <span class="arch-layer-files">extract.py (hybrid GLiNER + LLM extraction) &middot; ner.py (17-type zero-shot NER) &middot; resolve.py (5-tier entity resolution) &middot; pronouns.py &middot; sentiment.py</span>
+              <span class="arch-layer-files">extract.py (hybrid GLiNER + LLM extraction) &middot; ner.py (16-type zero-shot NER) &middot; resolve.py (5-tier entity resolution) &middot; pronouns.py &middot; sentiment.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -1114,7 +1114,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
 
 <span class="cm"># 6 presets: balanced, analytical, curious,</span>
 <span class="cm"># empathetic, maverick, deterministic</span>
-<span class="cm"># Each tunes 16 hyperparameters that control</span>
+<span class="cm"># Each tunes 17 hyperparameters that control</span>
 <span class="cm"># learning rate, decay, promotion, and salience weights</span></pre></div>
       </div>
     </section>
@@ -1146,7 +1146,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
             <p class="salience-card-title">Severity classification</p>
             <p class="salience-card-text">Each recall result carries a severity tag. The proxy injects memories as plain imperative instructions into the system prompt: <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">YOU MUST NOT</code>, <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">AVOID</code>, or <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">Note:</code></p>
             <ul class="severity-list">
-              <li class="sev-crit">critical_warning &mdash; valence &lt; &minus;0.5, intensity &gt; 0.5</li>
+              <li class="sev-crit">critical_warning &mdash; caller-stated valence &lt; &minus;0.5, intensity &gt; 0.5</li>
               <li class="sev-anti">known_antipattern &mdash; probability &lt; 0.3, confidence &gt; 0.3</li>
               <li class="sev-ctx">context &mdash; neutral background</li>
             </ul>

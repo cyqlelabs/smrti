@@ -63,7 +63,8 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
       5. Promote high-STI atoms to LTI
       6. Resolve contradictions by weakening the less confident belief
       7. Discover cross-domain connections (every 10th epoch)
-      8. Prune dead atoms below confidence and LTI floors
+      8. Materialize cross-space bridge atoms (every 10th epoch)
+      9. Prune dead atoms below confidence and LTI floors
     """
     db.execute(
         "UPDATE personality SET epoch_count = epoch_count + 1 WHERE tenant_id = ? AND space = ?",

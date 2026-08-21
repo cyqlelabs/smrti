@@ -24,11 +24,11 @@ Inspired by <a href="https://github.com/opencog/atomspace" target="_blank">AtomS
 ## Why smrti
 
 - **Zero infrastructure** — one SQLite file with [sqlite-vec](https://github.com/asg017/sqlite-vec) for KNN and ONNX embeddings on CPU. `pip install` and go.
-- **Error-avoidance memory** — severe failures get a long-term-importance floor so they survive pruning, and recall dynamically boosts them: old-but-critical errors outrank recent trivia. Recalled memories are classified as `critical_warning`, `known_antipattern`, or `context`.
+- **Error-avoidance memory** — severe failures get a long-term-importance floor so they survive pruning, and recall dynamically boosts them: old-but-critical errors outrank recent trivia. Recalled memories are classified as `critical_warning`, `known_antipattern`, or `context`. Only a failure stored with an explicit negative valence becomes a hard constraint, so ordinary frustration in stored conversation never turns into a rule the agent has to obey.
 - **Automatic knowledge graph** — a hybrid GLiNER2 + LLM pipeline extracts entities and typed relations from everything you store, and resolves pronouns against the persisted graph — no manual schema.
 - **Three integration paths** — MCP server for Claude and other LLM clients, REST API, or an OpenAI-compatible proxy that adds memory to any existing app by changing one base URL.
 - **Multilingual** — 50+ languages end-to-end (multilingual embeddings, zero-shot NER, language-agnostic sentiment). No English-only heuristics anywhere.
-- **Personality-driven** — six presets (16 tunable hyperparameters) shape what each agent notices, retains, and forgets. The same history produces different memories in different agents.
+- **Personality-driven** — six presets (17 tunable hyperparameters) shape what each agent notices, retains, and forgets. The same history produces different memories in different agents.
 
 ## Install
 
@@ -105,7 +105,7 @@ smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow f
 
 > [Full pipeline diagram →](docs/pipeline.md)
 
-**`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a Bayesian truth value, attention weight, and valence score. Evidence is append-only; truth values update via PLN revision. Entities and relation edges are extracted automatically (the LLM is only called when GLiNER finds ≥2 entities, cutting LLM calls ~40–60%).
+**`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a Bayesian truth value, attention weight, and valence score. Leave `valence` unset and it is read from the text; pass one and the memory is filed as a deliberate report, which is what lets recall raise it to a behavioral constraint. A belief asserted at probability ≥ 0.95 is permanent: it keeps the confidence it was asserted with and is exempt from decay. Evidence is append-only; truth values update via PLN revision. Entities and relation edges are extracted automatically (the LLM is only called when GLiNER finds ≥2 entities, cutting LLM calls ~40–60%).
 
 **`recall()`** — Embeds the query → KNN seeds → 1-hop graph expansion → salience re-ranking:
 
@@ -113,9 +113,9 @@ smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow f
 S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w_val × |valence| × intensity
 ```
 
-When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`).
+When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. The valence terms read the tone an atom was written with, never the mood it absorbed from its neighbors during propagation. An episode that just restates the query loses its similarity term — the question is not the answer — and agent-authored atoms are scaled by `agent_source_trust`, so a model's own reply never outranks the user testimony it came from. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`); a critical warning takes a valence you set yourself, on an atom that can hold a proposition — never a bare concept.
 
-**`reflect()`** — Runs automatically every 60 s (`SMRTI_REFLECT_INTERVAL`). Merges pending evidence via PLN, decays attention and confidence, propagates both to neighbors, heals orphaned episodes, promotes high-STI atoms to long-term importance, resolves contradictions, and prunes low-salience atoms. The personality profile governs every weight and threshold. Every atom also carries provenance (`user` vs `agent`): model-authored content decays faster and gets a lower long-term-importance floor, so what you told the agent outlives what it inferred.
+**`reflect()`** — Runs automatically every 60 s (`SMRTI_REFLECT_INTERVAL`). Merges pending evidence via PLN, decays attention and confidence, propagates both to neighbors, heals orphaned episodes, promotes high-STI atoms to long-term importance, resolves contradictions, and prunes low-salience atoms. User-stated episodes and beliefs decay only as far as the surfacing floor — direct testimony never stops being recallable — while concepts, goals, and everything agent-authored keep fading. The personality profile governs every weight and threshold. Every atom also carries provenance (`user` vs `agent`): model-authored content decays faster and gets a lower long-term-importance floor, so what you told the agent outlives what it inferred.
 
 ## Server Modes
 
@@ -320,10 +320,10 @@ Six built-in presets control retrieval behavior, decay rates, and emotional dyna
 | `maverick`      | Slow decay, high propagation               | Independent, contrarian reasoning        |
 | `deterministic` | Fast learning, slow decay, laser focus     | Agentic workflows, code gen, deployments |
 
-Each preset tunes 16 hyperparameters. To create a custom personality, start from a preset and override individual values via the `personality` DB table or the `/personality` API endpoint.
+Each preset tunes 17 hyperparameters. To create a custom personality, start from a preset and override individual values via the `personality` DB table or the `/personality` API endpoint.
 
 <details>
-<summary><strong>Hyperparameter reference</strong> (16 parameters, defaults from the <code>balanced</code> preset)</summary>
+<summary><strong>Hyperparameter reference</strong> (17 parameters, defaults from the <code>balanced</code> preset)</summary>
 
 **Salience weights** — control how retrieval ranks results (should sum to ~1.0):
 
@@ -351,6 +351,13 @@ Each preset tunes 16 hyperparameters. To create a custom personality, start from
 | `sti_boost_on_access` | 0.5 | STI added each time an atom is recalled. Higher = stronger recency bias |
 | `sti_propagation_factor` | 0.15 | Fraction of STI boost propagated to linked atoms. Higher = broader activation |
 | `lti_promotion_threshold` | 0.7 | Cumulative STI required to increment LTI. Higher = harder to become permanent |
+| `lti_decay_rate` | 0.01 | Per-epoch LTI decay. Higher = long-term importance erodes faster |
+
+**Provenance** — weighs what the agent wrote against what the user said:
+
+| Parameter | Default | Effect |
+|-----------|---------|--------|
+| `agent_source_trust` | 0.5 | Standing of agent-authored atoms. Scales their salience at recall and accelerates their decay; lower = model output fades faster while user-stated facts persist |
 
 **Emotional dynamics** — shape how valence influences behavior:
 
@@ -416,12 +423,12 @@ graph TD
     Core & Retrieval & Evolution & Extraction & Spaces --> SQL
 ```
 
-**Retrieval pipeline:** Embed query → KNN over tenant partition → filter to read spaces → 1-hop graph expansion → salience scoring → top-k
+**Retrieval pipeline:** Embed query → KNN over tenant partition (entry pool scales with graph size) → filter to read spaces → 1-hop graph expansion, highest-standing endpoints first → salience scoring → top-k
 
 **Consolidation epoch** (runs automatically every `SMRTI_REFLECT_INTERVAL` seconds, or manually via `reflect()`):
 
 1. Process pending evidence via Bayesian update
-2. Decay STI and confidence
+2. Decay STI, LTI, and confidence (user-stated episodes and beliefs stop at the surfacing floor; permanent beliefs do not decay)
 3. Propagate STI and valence to 1-hop neighbors
 4. Heal orphaned episodes (link to most salient person)
 5. Promote high-STI atoms to LTI
@@ -444,7 +451,7 @@ Each atom carries:
 
 - **TruthValue** — `probability` [0,1] and `confidence` [0,1], merged via PLN revision
 - **AttentionValue** — `sti` (short-term importance, decays fast) and `lti` (long-term, accumulates)
-- **Valence** — emotional tone [-1,1] and intensity [0,1]
+- **Valence** — emotional tone [-1,1] and intensity [0,1], kept as two pairs: the tone the atom was written with, which everything judging the memory reads, and the current mood, which propagation moves toward its neighbors each epoch
 
 ## smrti-town
 

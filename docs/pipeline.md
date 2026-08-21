@@ -57,7 +57,7 @@ flowchart TD
     end
 
     subgraph CLASSIFY ["  ⑥ Classify  "]
-        CRITICAL["🚨 Critical Warning\nMust-not-repeat failures\nwith high confidence"]
+        CRITICAL["🚨 Critical Warning\nFailures the caller flagged\nas never to repeat"]
         ANTIPATTERN["⚠️ Known Antipattern\nLow-probability beliefs\nfirmly established"]
         CONTEXT_OUT["💡 Background Context\nRelevant facts &\ngoals for the response"]
     end

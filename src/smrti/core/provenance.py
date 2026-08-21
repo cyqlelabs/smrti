@@ -9,6 +9,14 @@ from __future__ import annotations
 SOURCE_USER = "user"
 SOURCE_AGENT = "agent"
 
+# Provenance of an atom's emotional tone: set when the caller stated the
+# valence rather than letting it be estimated from the text. Only a stated
+# valence can raise a memory to a behavioral constraint at recall. Sentiment
+# estimated over ordinary conversation is a reading of tone, not a report of a
+# mistake, and treating it as one turns "I didn't understand you" into
+# something the agent must never do again.
+VALENCE_STATED = "valence_stated"
+
 # SQL for "who authored this atom", defaulting to the user.
 #
 # json_extract raises "malformed JSON" rather than returning NULL when the

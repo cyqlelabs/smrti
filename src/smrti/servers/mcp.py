@@ -9,8 +9,7 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp import types
 
-from smrti import Smrti
-from smrti.extraction.sentiment import estimate_valence
+from smrti import Smrti, _write_metadata
 from smrti.personality.params import PersonalityProfile, load_preset
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
@@ -37,9 +36,12 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         content = args["content"]
         if mem.is_ignored(content):
             return {"status": "ignored", "atom_id": "", "space": mem.write_space}
+        # An absent valence is forwarded as None: the engine reads the tone
+        # from the text and records that nobody stated it. That distinction is
+        # what keeps stored conversation from minting behavioral constraints —
+        # an estimate is a reading of the speaker's mood, not a report of a
+        # mistake — so it is resolved in one place rather than here.
         valence = args.get("valence")
-        if valence is None:
-            valence = estimate_valence(content, mem.embed)
         atom_type = args.get("type", "episode")
         # Provenance and valence are read once and handed to both writers. The
         # belief branch used to drop them, so every belief in the graph read as
@@ -61,7 +63,7 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 type=atom_type,
                 probability=args.get("probability", 0.8),
                 valence=valence,
-                metadata={"source": "agent"} if source == "agent" else None,
+                metadata=_write_metadata(source, False) or None,
             )
         return {"status": "ok", "atom_id": atom_id, "space": mem.write_space}
 

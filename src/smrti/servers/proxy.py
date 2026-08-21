@@ -20,7 +20,6 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from smrti import Smrti
 from smrti.core.models import AtomType, RecallResult
-from smrti.extraction.sentiment import estimate_valence
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
 from smrti.servers.mcp import create_smrti
@@ -149,12 +148,15 @@ async def _remember(content: str, tenant_id: str, write_space: str, source: str 
     )
     if existing:
         return ""
-    valence = estimate_valence(content, mem.embed)
+    # Valence is left to the engine to read from the text. Passing an estimate
+    # in would record it as a tone the caller stated, and a proxied
+    # conversation has no caller saying anything about tone — which is how an
+    # exasperated turn used to come back as a constraint the agent must obey.
     meta = {"source": source} if source != "user" else {}
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: mem.remember(content, type="episode", probability=0.75, valence=valence, metadata=meta),
+        lambda: mem.remember(content, type="episode", probability=0.75, metadata=meta),
     )
 
 

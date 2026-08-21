@@ -7,6 +7,7 @@ import httpx
 import pytest
 from starlette.requests import Request as StarletteRequest
 
+from smrti.core.provenance import VALENCE_STATED
 from smrti.core.models import (
     Atom,
     AtomType,
@@ -37,6 +38,9 @@ def _mem_recall_result(content, confidence=0.8, valence=0.0, intensity=0.0, prob
         truth=TruthValue(probability=probability, confidence=confidence),
         attention=AttentionValue(sti=0.5, lti=0.3),
         valence=Valence(valence=valence, intensity=intensity),
+        # A valence handed in here stands for one the caller stated; only that
+        # kind reaches critical_warning.
+        metadata={VALENCE_STATED: True} if valence else {},
     )
     return RecallResult(atom=atom, salience=0.5, similarity=0.7)
 

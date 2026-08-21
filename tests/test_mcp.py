@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from smrti import Smrti
+from smrti.core.provenance import VALENCE_STATED
 from smrti.servers.mcp import handle_tool
 
 
@@ -47,17 +48,27 @@ def test_remember_ignored_content(mem):
 
 
 def test_remember_explicit_zero_valence_skips_sentiment_estimate(mem):
-    """Explicit neutral valence (0.0) is respected — only absence triggers estimation."""
-    with patch("smrti.servers.mcp.estimate_valence", return_value=0.3) as mock_est:
+    """Explicit neutral valence (0.0) is respected — only absence triggers estimation.
+
+    Estimation lives on the engine now, so the patch targets it there; the
+    server forwards the caller's value, or None, without reading it.
+    """
+    with patch("smrti.estimate_valence", return_value=0.3) as mock_est:
         result = handle_tool(mem, "smrti_remember", {"content": "test", "valence": 0.0})
     mock_est.assert_not_called()
     assert result["status"] == "ok"
+    assert VALENCE_STATED in _metadata(mem, result["atom_id"])
 
 
 def test_remember_none_valence_triggers_sentiment_estimate(mem):
-    with patch("smrti.servers.mcp.estimate_valence", return_value=-0.2) as mock_est:
+    with patch("smrti.estimate_valence", return_value=-0.2) as mock_est:
         result = handle_tool(mem, "smrti_remember", {"content": "test"})
     mock_est.assert_called_once()
+    assert VALENCE_STATED not in _metadata(mem, result["atom_id"])
+
+
+def _metadata(mem, atom_id):
+    return mem.db.fetchone("SELECT metadata FROM atoms WHERE id = ?", (atom_id,))["metadata"]
 
 
 # ── smrti_recall ──────────────────────────────────────────────────────────────

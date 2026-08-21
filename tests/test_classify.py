@@ -9,16 +9,23 @@ from smrti.core.models import (
     TruthValue,
     Valence,
 )
+from smrti.core.provenance import VALENCE_STATED
 from smrti.retrieval.classify import classify_memory
 
 
-def _make_result(valence=-0.8, intensity=0.9, probability=0.8, confidence=0.5):
+def _make_result(valence=-0.8, intensity=0.9, probability=0.8, confidence=0.5, stated=True):
+    """Defaults to a stated valence — a caller reporting something to avoid.
+
+    An estimated one is only a reading of the text's mood and cannot reach
+    critical_warning; tests/test_severity_gate.py covers that side.
+    """
     atom = Atom(
         type=AtomType.EPISODE,
         label="test",
         truth=TruthValue(probability=probability, confidence=confidence),
         attention=AttentionValue(sti=0.5, lti=0.3),
         valence=Valence(valence=valence, intensity=intensity),
+        metadata={VALENCE_STATED: True} if stated else {},
     )
     return RecallResult(atom=atom, salience=0.5, similarity=0.7)
 

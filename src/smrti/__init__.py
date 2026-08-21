@@ -27,6 +27,8 @@ from smrti.core.models import (
     Valence,
     atom_from_row,
 )
+from smrti.core.provenance import SOURCE_AGENT, VALENCE_STATED
+from smrti.extraction.sentiment import estimate_valence
 from smrti.extraction.resolve import EntityResolver
 from smrti.retrieval.fan_out import retrieve
 from smrti.evolution.epoch import run_epoch
@@ -53,6 +55,21 @@ def _get_reflect_lock(tenant_id: str, space: str) -> threading.Lock:
         if lock is None:
             lock = _reflect_locks[key] = threading.Lock()
     return lock
+
+
+def _write_metadata(source: str, valence_stated: bool) -> dict:
+    """Atom metadata for a caller-issued write.
+
+    Only what is true is recorded: an absent source reads as the user, and an
+    absent valence flag as estimated, so the common write stays an empty
+    object exactly as earlier releases stored it.
+    """
+    metadata = {}
+    if source == SOURCE_AGENT:
+        metadata["source"] = SOURCE_AGENT
+    if valence_stated:
+        metadata[VALENCE_STATED] = True
+    return metadata
 
 
 class Smrti:
@@ -146,11 +163,12 @@ class Smrti:
         content: str,
         type: str = "episode",
         probability: float = 0.8,
-        valence: float = 0.0,
+        valence: float | None = None,
         metadata: dict | None = None,
     ) -> str:
         if self.is_ignored(content):
             return ""
+        valence, stated = self._resolve_valence(content, valence)
         atom = Atom(
             type=AtomType(type),
             label=content[:100],
@@ -159,9 +177,21 @@ class Smrti:
             valence=Valence(valence=valence, intensity=abs(valence)),
             tenant_id=self.tenant_id,
             space=self.write_space,
-            metadata=metadata or {},
+            metadata={**_write_metadata("", stated), **(metadata or {})},
         )
         return self.atomspace.add_atom(atom)
+
+    def _resolve_valence(self, content: str, valence: float | None) -> tuple[float, bool]:
+        """Return the atom's tone and whether the caller was the one who set it.
+
+        Estimation lives here rather than in each caller so the answer to "did
+        someone report this, or did a model read the mood of the words?" is
+        decided once. Only the first can become a behavioral constraint at
+        recall, and a caller that had to remember to say so would forget.
+        """
+        if valence is None:
+            return estimate_valence(content, self.embed), False
+        return valence, True
 
     def recall(
         self,
@@ -187,7 +217,7 @@ class Smrti:
         statement: str,
         probability: float,
         evidence: str = None,
-        valence: float = 0.0,
+        valence: float | None = None,
         source: str = "user",
     ) -> str:
         # A permanent assertion is born certain. Starting it at the ordinary
@@ -195,6 +225,7 @@ class Smrti:
         # conversational froth stored beside it, which reads to the caller as
         # never having stored it at all.
         confidence = probability if probability >= PERMANENT_PROBABILITY else 0.3
+        valence, stated = self._resolve_valence(statement, valence)
         atom = Atom(
             type=AtomType.BELIEF,
             label=statement[:100],
@@ -203,7 +234,7 @@ class Smrti:
             valence=Valence(valence=valence, intensity=abs(valence)),
             tenant_id=self.tenant_id,
             space=self.write_space,
-            metadata={"source": "agent"} if source == "agent" else {},
+            metadata=_write_metadata(source, stated),
         )
         atom_id = self.atomspace.add_atom(atom)
         if evidence:

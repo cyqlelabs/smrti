@@ -32,3 +32,9 @@ ATOM_SOURCE = (
 # The same column as a writable JSON object: json_set also raises on malformed
 # input, so unreadable metadata is replaced rather than appended to.
 ATOM_METADATA_JSON = "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END"
+
+# An atom's own tone read back from SQL, falling back to the current value for
+# rows written before the columns existed. Only propagation reads the drifting
+# pair; everything that judges a memory reads these.
+ATOM_OWN_VALENCE = "COALESCE(intrinsic_valence, valence)"
+ATOM_OWN_INTENSITY = "COALESCE(intrinsic_intensity, intensity)"

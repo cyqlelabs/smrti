@@ -20,13 +20,14 @@ def classify_memory(r: RecallResult) -> str:
     that sets the valence deliberately is making exactly that report.
 
     And the memory must be able to hold a proposition. Concepts are index
-    nodes: a bare label carries nothing to avoid doing again, and valence
-    propagates into them from every neighbour that mentions them, so a word
-    like "gateway" accumulates the mood of every complaint it appeared in.
+    nodes: a bare label carries nothing to avoid doing again.
+
+    The tone read here is the atom's own, never the mood it absorbed from its
+    neighbours — see :class:`smrti.core.models.Valence`.
     """
     atom = r.atom
-    v = atom.valence.valence
-    i = atom.valence.intensity
+    v = atom.valence.own
+    i = atom.valence.own_intensity
     p = atom.truth.probability
     c = atom.truth.confidence
     stated = atom.metadata.get(VALENCE_STATED) is True

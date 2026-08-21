@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from smrti.core.models import PERMANENT_PROBABILITY, EpochResult, TruthValue
-from smrti.core.provenance import ATOM_METADATA_JSON, ATOM_SOURCE
+from smrti.core.provenance import (
+    ATOM_METADATA_JSON,
+    ATOM_OWN_INTENSITY,
+    ATOM_OWN_VALENCE,
+    ATOM_SOURCE,
+)
 from smrti.evolution.attention import propagate_sti
 from smrti.evolution.connections import discover_connections
 from smrti.evolution.healing import heal_orphaned_episodes
@@ -191,7 +196,8 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     decay_sql = f"""UPDATE atoms SET
                sti        = sti        * (1.0 - ?),
                lti        = MAX(lti * (1.0 - ?),
-                                CASE WHEN valence < -0.7 AND intensity > 0.7 THEN ?
+                                CASE WHEN {ATOM_OWN_VALENCE} < -0.7
+                                          AND {ATOM_OWN_INTENSITY} > 0.7 THEN ?
                                      WHEN lti >= ? THEN ?
                                      ELSE 0.0 END),
                confidence = MAX(CASE WHEN type = 'belief' AND probability >= ?

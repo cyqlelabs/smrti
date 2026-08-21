@@ -69,8 +69,38 @@ class AttentionValue(BaseModel):
 
 
 class Valence(BaseModel):
+    """An atom's emotional tone, in two versions.
+
+    ``valence``/``intensity`` are the current mood: propagation moves them
+    toward whatever the atom's neighbours feel, every epoch, without bound. On
+    a graph a few thousand epochs old that drifts a quarter of the scale from
+    what the memory itself says, and a concept ends up carrying the mood of
+    every complaint that ever mentioned it.
+
+    ``intrinsic_*`` is the pair as written, which propagation never touches.
+    Anything judging the memory — how severe it is, how salient, whether to
+    protect it from pruning — reads that one through :attr:`own`. Atoms stored
+    before these columns existed hold None and read as their current values, so
+    nothing is invented for a graph that predates the split.
+    """
+
     valence: float = Field(0.0, ge=-1.0, le=1.0)
     intensity: float = Field(0.0, ge=0.0, le=1.0)
+    intrinsic_valence: float | None = Field(None, ge=-1.0, le=1.0)
+    intrinsic_intensity: float | None = Field(None, ge=0.0, le=1.0)
+
+    @property
+    def own(self) -> float:
+        """The tone the atom was written with, ignoring absorbed mood."""
+        return self.valence if self.intrinsic_valence is None else self.intrinsic_valence
+
+    @property
+    def own_intensity(self) -> float:
+        return (
+            self.intensity
+            if self.intrinsic_intensity is None
+            else self.intrinsic_intensity
+        )
 
 
 class Atom(BaseModel):
@@ -181,6 +211,14 @@ def atom_from_row(row) -> Atom:
         valence=Valence(
             valence=_clamp(d.get("valence"), -1.0, 1.0),
             intensity=_clamp(d.get("intensity"), 0.0, 1.0),
+            intrinsic_valence=(
+                None if d.get("intrinsic_valence") is None
+                else _clamp(d.get("intrinsic_valence"), -1.0, 1.0)
+            ),
+            intrinsic_intensity=(
+                None if d.get("intrinsic_intensity") is None
+                else _clamp(d.get("intrinsic_intensity"), 0.0, 1.0)
+            ),
         ),
         entity_type=_safe_entity_type(d.get("entity_type")),
         source_id=d.get("source_id"),

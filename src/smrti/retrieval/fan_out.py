@@ -5,6 +5,7 @@ import re
 import struct
 
 from smrti.core.models import AtomType, RecallResult, atom_from_row
+from smrti.core.provenance import ATOM_OWN_INTENSITY, ATOM_OWN_VALENCE
 from smrti.retrieval.salience import compute_salience
 
 # The KNN entry pool scales with the graph. A fixed pool lets conversational
@@ -201,7 +202,8 @@ def retrieve(
               AND tenant_id = ?
               AND space IN ({spaces_ph})
               AND type IN ('concept', 'belief', 'episode', 'goal')
-              AND (confidence >= ? OR (valence < -0.5 AND intensity > 0.5))""",
+              AND (confidence >= ?
+                   OR ({ATOM_OWN_VALENCE} < -0.5 AND {ATOM_OWN_INTENSITY} > 0.5))""",
         (*exp_list, tenant_id, *read_spaces, min_confidence),
     )
 
@@ -234,8 +236,8 @@ def retrieve(
             sti=atom.attention.sti,
             confidence=atom.truth.confidence,
             lti=atom.attention.lti,
-            valence=atom.valence.valence,
-            intensity=atom.valence.intensity,
+            valence=atom.valence.own,
+            intensity=atom.valence.own_intensity,
             w_similarity=w_similarity,
             w_sti=w_sti,
             w_confidence=w_confidence,

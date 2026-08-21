@@ -81,6 +81,8 @@ CREATE TABLE IF NOT EXISTS atoms (
     lti         REAL DEFAULT 0.0,
     valence     REAL DEFAULT 0.0,
     intensity   REAL DEFAULT 0.0,
+    intrinsic_valence   REAL,
+    intrinsic_intensity REAL,
     source_id   TEXT REFERENCES atoms(id),
     target_id   TEXT REFERENCES atoms(id),
     relation    TEXT,
@@ -195,6 +197,7 @@ class Database:
             self._migrate_vec_atoms()
             self._migrate_content_hash()
             self._migrate_personality_columns()
+            self._migrate_intrinsic_valence()
             self._repair_permanent_confidence()
             for statement in _SCHEMA_SQL.strip().split(";"):
                 stmt = statement.strip()
@@ -230,6 +233,40 @@ class Database:
                     for r in rows
                 ],
             )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    def _migrate_intrinsic_valence(self) -> None:
+        """Add the columns holding an atom's tone as written.
+
+        Deliberately not backfilled. Propagation has already moved the stored
+        valence away from what each old atom said, and nothing recovers the
+        original: re-estimating it from the text would overwrite the handful
+        that a caller stated on purpose, and copying the current value would
+        just relabel the drift as intrinsic. NULL reads as "use what is there",
+        so an existing graph behaves exactly as before and only new atoms carry
+        the clean signal.
+        """
+        conn = self._write_conn
+        if (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'atoms'"
+            ).fetchone()
+            is None
+        ):
+            return
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(atoms)")}
+        missing = [c for c in ("intrinsic_valence", "intrinsic_intensity") if c not in cols]
+        if not missing:
+            return
+        self._backup_before_migration()
+        try:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            for column in missing:
+                conn.execute(f"ALTER TABLE atoms ADD COLUMN {column} REAL")
             conn.commit()
         except Exception:
             conn.rollback()

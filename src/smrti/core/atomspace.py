@@ -45,12 +45,14 @@ class AtomSpace:
                 INSERT OR REPLACE INTO atoms (
                     id, type, label, content, probability, confidence,
                     sti, lti, valence, intensity,
+                    intrinsic_valence, intrinsic_intensity,
                     source_id, target_id, relation,
                     tenant_id, space, metadata, entity_type, content_hash,
                     created_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
+                    ?, ?,
                     ?, ?, ?,
                     ?, ?, ?, ?, ?,
                     COALESCE(
@@ -71,6 +73,9 @@ class AtomSpace:
                     atom.attention.lti,
                     atom.valence.valence,
                     atom.valence.intensity,
+                    # What the atom itself says, kept out of propagation's reach.
+                    atom.valence.own,
+                    atom.valence.own_intensity,
                     atom.source_id,
                     atom.target_id,
                     atom.relation,
@@ -143,6 +148,7 @@ class AtomSpace:
                     probability = ?, confidence = ?,
                     sti = ?, lti = ?,
                     valence = ?, intensity = ?,
+                    intrinsic_valence = ?, intrinsic_intensity = ?,
                     source_id = ?, target_id = ?, relation = ?,
                     metadata = ?, entity_type = ?,
                     updated_at = datetime('now')
@@ -158,6 +164,8 @@ class AtomSpace:
                     atom.attention.lti,
                     atom.valence.valence,
                     atom.valence.intensity,
+                    atom.valence.own,
+                    atom.valence.own_intensity,
                     atom.source_id,
                     atom.target_id,
                     atom.relation,

@@ -335,3 +335,134 @@ def test_extraction_uses_the_requested_space_instance(client):
 
     assert resp.status_code == 200
     assert captured["mem"].write_space == "work"
+
+
+# ── /space_query and /space_merge ────────────────────────────────────────────
+#
+# These pin the route layer this module owns — body validation, the
+# self-compare guard, and dispatch to the right handler on the right instance.
+# The set-theory itself is covered against a real graph in test_space_set_ops
+# and is stubbed here on purpose: an embedding model is a large download, and
+# a route test that needs one stops being runnable offline.
+
+
+class _FakeMem:
+    def __init__(self, write_space):
+        self.write_space = write_space
+
+
+@pytest.fixture()
+def space_client(tmp_path, monkeypatch, rest_mod):
+    """A client whose get_mem/handle_tool are stubs, recording what was called."""
+    _configure(tmp_path, monkeypatch, rest_mod)
+    calls = []
+
+    def _fake_get_mem(space=None):
+        return _FakeMem(space or "main")
+
+    def _fake_handle_tool(mem, name, args):
+        calls.append({"space": mem.write_space, "tool": name, "args": args})
+        return {"status": "ok", "tool": name}
+
+    monkeypatch.setattr(rest_mod, "get_mem", _fake_get_mem)
+    monkeypatch.setattr(rest_mod, "handle_tool", _fake_handle_tool)
+    with patch("smrti.servers.rest.run_reflect_loop", new=_noop_reflect):
+        with TestClient(rest_mod.app, raise_server_exceptions=True) as c:
+            c.calls = calls
+            yield c
+    _reset(rest_mod)
+
+
+@pytest.mark.parametrize("op", ["overlap", "intersection", "diff"])
+def test_space_query_dispatches_each_op(space_client, op):
+    resp = space_client.post("/space_query", json={"op": op, "other_space": "work"})
+    assert resp.status_code == 200
+    call = space_client.calls[-1]
+    assert call["tool"] == "smrti_space_query"
+    assert call["args"]["op"] == op
+    assert call["args"]["other_space"] == "work"
+    # The default threshold travels even when the caller omits it.
+    assert call["args"]["threshold"] == 0.85
+
+
+def test_space_query_routes_to_the_requested_space(space_client):
+    resp = space_client.post(
+        "/space_query", json={"op": "overlap", "other_space": "main", "space": "work"}
+    )
+    assert resp.status_code == 200
+    assert space_client.calls[-1]["space"] == "work"
+
+
+def test_space_query_rejects_unknown_op(space_client):
+    resp = space_client.post("/space_query", json={"op": "sideways", "other_space": "work"})
+    assert resp.status_code == 422
+    assert not space_client.calls
+
+
+def test_space_query_rejects_out_of_range_threshold(space_client):
+    resp = space_client.post(
+        "/space_query", json={"op": "overlap", "other_space": "work", "threshold": 1.5}
+    )
+    assert resp.status_code == 422
+    assert not space_client.calls
+
+
+def test_space_query_refuses_a_self_compare(space_client):
+    resp = space_client.post("/space_query", json={"op": "overlap", "other_space": "main"})
+    assert resp.status_code == 400
+    assert "main" in resp.json()["detail"]
+    assert not space_client.calls
+
+
+def test_self_compare_is_judged_against_the_routed_space(space_client):
+    """`work` vs `main` is legal from main and refused from work."""
+    assert space_client.post(
+        "/space_query", json={"op": "overlap", "other_space": "main", "space": "work"}
+    ).status_code == 200
+    assert space_client.post(
+        "/space_query", json={"op": "overlap", "other_space": "work", "space": "work"}
+    ).status_code == 400
+
+
+def test_space_merge_dispatches(space_client):
+    resp = space_client.post(
+        "/space_merge", json={"other_space": "work", "threshold": 0.5, "min_jaccard": 0.2}
+    )
+    assert resp.status_code == 200
+    call = space_client.calls[-1]
+    assert call["tool"] == "smrti_space_merge"
+    assert call["args"] == {
+        "other_space": "work", "threshold": 0.5, "min_jaccard": 0.2, "space": None,
+    }
+
+
+def test_space_merge_defaults(space_client):
+    space_client.post("/space_merge", json={"other_space": "work"})
+    args = space_client.calls[-1]["args"]
+    assert args["threshold"] == 0.85
+    assert args["min_jaccard"] == 0.1
+
+
+def test_space_merge_refuses_a_self_compare(space_client):
+    resp = space_client.post("/space_merge", json={"other_space": "main"})
+    assert resp.status_code == 400
+    assert not space_client.calls
+
+
+def test_space_merge_rejects_out_of_range_min_jaccard(space_client):
+    resp = space_client.post("/space_merge", json={"other_space": "work", "min_jaccard": 2.0})
+    assert resp.status_code == 422
+    assert not space_client.calls
+
+
+def test_space_name_length_is_capped(space_client):
+    resp = space_client.post(
+        "/space_query",
+        json={"op": "overlap", "other_space": "x" * (rest_mod_space_max() + 1)},
+    )
+    assert resp.status_code == 422
+
+
+def rest_mod_space_max():
+    from smrti.servers.rest import SPACE_MAX_LEN
+    return SPACE_MAX_LEN

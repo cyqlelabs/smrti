@@ -177,7 +177,18 @@ curl -X POST http://localhost:8420/reflect
 
 # Get status
 curl http://localhost:8420/status
+
+# Compare two spaces (op = overlap | intersection | diff)
+curl -X POST http://localhost:8420/space_query \
+  -d '{"op": "overlap", "other_space": "personal"}'
+
+# Grow a bridge space from what two spaces share
+curl -X POST http://localhost:8420/space_merge \
+  -d '{"other_space": "personal", "min_jaccard": 0.1}'
 ```
+
+Every endpoint takes an optional `space` to route the call; `/space_query` and
+`/space_merge` compare that space with `other_space` and refuse a self-compare.
 
 ### OpenAI-Compatible Proxy
 
@@ -305,7 +316,7 @@ Each space consolidates independently. The researcher forgets fast; the deployer
 
 Things people build with this: agent teams with private working memory and shared project context, multi-agent simulations where each agent remembers the same event differently, and role-based perspectives for the same user across contexts.
 
-Spaces also support set-theory operations — overlap, intersection, difference, union, symmetric difference — and can materialize **bridge spaces** from the overlap between two spaces (see the `space_query` and `space_merge` tools).
+Spaces also support set-theory operations — overlap, intersection, difference, union, symmetric difference — and can materialize **bridge spaces** from the overlap between two spaces. Reachable as the `space_query` and `space_merge` MCP tools and as the `POST /space_query` and `POST /space_merge` REST endpoints.
 
 ## Personality System
 

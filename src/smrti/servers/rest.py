@@ -6,7 +6,7 @@ from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 
-from fastapi import FastAPI, Query, Request
+from fastapi import FastAPI, HTTPException, Query, Request
 from pydantic import BaseModel, Field, field_validator
 
 from smrti import Smrti
@@ -87,6 +87,24 @@ async def _run_sync(fn, *args):
     return await loop.run_in_executor(None, fn, *args)
 
 
+def _other_space_mem(space: Optional[str], other_space: str) -> Smrti:
+    """Resolve the instance for a two-space operation, refusing a self-compare.
+
+    Both operations are defined between *different* spaces. Against itself
+    overlap is the trivial 1.0 — bought with a 500-atom scan and an embedding
+    pass per atom — and a merge is worse than useless: it would materialize a
+    ``x_x_x`` bridge of every atom paired with itself, permanently, in a space
+    nothing else writes. Refusing costs the caller one 400 and no graph.
+    """
+    mem = get_mem(space)
+    if other_space == mem.write_space:
+        raise HTTPException(
+            status_code=400,
+            detail=f"other_space must differ from the write space ({mem.write_space})",
+        )
+    return mem
+
+
 app.include_router(create_viz_router(lambda t, s: get_mem()))
 
 
@@ -159,6 +177,27 @@ class PersonalityRequest(BaseModel):
     space: Optional[SpaceName] = None
 
 
+class SpaceQueryRequest(BaseModel):
+    op: str  # "overlap", "intersection", "diff"
+    other_space: SpaceName
+    threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    space: Optional[SpaceName] = None
+
+    @field_validator("op")
+    @classmethod
+    def _known_op(cls, v: str) -> str:
+        if v not in ("overlap", "intersection", "diff"):
+            raise ValueError("op must be 'overlap', 'intersection', or 'diff'")
+        return v
+
+
+class SpaceMergeRequest(BaseModel):
+    other_space: SpaceName
+    threshold: float = Field(default=0.85, ge=0.0, le=1.0)
+    min_jaccard: float = Field(default=0.1, ge=0.0, le=1.0)
+    space: Optional[SpaceName] = None
+
+
 @app.post("/remember")
 async def remember(req: RememberRequest, request: Request):
     mem = get_mem(req.space)
@@ -207,6 +246,20 @@ async def get_personality(space: Optional[SpaceName] = Query(None)):
 @app.put("/personality")
 async def set_personality(req: PersonalityRequest):
     return await _run_sync(handle_tool, get_mem(req.space), "smrti_personality", req.model_dump())
+
+
+@app.post("/space_query")
+async def space_query(req: SpaceQueryRequest):
+    """Compare two spaces: op=overlap (Jaccard), op=intersection, op=diff."""
+    mem = _other_space_mem(req.space, req.other_space)
+    return await _run_sync(handle_tool, mem, "smrti_space_query", req.model_dump())
+
+
+@app.post("/space_merge")
+async def space_merge(req: SpaceMergeRequest):
+    """Materialize a bridge space from the overlap between two spaces."""
+    mem = _other_space_mem(req.space, req.other_space)
+    return await _run_sync(handle_tool, mem, "smrti_space_merge", req.model_dump())
 
 
 @app.delete("/spaces/current")

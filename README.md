@@ -53,7 +53,7 @@ docker run -d -p 8421:8421 -v smrti-data:/data \
   ghcr.io/cyqlelabs/smrti serve proxy --host 0.0.0.0 --port 8421
 ```
 
-- **Tags** — `latest`, `0.9`, `0.9.0`, published on every `v*` tag.
+- **Tags** — every `v*` release publishes `latest`, the exact version, and a rolling `MAJOR.MINOR`; pin whichever you want to track.
 - **Storage** — `/data` holds the database and the NER weights that download on first extraction; mount a volume or both die with the container.
 - **User** — runs as non-root `smrti`.
 
@@ -95,7 +95,7 @@ smrti serve mcp     # MCP stdio server (Claude, etc.)
 smrti serve rest    # REST API on :8420
 smrti serve viz     # REST API + memory visualizer in the browser
 smrti serve proxy   # OpenAI-compatible proxy on :8421
-smrti serve town    # city-builder simulation demo on :8430
+smrti serve town    # city-builder simulation demo on :8430 (needs a repo checkout)
 
 smrti stop          # gracefully stop all servers started by `smrti serve`
 smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow further
@@ -246,6 +246,7 @@ All server modes read the same environment variables. Everything works with zero
 | `SMRTI_SPACE`            | `default`            | Write space                                        |
 | `SMRTI_READ_SPACES`      | write space          | Comma-separated spaces to read from                |
 | `SMRTI_REFLECT_INTERVAL` | `60`                 | Auto-consolidation interval in seconds (0 = off)   |
+| `SMRTI_RUN_DIR`          | `~/.smrti/run`       | Where `smrti serve` writes PID files so `smrti stop` can find its servers |
 | `SMRTI_IGNORE_PATTERNS`  | —                    | Newline-separated regexes; matching content is dropped before storage (see below) |
 
 **Security (REST / proxy / viz):**
@@ -471,6 +472,8 @@ A living demo: [smrti-town](src/smrti_town/README.md) is a city-builder where ev
 ```bash
 smrti serve town   # simulation + frontend on :8430
 ```
+
+The published package ships `smrti` only, so this one command needs the repo: clone it and `pip install -e .`.
 
 ## Testing
 

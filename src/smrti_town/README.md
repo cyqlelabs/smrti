@@ -147,7 +147,7 @@ GET  /settings                    Current LLM settings
 POST /settings                    Update LLM settings
 ```
 
-WebSocket at `/ws` — streams `tick`, `state`, `phase`, `council_meeting`, `council_result`, `council_counter`, `petition_update`, `building_placed`, `immigration`, `event`, `game_over`, `dialogue_patch`, `paused`, `resumed`, and `reset` messages.
+WebSocket at `/ws` — streams `tick`, `state`, `phase`, `council_meeting`, `council_result`, `council_counter`, `petition_update`, `building_placed`, `immigration`, `event`, `game_over`, `dialogue_patch`, `paused`, `resumed`, `reset`, and `pong` messages.
 
 ---
 
@@ -161,7 +161,7 @@ Space_Culture        town-wide shared values, read by every citizen
 
 Every citizen reads from their own space plus `World_Space` and `Space_Culture`, and writes only to their own.
 
-Lifecycle (aging, reproduction, relationship tiers with personality inheritance), per-place memory spaces, and bridge-space culture promotion are implemented in `lifecycle.py`, `spatial.py`, and `culture.py` but not yet wired into the tick loop — [DESIGN.md](DESIGN.md) describes the full game these build toward.
+`spatial.py` is wired — it builds the topology every citizen navigates. Only `Place.space_name` is unused: each place is meant to own a `Place_Space_{name}` memory space, and nothing reads one yet. Lifecycle (aging, reproduction, relationship tiers with personality inheritance) and bridge-space culture promotion are implemented in `lifecycle.py` and `culture.py` but not yet wired into the tick loop — [DESIGN.md](DESIGN.md) describes the full game these build toward.
 
 ---
 

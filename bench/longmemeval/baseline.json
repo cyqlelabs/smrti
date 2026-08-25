@@ -1,9 +1,9 @@
 {
-  "config_hash": null,
-  "recorded_at": null,
-  "questions": 0,
-  "scored_questions": 0,
-  "retrieval_hit_rate": null,
-  "evidence_recall": null,
-  "session_hit_rate": null
+  "config_hash": "5b88c3be349eed09",
+  "recorded_at": "2026-08-26T17:27:31+00:00",
+  "questions": 40,
+  "scored_questions": 40,
+  "retrieval_hit_rate": 0.55,
+  "evidence_recall": 0.41291666666666665,
+  "session_hit_rate": 0.95
 }

@@ -2,14 +2,41 @@
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import os
 import signal
 import time
 from pathlib import Path
-from typing import Iterator, Optional
+from typing import IO, Iterator, Optional
 
 import typer
+
+# The pidfile lock rides whichever advisory-lock primitive this OS has: flock
+# where it exists, msvcrt region locks on Windows — importing fcntl at module
+# level made every smrti command a Unix-only program. Windows region locks are
+# mandatory, so the locked byte sits far past any pid text: `stop` reads the
+# pid of a live, still-locked server, and a lock over those bytes would turn
+# that read into a permission error instead of an answer.
+if os.name == "nt":
+    import msvcrt
+
+    _LOCK_OFFSET = 4096
+
+    def _try_lock(handle: IO[str]) -> None:
+        handle.seek(_LOCK_OFFSET)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+
+    def _unlock(handle: IO[str]) -> None:
+        handle.seek(_LOCK_OFFSET)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+else:
+    import fcntl
+
+    def _try_lock(handle: IO[str]) -> None:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def _unlock(handle: IO[str]) -> None:
+        fcntl.flock(handle, fcntl.LOCK_UN)
 
 app = typer.Typer(help="Smrti memory engine CLI")
 
@@ -33,7 +60,7 @@ def _pidfile(mode: str, port: int) -> Iterator[None]:
     path = _RUN_DIR / f"{mode}-{port}.pid"
     handle = path.open("a+")
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _try_lock(handle)
     except OSError:
         handle.close()
         raise typer.BadParameter(f"a {mode} server is already running on port {port}")
@@ -44,8 +71,14 @@ def _pidfile(mode: str, port: int) -> Iterator[None]:
     try:
         yield
     finally:
-        path.unlink(missing_ok=True)
-        handle.close()
+        if os.name == "nt":
+            # Windows refuses to delete an open file, so the handle goes
+            # first; closing it is also what releases the region lock.
+            handle.close()
+            path.unlink(missing_ok=True)
+        else:
+            path.unlink(missing_ok=True)
+            handle.close()
 
 
 def _held(path: Path) -> bool:
@@ -55,11 +88,11 @@ def _held(path: Path) -> bool:
     except OSError:
         return False
     try:
-        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _try_lock(handle)
     except OSError:
         return True
     else:
-        fcntl.flock(handle, fcntl.LOCK_UN)
+        _unlock(handle)
         return False
     finally:
         handle.close()
@@ -171,7 +204,9 @@ def stop(
             time.sleep(0.1)
 
         if _held(path):
-            _signal(pid, signal.SIGKILL)
+            # Windows has no SIGKILL; os.kill with any non-console signal is
+            # TerminateProcess there, so SIGTERM already hits as hard.
+            _signal(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
             typer.secho(f"{path.stem}: killed (pid {pid})", fg=typer.colors.YELLOW)
         else:
             typer.echo(f"{path.stem}: stopped (pid {pid})")

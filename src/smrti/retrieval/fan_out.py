@@ -1,12 +1,12 @@
 """Salience-scored fan-out retrieval."""
 from __future__ import annotations
 
-import re
 import struct
 
 from smrti.core.models import AtomType, RecallResult, atom_from_row
 from smrti.core.provenance import ATOM_OWN_INTENSITY, ATOM_OWN_VALENCE
 from smrti.retrieval.salience import compute_salience
+from smrti.retrieval.text import containment, word_set, words
 
 # The KNN entry pool scales with the graph. A fixed pool lets conversational
 # froth crowd the gate long before the graph is large: a fact ranked just past
@@ -36,14 +36,62 @@ _ECHO_MIN_SIMILARITY = 0.5
 # one edge that leads somewhere worth recalling.
 _EXPANSION_EDGES = 100
 
+# Reciprocal Rank Fusion constant. Vector distance and BM25 are not on a
+# common scale and no normalization between them is stable across graphs, so
+# the two lists are fused on rank alone: an atom scores 1/(k + rank) in each
+# list it appears in, and the sums decide the entry pool. k=60 is the value
+# the original RRF paper settled on; it is large enough that the top of one
+# list cannot swamp the whole of the other, so an atom both halves rank
+# moderately well beats one that only a single half loves.
+_RRF_K = 60
+
+# Cap on how many query terms reach the lexical index. A pasted stack trace is
+# still a query, and every term is a separate posting-list walk.
+_FTS_MAX_TERMS = 32
+
 
 def _blob_to_vec(blob) -> list[float]:
     n = len(blob) // 4
     return list(struct.unpack(f"{n}f", blob))
 
 
-def _tokens(text: str) -> set[str]:
-    return set(re.findall(r"\w+", text.casefold()))
+def _term_list(text: str) -> list[str]:
+    """Query terms in order of first appearance, deduplicated.
+
+    Same tokenization as the echo test, but ordered: an FTS5 query string has
+    to be built the same way every time or the same question returns different
+    candidate pools on different runs.
+    """
+    seen: dict[str, None] = {}
+    for token in words(text):
+        seen.setdefault(token, None)
+    return list(seen)[:_FTS_MAX_TERMS]
+
+
+def _fts_query(terms: list[str]) -> str:
+    """An FTS5 MATCH expression that ORs the query's terms.
+
+    Every term is double-quoted, which in FTS5 makes it a literal string
+    rather than syntax — a query containing ``NEAR``, ``OR`` or ``*`` is then
+    searched for, not obeyed. Terms are ORed rather than ANDed because recall
+    wants candidates: BM25 already ranks the atom carrying more of them first.
+    """
+    return " OR ".join('"' + term.replace('"', '""') + '"' for term in terms)
+
+
+def _rrf_fuse(ranked_lists: list[list[str]], limit: int) -> list[str]:
+    """Reciprocal Rank Fusion over several ranked id lists.
+
+    Ties break on the id so the same graph and the same query always produce
+    the same pool — retrieval that reshuffles under equal evidence is
+    untestable and, on a benchmark, unmeasurable.
+    """
+    scores: dict[str, float] = {}
+    for ranked in ranked_lists:
+        for rank, atom_id in enumerate(ranked):
+            scores[atom_id] = scores.get(atom_id, 0.0) + 1.0 / (_RRF_K + rank + 1)
+    ordered = sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+    return [atom_id for atom_id, _ in ordered[:limit]]
 
 
 def _is_echo(query_tokens: set[str], text: str) -> bool:
@@ -52,13 +100,9 @@ def _is_echo(query_tokens: set[str], text: str) -> bool:
     Containment coefficient over word sets: an echo may add a word
     ("please") or drop one, so the overlap is measured against the smaller
     side. Very short texts are never echoes — two words in common prove
-    nothing.
+    nothing, which ``containment`` reports as zero overlap.
     """
-    atom_tokens = _tokens(text)
-    smaller = min(len(query_tokens), len(atom_tokens))
-    if smaller < 3:
-        return False
-    return len(query_tokens & atom_tokens) / smaller >= _ECHO_OVERLAP
+    return containment(query_tokens, word_set(text)) >= _ECHO_OVERLAP
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -68,6 +112,37 @@ def _cosine(a: list[float], b: list[float]) -> float:
     if norm_a < 1e-9 or norm_b < 1e-9:
         return 0.0
     return dot / (norm_a * norm_b)
+
+
+def _lexical_entry_points(
+    query: str, tenant_id: str, read_spaces: list[str], db, limit: int
+) -> list[str]:
+    """Atom ids for the query's BM25 ranking, best first.
+
+    ``bm25()`` returns a score that is more negative the better the match, so
+    ascending order is descending relevance.
+
+    Empty when the build has no FTS5, when the query has no searchable terms,
+    or when nothing matches — in every case retrieval carries on with the
+    vector half alone, which is what it did before the lexical index existed.
+    """
+    if not db.fts_enabled:
+        return []
+    terms = _term_list(query)
+    if not terms:
+        return []
+    spaces_ph = ",".join("?" * len(read_spaces))
+    rows = db.fetchall(
+        f"""SELECT f.atom_id AS atom_id FROM atoms_fts f
+            JOIN atoms a ON a.id = f.atom_id
+            WHERE atoms_fts MATCH ?
+              AND a.tenant_id = ? AND a.space IN ({spaces_ph})
+              AND a.type != 'relation'
+            ORDER BY bm25(atoms_fts)
+            LIMIT ?""",
+        (_fts_query(terms), tenant_id, *read_spaces, limit),
+    )
+    return [r["atom_id"] for r in rows]
 
 
 def retrieve(
@@ -84,7 +159,8 @@ def retrieve(
     Full retrieval pipeline:
       1. Embed query
       2. KNN search in vec_atoms per read_space (tenant + space partitioned),
-         merged by cosine distance; pool size scales with the graph
+         merged by cosine distance, fused by Reciprocal Rank Fusion with a
+         BM25 search of the same spaces; pool size scales with the graph
       3. 1-hop graph expansion via relation atoms within read_spaces,
          highest-standing endpoints first
       4. Score all candidates by salience (personality-weighted from
@@ -101,7 +177,7 @@ def retrieve(
 
     query_vec = embed_engine.embed(query)
     vec_bytes = struct.pack(f"{len(query_vec)}f", *query_vec)
-    query_tokens = _tokens(query)
+    query_tokens = word_set(query)
 
     # Load personality weights from write_space, fall back to defaults.
     # A NULL column must fall back too, not propagate None into arithmetic.
@@ -124,9 +200,10 @@ def retrieve(
     sti_boost = _pget("sti_boost_on_access", 0.5)
     agent_trust = _pget("agent_source_trust", 0.5)
 
-    # Step 1: KNN entry points — one probe per read_space (the space partition
-    # key only supports equality during KNN), merged by ascending distance so
-    # no space can starve the others out of the candidate budget.
+    # Step 1: entry points — the vector and lexical searches run side by side
+    # and their ranked lists are fused. One probe per read_space (the space
+    # partition key only supports equality during KNN), merged by ascending
+    # distance so no space can starve the others out of the candidate budget.
     size_row = db.fetchone(
         f"SELECT COUNT(*) AS n FROM atoms WHERE tenant_id = ? AND space IN ({spaces_ph}) AND type != 'relation'",
         (tenant_id, *read_spaces),
@@ -147,25 +224,32 @@ def retrieve(
     knn_rows.sort(key=lambda r: r["distance"])
     knn_rows = knn_rows[:knn_pool]
 
-    if not knn_rows:
-        return []
-
     knn_ids = [r["atom_id"] for r in knn_rows]
     knn_distances = {r["atom_id"]: r["distance"] for r in knn_rows}
+
+    # The lexical half. It earns its place on the queries the embedding gets
+    # wrong: a fact stored in one language sits a long way from the question
+    # that asks for it in another, while the proper nouns both of them carry
+    # are byte-identical.
+    lexical_ids = _lexical_entry_points(query, tenant_id, read_spaces, db, knn_pool)
+    entry_ids = _rrf_fuse([knn_ids, lexical_ids], knn_pool)
+
+    if not entry_ids:
+        return []
 
     # Step 2: 1-hop expansion via relation atoms, capped so a hub atom cannot
     # pull an unbounded neighborhood into the scoring set. The budget goes to
     # the highest-standing endpoints first: an unordered LIMIT hands it to
     # whatever the scan meets, which in a chatty graph is froth.
-    id_ph = ",".join("?" * len(knn_ids))
-    expanded_ids: set[str] = set(knn_ids)
+    id_ph = ",".join("?" * len(entry_ids))
+    expanded_ids: set[str] = set(entry_ids)
 
     forward = db.fetchall(
         f"""SELECT r.target_id FROM atoms r JOIN atoms t ON t.id = r.target_id
             WHERE r.source_id IN ({id_ph}) AND r.type = 'relation'
               AND r.tenant_id = ? AND r.space IN ({spaces_ph})
             ORDER BY (t.sti + t.lti + t.confidence) DESC LIMIT {_EXPANSION_EDGES}""",
-        (*knn_ids, tenant_id, *read_spaces),
+        (*entry_ids, tenant_id, *read_spaces),
     )
     expanded_ids.update(r["target_id"] for r in forward if r["target_id"])
 
@@ -174,7 +258,7 @@ def retrieve(
             WHERE r.target_id IN ({id_ph}) AND r.type = 'relation'
               AND r.tenant_id = ? AND r.space IN ({spaces_ph})
             ORDER BY (s.sti + s.lti + s.confidence) DESC LIMIT {_EXPANSION_EDGES}""",
-        (*knn_ids, tenant_id, *read_spaces),
+        (*entry_ids, tenant_id, *read_spaces),
     )
     expanded_ids.update(r["source_id"] for r in backward if r["source_id"])
     expanded_ids.discard(None)

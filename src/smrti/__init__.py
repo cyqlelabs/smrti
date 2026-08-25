@@ -11,7 +11,7 @@ try:
 except ModuleNotFoundError:
     __version__ = "0.0.0.dev0"
 
-from smrti.core.db import Database, get_database
+from smrti.core.db import Database, fts_delete, get_database
 from smrti.core.embed import EmbeddingProvider, get_embedding_provider
 from smrti.core.atomspace import AtomSpace
 from smrti.core.models import (
@@ -366,6 +366,7 @@ class Smrti:
                     (self.tenant_id, *chunk, *chunk),
                 ),
                 (f"DELETE FROM vec_atoms WHERE atom_id IN ({ph})", tuple(chunk)),
+                *fts_delete(self.db, chunk),
                 (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(chunk)),
                 (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(chunk)),
                 (f"DELETE FROM atoms WHERE id IN ({ph})", tuple(chunk)),

@@ -5,7 +5,7 @@ import json
 import struct
 from typing import Optional
 
-from smrti.core.db import Database
+from smrti.core.db import Database, fts_write
 from smrti.core.embed import EmbeddingProvider
 from smrti.core.models import (
     Atom,
@@ -97,8 +97,13 @@ class AtomSpace:
                 ("UPDATE atoms SET lti = MAX(lti, 0.5) WHERE id = ?", (atom.id,))
             )
 
-        # Relation atoms carry synthetic labels — keep them out of the KNN index.
+        # Relation atoms carry synthetic labels — keep them out of the KNN and
+        # lexical indexes. The lexical write is unconditional where the vector
+        # write is not: it is two integer-keyed statements, and skipping it
+        # when the vector already exists would leave an atom permanently
+        # unsearchable by word if its index row was ever lost.
         if atom.type != AtomType.RELATION:
+            statements.extend(fts_write(self._db, atom.id, atom.label, atom.content))
             existing_vec = self._db.fetchone(
                 "SELECT atom_id FROM vec_atoms WHERE atom_id = ?",
                 (atom.id,),
@@ -178,12 +183,13 @@ class AtomSpace:
             )
         ]
 
-        # Keep the KNN index in sync when the embedded text changes.
+        # Keep the KNN and lexical indexes in sync when the text changes.
         if (
             prior is not None
             and atom.type != AtomType.RELATION
             and (prior["label"] != atom.label or prior["content"] != atom.content)
         ):
+            statements.extend(fts_write(self._db, atom.id, atom.label, atom.content))
             text_to_embed = atom.label
             if atom.content:
                 text_to_embed = f"{atom.label} {atom.content}"

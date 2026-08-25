@@ -7,6 +7,7 @@ import uuid
 
 from rapidfuzz import fuzz, process
 
+from smrti.core.db import fts_write
 from smrti.core.provenance import (
     ATOM_METADATA_JSON,
     ATOM_SOURCE,
@@ -247,6 +248,10 @@ class EntityResolver:
                 0.6 * self.trust, 1.0 * self.trust, 0.3 * self.trust,
             ),
         )
+
+        # This atom is written straight to SQL rather than through AtomSpace, so
+        # both search indexes have to be filled here too.
+        self.db.execute_batch(fts_write(self.db, atom_id, name, None))
 
         try:
             if vec is None:

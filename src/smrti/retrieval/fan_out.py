@@ -5,6 +5,7 @@ import struct
 
 from smrti.core.models import AtomType, RecallResult, atom_from_row
 from smrti.core.provenance import ATOM_OWN_INTENSITY, ATOM_OWN_VALENCE
+from smrti.retrieval.diversify import diversify
 from smrti.retrieval.salience import compute_salience
 from smrti.retrieval.text import containment, word_set, words
 
@@ -167,7 +168,8 @@ def retrieve(
          write_space); expanded candidates are scored on their true stored
          similarity, near-verbatim episode echoes of the query are damped,
          and agent-authored atoms are discounted by source trust
-      5. Return top_k sorted by descending salience
+      5. Cap near-duplicate episodes and reserve slots for beliefs, then
+         return top_k sorted by descending salience
     """
     # One KNN probe is issued per read space, so a repeated name is repeated
     # work — and read_spaces can arrive straight from a request header.
@@ -339,7 +341,11 @@ def retrieve(
         results.append(RecallResult(atom=atom, salience=salience, similarity=similarity))
 
     results.sort(key=lambda r: r.salience, reverse=True)
-    top_results = results[:top_k]
+    # Step 5: cap how much of the answer one conversational moment may fill.
+    # Ranking is per-atom and has no opinion about the shape of the set it
+    # produces, which is how five copies of a single exchange came to be a
+    # whole response.
+    top_results = diversify(results, top_k, min_confidence)
 
     # Boost STI on accessed atoms within write_space only — reading from a
     # foreign space must not mutate that space's attention weights.

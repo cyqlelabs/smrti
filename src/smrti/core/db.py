@@ -78,15 +78,19 @@ _FTS_SCHEMA_SQL = """CREATE VIRTUAL TABLE IF NOT EXISTS atoms_fts USING fts5(
 )"""
 
 
-def fts_rowid(atom_id: str) -> int:
-    """The lexical index rowid for an atom.
+def stable_rowid(atom_id: str) -> int:
+    """The rowid an atom's index rows are filed under, in both index tables.
 
-    FTS5 has no secondary index, so deleting by ``atom_id`` would scan the
-    whole index on every rewrite — and an atom is rewritten on every repeated
-    ``remember``. Deriving the rowid from the atom id instead makes both the
-    write and the delete an integer-key lookup. 56 bits of SHA-256: two atoms
-    colliding would cost one of them its lexical entry (it stays reachable by
-    vector), at a probability no graph this side of 10^8 atoms will meet.
+    Neither virtual table can be searched by ``atom_id``: FTS5 has no
+    secondary index, and a vec0 table answers ``WHERE atom_id = ?`` with a
+    full scan of every vector in the database — 86ms at twenty thousand
+    atoms, on a query ``add_atom`` runs on every single write. Deriving the
+    rowid from the atom id makes the existence check, the delete and the
+    insert integer-key lookups instead, so write cost stops growing with the
+    size of the graph.
+
+    56 bits of SHA-256: two atoms colliding would cost one of them its index
+    entry, at a probability no graph this side of 10^8 atoms will meet.
     """
     return int.from_bytes(hashlib.sha256(atom_id.encode()).digest()[:7], "big")
 
@@ -100,7 +104,7 @@ def fts_write(db: "Database", atom_id: str, label: str, content: str | None) -> 
     """
     if not db.fts_enabled:
         return []
-    rowid = fts_rowid(atom_id)
+    rowid = stable_rowid(atom_id)
     return [
         ("DELETE FROM atoms_fts WHERE rowid = ?", (rowid,)),
         (
@@ -118,7 +122,34 @@ def fts_delete(db: "Database", atom_ids: list[str]) -> list[tuple]:
     return [
         (
             f"DELETE FROM atoms_fts WHERE rowid IN ({ph})",
-            tuple(fts_rowid(a) for a in atom_ids),
+            tuple(stable_rowid(a) for a in atom_ids),
+        )
+    ]
+
+
+VEC_INSERT_SQL = (
+    "INSERT INTO vec_atoms (rowid, atom_id, embedding, tenant_id, space, label) "
+    "VALUES (?, ?, ?, ?, ?, ?)"
+)
+
+
+def vec_insert(atom_id: str, embedding: bytes, tenant_id: str, space: str, label: str) -> tuple:
+    """The statement that files an atom's vector under its stable rowid."""
+    return (
+        VEC_INSERT_SQL,
+        (stable_rowid(atom_id), atom_id, embedding, tenant_id, space, label),
+    )
+
+
+def vec_delete(atom_ids: list[str]) -> list[tuple]:
+    """Statements removing atoms from the vector index, by rowid."""
+    if not atom_ids:
+        return []
+    ph = ",".join("?" * len(atom_ids))
+    return [
+        (
+            f"DELETE FROM vec_atoms WHERE rowid IN ({ph})",
+            tuple(stable_rowid(a) for a in atom_ids),
         )
     ]
 
@@ -305,7 +336,7 @@ class Database:
             conn.executemany(
                 "INSERT INTO atoms_fts (rowid, atom_id, label, content) VALUES (?, ?, ?, ?)",
                 [
-                    (fts_rowid(r["id"]), r["id"], r["label"], r["content"] or "")
+                    (stable_rowid(r["id"]), r["id"], r["label"], r["content"] or "")
                     for r in rows
                 ],
             )
@@ -455,6 +486,24 @@ class Database:
             conn.rollback()
             raise
 
+    def _vec_rowids_are_stable(self) -> bool:
+        """Whether stored vectors are already filed under their stable rowid.
+
+        Sampling one row is enough: the rowids are assigned by one writer, so
+        a table either uses them throughout or predates them. An empty table
+        needs no rebuild.
+        """
+        conn = self._write_conn
+        try:
+            row = conn.execute(
+                "SELECT rowid, atom_id FROM vec_atoms LIMIT 1"
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return True
+        if row is None:
+            return True
+        return row["rowid"] == stable_rowid(row["atom_id"])
+
     def _migrate_vec_atoms(self) -> None:
         """Rebuild vec_atoms in place when created by a pre-space / L2 schema.
 
@@ -478,7 +527,7 @@ class Database:
             return
         sql = (row["sql"] or "") if row else ""
         current = "space" in sql and "distance_metric=cosine" in sql
-        if current and not have_backup:
+        if current and not have_backup and self._vec_rowids_are_stable():
             return
         self._backup_before_migration()
         # Explicit transaction: SQLite DDL is transactional, but Python's
@@ -495,13 +544,30 @@ class Database:
             if row is not None:
                 conn.execute("DROP TABLE vec_atoms")
             conn.execute(_VEC_SCHEMA_SQL)
-            conn.execute(
-                """INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label)
-                   SELECT m.atom_id, m.embedding, m.tenant_id, a.space, a.label
+            # The rowid has to be computed per row rather than in SQL, so the
+            # copy comes back through Python in chunks — a graph large enough
+            # for this to matter is exactly the one that must not be loaded
+            # whole.
+            cursor = conn.execute(
+                """SELECT m.atom_id, m.embedding, m.tenant_id, a.space, a.label
                    FROM _vec_atoms_migrate m
                    JOIN atoms a ON a.id = m.atom_id
                    WHERE a.type != 'relation'"""
             )
+            while True:
+                chunk = cursor.fetchmany(2000)
+                if not chunk:
+                    break
+                conn.executemany(
+                    VEC_INSERT_SQL,
+                    [
+                        (
+                            stable_rowid(r["atom_id"]), r["atom_id"], r["embedding"],
+                            r["tenant_id"], r["space"], r["label"],
+                        )
+                        for r in chunk
+                    ],
+                )
             conn.execute("DROP TABLE _vec_atoms_migrate")
             conn.commit()
         except Exception:

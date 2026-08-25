@@ -10,6 +10,7 @@ import contextlib
 import os
 import queue
 import sqlite3
+import struct
 import tempfile
 from unittest.mock import MagicMock, patch
 
@@ -197,21 +198,28 @@ def test_vec_atoms_migration_rolls_back(db_path):
     get_database(db_path)
     close_database(db_path)
     conn = sqlite3.connect(db_path)
-    # A leftover backup table forces the migration to run on the next open.
+    # A leftover backup table forces the migration to run on the next open,
+    # and it needs a row that joins to a real atom or there is nothing to
+    # copy and nothing to fail on.
     conn.execute("CREATE TABLE _vec_atoms_migrate (atom_id TEXT, embedding BLOB, tenant_id TEXT)")
+    conn.execute(
+        "INSERT INTO atoms (id, type, label, tenant_id, space) VALUES ('a1', 'concept', 'Alice', 't', 's')"
+    )
+    conn.execute(
+        "INSERT INTO _vec_atoms_migrate (atom_id, embedding, tenant_id) VALUES ('a1', ?, 't')",
+        (struct.pack("384f", *([0.1] * 384)),),
+    )
     conn.commit()
     conn.close()
 
     database = _fresh_connection(db_path)
     try:
-        original = database._write_conn.execute
-
+        # The rows are copied back through executemany now, so the stand-in
+        # has to fail there rather than on a single execute.
         def _fail_on_insert(sql, *args):
-            if "INSERT INTO vec_atoms" in sql:
-                raise sqlite3.Error("boom")
-            return original(sql, *args)
+            raise sqlite3.Error("boom")
 
-        with _wrapped_write_conn(database, execute=_fail_on_insert):
+        with _wrapped_write_conn(database, executemany=_fail_on_insert):
             with pytest.raises(sqlite3.Error):
                 database._migrate_vec_atoms()
         # The backup table survives a failed migration — the rows are recoverable.

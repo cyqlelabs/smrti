@@ -4,6 +4,8 @@ from __future__ import annotations
 import struct
 import uuid
 
+from smrti.core.db import stable_rowid
+
 
 def heal_orphaned_episodes(tenant_id: str, space: str, db) -> int:
     """Find episodes that mention concepts but no person, and link them to a person.
@@ -99,7 +101,7 @@ def heal_orphaned_episodes(tenant_id: str, space: str, db) -> int:
 def _stored_embedding(db, atom_id: str) -> tuple | None:
     """Read an atom's stored embedding from vec_atoms as a float tuple."""
     row = db.fetchone(
-        "SELECT embedding FROM vec_atoms WHERE atom_id = ?", (atom_id,)
+        "SELECT embedding FROM vec_atoms WHERE rowid = ?", (stable_rowid(atom_id),)
     )
     if row is None:
         return None

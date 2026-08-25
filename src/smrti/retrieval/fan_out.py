@@ -4,6 +4,7 @@ from __future__ import annotations
 import struct
 
 from smrti.core.models import AtomType, RecallResult, atom_from_row
+from smrti.core.db import stable_rowid
 from smrti.core.provenance import ATOM_OWN_INTENSITY, ATOM_OWN_VALENCE
 from smrti.retrieval.diversify import diversify
 from smrti.retrieval.salience import compute_salience
@@ -304,7 +305,8 @@ def retrieve(
             similarity = max(0.0, 1.0 - knn_distances[atom.id])
         else:
             emb_row = db.fetchone(
-                "SELECT embedding FROM vec_atoms WHERE atom_id = ?", (atom.id,)
+                "SELECT embedding FROM vec_atoms WHERE rowid = ?",
+                (stable_rowid(atom.id),),
             )
             similarity = (
                 max(0.0, _cosine(query_vec, _blob_to_vec(emb_row["embedding"])))

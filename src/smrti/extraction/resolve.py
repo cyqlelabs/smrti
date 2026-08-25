@@ -7,7 +7,7 @@ import uuid
 
 from rapidfuzz import fuzz, process
 
-from smrti.core.db import fts_write
+from smrti.core.db import fts_write, vec_insert
 from smrti.core.provenance import (
     ATOM_METADATA_JSON,
     ATOM_SOURCE,
@@ -257,10 +257,7 @@ class EntityResolver:
             if vec is None:
                 vec = self.embed_engine.embed(name)
             vec_bytes = struct.pack(f"{len(vec)}f", *vec)
-            self.db.execute(
-                "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",
-                (atom_id, vec_bytes, tenant_id, space, name),
-            )
+            self.db.execute(*vec_insert(atom_id, vec_bytes, tenant_id, space, name))
         except Exception:
             pass
 

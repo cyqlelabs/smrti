@@ -105,15 +105,17 @@ smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow f
 
 > [Full pipeline diagram →](docs/pipeline.md)
 
-**`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a Bayesian truth value, attention weight, and valence score. Leave `valence` unset and it is read from the text; pass one and the memory is filed as a deliberate report, which is what lets recall raise it to a behavioral constraint. A belief asserted at probability ≥ 0.95 is permanent: it keeps the confidence it was asserted with and is exempt from decay. Evidence is append-only; truth values update via PLN revision. Entities and relation edges are extracted automatically (the LLM is only called when GLiNER finds ≥2 entities, cutting LLM calls ~40–60%).
+**`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a Bayesian truth value, attention weight, and valence score. Leave `valence` unset and it is read from the text; pass one and the memory is filed as a deliberate report, which is what lets recall raise it to a behavioral constraint. A belief asserted at probability ≥ 0.95 is permanent: it keeps the confidence it was asserted with and is exempt from decay. Relative dates are resolved against the moment you write them, so "the session is tomorrow" still names a day when you read it next week — on in every server mode, and `Smrti(temporal=True)` for a direct caller, since it costs an NER pass per write. Evidence is append-only; truth values update via PLN revision. Entities and relation edges are extracted automatically (the LLM is only called when GLiNER finds ≥2 entities, cutting LLM calls ~40–60%).
 
-**`recall()`** — Embeds the query → KNN seeds → 1-hop graph expansion → salience re-ranking:
+**`recall()`** — Searches twice and fuses the results: a vector KNN over the query embedding beside a BM25 search of the same spaces, merged by Reciprocal Rank Fusion. The lexical half earns its place on the queries the embedding gets wrong — a fact stored in one language sits a long way from the question that asks for it in another, while the proper nouns both carry are identical. Fusion only chooses the candidates; salience still decides the ranking, after 1-hop graph expansion:
 
 ```
 S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w_val × |valence| × intensity
 ```
 
-When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. The valence terms read the tone an atom was written with, never the mood it absorbed from its neighbors during propagation. An episode that just restates the query loses its similarity term — the question is not the answer — and agent-authored atoms are scaled by `agent_source_trust`, so a model's own reply never outranks the user testimony it came from. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`); a critical warning takes a valence you set yourself, on an atom that can hold a proposition — never a bare concept.
+When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. The valence terms read the tone an atom was written with, never the mood it absorbed from its neighbors during propagation. An episode that just restates the query loses its similarity term — the question is not the answer — and agent-authored atoms are scaled by `agent_source_trust`, so a model's own reply never outranks the user testimony it came from. A last pass caps how much of the answer one moment may fill: an episode repeating one already chosen from the same minutes yields its slot, and beliefs keep a couple of slots so the standing facts survive a wall of chatter. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`); a critical warning takes a valence you set yourself, on an atom that can hold a proposition — never a bare concept.
+
+**`reinforce()`** — Reports that memories were used, which is the one way confidence climbs without the caller restating the fact. Everything else rides it down toward the surfacing floor, and an atom below that floor can never be recalled, so it can never be restated, so nothing lifts it back. The client decides what "used" means — the cheap proxy is that distinctive words from a recalled atom turned up in the reply it informed. The evidence is weak on purpose: a small weight, an update that converges rather than ratchets, a cap per consolidation, the agent-source discount, and never a memory you asked to forget.
 
 **`reflect()`** — Runs automatically every 60 s (`SMRTI_REFLECT_INTERVAL`). Merges pending evidence via PLN, decays attention and confidence, propagates both to neighbors, heals orphaned episodes, promotes high-STI atoms to long-term importance, resolves contradictions, and prunes low-salience atoms. User-stated episodes and beliefs decay only as far as the surfacing floor — direct testimony never stops being recallable — while concepts, goals, and everything agent-authored keep fading. The personality profile governs every weight and threshold. Every atom also carries provenance (`user` vs `agent`): model-authored content decays faster and gets a lower long-term-importance floor, so what you told the agent outlives what it inferred.
 
@@ -171,6 +173,11 @@ curl -X POST http://localhost:8420/remember \
 # Recall
 curl -X POST http://localhost:8420/recall \
   -d '{"query": "programming languages", "top_k": 5}'
+
+# Report that recalled memories shaped the reply — being used builds confidence
+curl -X POST localhost:8420/reinforce \
+  -H 'Content-Type: application/json' \
+  -d '{"atom_ids": ["4f2c…", "9ab1…"]}'
 
 # Run consolidation
 curl -X POST http://localhost:8420/reflect
@@ -280,6 +287,7 @@ All server modes read the same environment variables. Everything works with zero
 | `SMRTI_EXTRACT_THINKING` | `disabled`                 | Chain-of-thought for extraction: `disabled` is faster and avoids token-budget exhaustion on thinking models (Qwen3, DeepSeek-R1); also `auto`, `enabled` |
 | `SMRTI_EXTRACT_TIMEOUT`  | `60`                       | Extraction request timeout in seconds                            |
 | `SMRTI_NER_MODEL`        | `lmo3/gliner2-multi-v1-onnx` | GLiNER2 ONNX export for local zero-shot NER — runs on ONNX Runtime, so no PyTorch and no AVX/SSE4.1 floor |
+| `SMRTI_TEMPORAL`         | `1`                        | Resolve relative dates against the write time as memories are stored (0 = store text verbatim). Costs one NER pass per write |
 
 ### Ignoring Automated Messages
 
@@ -386,7 +394,7 @@ Each preset tunes 17 hyperparameters. To create a custom personality, start from
 ```mermaid
 graph TD
     subgraph Facade
-        S["Smrti<br/><small>remember · recall · believe · reflect · forget · status</small>"]
+        S["Smrti<br/><small>remember · recall · believe · reinforce · reflect · forget · status</small>"]
     end
 
     subgraph Servers
@@ -403,14 +411,16 @@ graph TD
     end
 
     subgraph Retrieval
-        FAN["fan_out"]
+        FAN["fan_out<br/><small>vector + BM25, fused</small>"]
         SAL["salience"]
+        DIV["diversify"]
         CLS["classify"]
     end
 
     subgraph Evolution
         EPO["epoch"]
         TRU["truth"]
+        REI["reinforcement"]
         CON["connections"]
         HEA["healing"]
     end
@@ -424,6 +434,7 @@ graph TD
         EXT["extract"]
         RES["resolve"]
         ALI["aliases"]
+        TMP["temporal"]
     end
 
     subgraph Storage
@@ -435,7 +446,7 @@ graph TD
     Core & Retrieval & Evolution & Extraction & Spaces --> SQL
 ```
 
-**Retrieval pipeline:** Embed query → KNN over tenant partition (entry pool scales with graph size) → filter to read spaces → 1-hop graph expansion, highest-standing endpoints first → salience scoring → top-k
+**Retrieval pipeline:** Embed query → KNN over tenant partition, fused by Reciprocal Rank Fusion with a BM25 search of the same spaces (entry pool scales with graph size) → filter to read spaces → 1-hop graph expansion, highest-standing endpoints first → salience scoring → diversity cap → top-k
 
 **Consolidation epoch** (runs automatically every `SMRTI_REFLECT_INTERVAL` seconds, or manually via `reflect()`):
 
@@ -480,6 +491,17 @@ The published package ships `smrti` only, so this one command needs the repo: cl
 ```bash
 pytest tests/ -v
 ```
+
+### Retrieval benchmark
+
+`bench/longmemeval` ingests LongMemEval-S conversation histories as episodes and answers its questions through `recall`, scoring retrieval hit rate separately from answer accuracy — a model that answers well from a bad candidate set hides the regression the harness exists to catch. Run it before releasing any change that touches retrieval; it is not a CI gate, since it needs the dataset and the embedding model.
+
+```bash
+make bench DATASET=path/to/longmemeval_s.json      # fails if the hit rate drops
+make bench-baseline DATASET=path/to/longmemeval_s.json   # record a new baseline
+```
+
+The locked config (model, top_k, personality, question subset) lives in `bench/longmemeval/config.json` and the recorded numbers in `baseline.json`. A baseline measured under a different config is refused rather than compared. The subset is deterministic and takes one question per type in turn — the dataset is grouped by type, so the front of the file is one ability forty times over.
 
 ## License
 

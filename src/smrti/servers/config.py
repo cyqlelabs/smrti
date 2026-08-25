@@ -46,6 +46,10 @@ EXTRACT_URL: str = (
     or os.environ.get("SMRTI_UPSTREAM_URL", "")
 )
 EXTRACT_MODEL: str = os.environ.get("SMRTI_EXTRACT_MODEL", "")
+# Resolve relative dates ("mañana", "next Friday") against the write time as
+# episodes are stored, so a memory read back next week still says which day it
+# meant. Costs one NER pass per write; set to 0 to store text verbatim.
+TEMPORAL: bool = os.environ.get("SMRTI_TEMPORAL", "1") == "1"
 # Thinking mode for extraction LLM calls.
 # "auto"     — don't modify the request (default)
 # "disabled" — pass chat_template_kwargs={"enable_thinking":false} to suppress

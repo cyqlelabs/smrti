@@ -1,0 +1,11 @@
+{
+  "dataset": "longmemeval_s",
+  "embedding_model": "paraphrase-multilingual-MiniLM-L12-v2",
+  "personality": "deterministic",
+  "top_k": 10,
+  "min_confidence": 0.0,
+  "question_limit": 40,
+  "extraction": false,
+  "temporal": false,
+  "tolerance": 0.01
+}

@@ -2,7 +2,8 @@ EXTRACTION_PROMPT = """Extract knowledge from user text. Return ONLY valid JSON 
 
 FORMAT:
 {"entities":[{"name":string,"type":string,"aliases":[string]}],
- "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}]}
+ "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}],
+ "temporal":[{"text":string,"resolved":"YYYY-MM-DD"}]}
 
 ENTITY TYPES (exactly these 16): person · organization · project · role · tool · technology · skill · preference · constraint · location · event · topic · media · health · concept · goal
 "valence" is optional; omit when neutral. Pets/animals → "concept".
@@ -59,6 +60,13 @@ ATOMIC — one fact per claim triplet.
 NO INFERENCE — extract only explicitly stated facts; no transitive chains, no invented entities.
 NO METAPHOR — figurative language ("she's the real boss" about a cat) ≠ organizational fact.
 NORMALIZE — fix typos in entity names ("pythn"→"Python", "k8s"→"Kubernetes").
+
+TEMPORAL — when a [Write time] header is present and the text refers to a day
+relatively ("tomorrow", "el finde que viene", "来週"), add one "temporal" item per
+expression: "text" is the expression exactly as written, "resolved" is the calendar
+date it means, counting from the write time. Omit "temporal" entirely when the text
+names no day, or names one you cannot pin down — a wrong date misleads where a
+missing one costs nothing. Never resolve a bare clock time ("at 3pm", "por la mañana").
 
 ━━━ EXAMPLES ━━━
 
@@ -187,6 +195,19 @@ OUT:
   {"subject":"The Body Keeps the Score","predicate":"covers","object":"mind-body connection"}
 ]}
 
+IN:
+[Write time]
+2026-08-26 14:00:00
+[Text to extract]
+La sesión con Dave es mañana a las 3.
+OUT:
+{"entities":[
+  {"name":"Dave","type":"person","aliases":[]}
+],"claims":[
+],"temporal":[
+  {"text":"mañana","resolved":"2026-08-27"}
+]}
+
 IN: "Hi! I'm Elara, a systems strategist focused on organizational design."
 OUT:
 {"entities":[
@@ -263,7 +284,8 @@ CLAIMS_ONLY_PROMPT = """Extract relationship claims between pre-extracted entiti
 
 FORMAT:
 {"entities":[{"name":string,"type":string}],
- "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}]}
+ "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}],
+ "temporal":[{"text":string,"resolved":"YYYY-MM-DD"}]}
 
 "entities" is OPTIONAL — include it ONLY to:
   1. Add a durable objective not already listed (type "goal")
@@ -289,6 +311,11 @@ RULES:
 - Extract only explicitly stated facts; no inference or invention
 - No metaphor — figurative language ≠ literal fact
 - If no clear relationships exist, return {"claims":[]}
+- TEMPORAL — when a [Write time] header is present and the text refers to a day
+  relatively ("tomorrow", "el finde que viene", "来週"), add one "temporal" item per
+  expression: "text" is the expression exactly as written, "resolved" is the calendar
+  date it means, counting from the write time. Omit "temporal" when the text names no
+  day, or names one you cannot pin down. Never resolve a bare clock time.
 - PERSON ANCHORING — when a person entity is listed, they must be the subject of claims
   that describe their role, title, goals, intentions, preferences, or actions. When the
   text states a role or title ("I'm a X", "I work as X", "I'm a senior X"), emit a new

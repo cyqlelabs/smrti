@@ -69,6 +69,7 @@ def get_mem(space: Optional[str] = None) -> Smrti:
             tenant_id=cfg.TENANT_ID,
             write_space=space,
             ignore_patterns=cfg.IGNORE_PATTERNS or None,
+            temporal=cfg.TEMPORAL,
         )
     _space_mems.move_to_end(space)
     return _space_mems[space]

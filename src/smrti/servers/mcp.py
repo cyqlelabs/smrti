@@ -28,6 +28,7 @@ def create_smrti() -> Smrti:
         write_space=cfg.SPACE,
         read_spaces=cfg.READ_SPACES,
         ignore_patterns=cfg.IGNORE_PATTERNS or None,
+        temporal=cfg.TEMPORAL,
     )
 
 
@@ -91,6 +92,11 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                     "salience": r.salience,
                     "similarity": r.similarity,
                     "space": r.atom.space,
+                    # Dates the extraction model pinned down for relative
+                    # expressions in this memory. They live in metadata rather
+                    # than in the text, which was embedded before the model
+                    # ever saw it, so this is where the reader meets them.
+                    "temporal": r.atom.metadata.get("temporal") or [],
                 }
                 for r in results
             ]

@@ -82,6 +82,7 @@ class Smrti:
         read_spaces: list[str] | None = None,
         extractor=None,
         ignore_patterns: list[str] | None = None,
+        temporal: bool = False,
     ) -> None:
         db_path = os.path.expanduser(db_path)
         parent = os.path.dirname(db_path)
@@ -98,6 +99,10 @@ class Smrti:
             list(read_spaces) if read_spaces is not None else [write_space]
         )
         self.extractor = extractor
+        # Resolving relative dates costs an NER pass per write, so the library
+        # facade leaves it off and every server mode turns it on (see
+        # SMRTI_TEMPORAL). A direct caller who wants it asks for it.
+        self._temporal = temporal
         try:
             self._ignore_re: list[re.Pattern] = [
                 re.compile(p, re.MULTILINE) for p in (ignore_patterns or [])
@@ -168,6 +173,7 @@ class Smrti:
     ) -> str:
         if self.is_ignored(content):
             return ""
+        content = self._resolve_deixis(content)
         valence, stated = self._resolve_valence(content, valence)
         atom = Atom(
             type=AtomType(type),
@@ -180,6 +186,20 @@ class Smrti:
             metadata={**_write_metadata("", stated), **(metadata or {})},
         )
         return self.atomspace.add_atom(atom)
+
+    def _resolve_deixis(self, content: str) -> str:
+        """Annotate relative dates in *content* with what they resolve to.
+
+        Runs before the text is embedded and before the valence estimate, so
+        the resolved date is part of what the atom stores and what any search
+        of it matches. Off unless the caller asked for it, and never fatal:
+        text nothing could resolve is stored exactly as written.
+        """
+        if not self._temporal:
+            return content
+        from smrti.extraction.temporal import annotate
+
+        return annotate(content)
 
     def _resolve_valence(self, content: str, valence: float | None) -> tuple[float, bool]:
         """Return the atom's tone and whether the caller was the one who set it.
@@ -225,6 +245,7 @@ class Smrti:
         # conversational froth stored beside it, which reads to the caller as
         # never having stored it at all.
         confidence = probability if probability >= PERMANENT_PROBABILITY else 0.3
+        statement = self._resolve_deixis(statement)
         valence, stated = self._resolve_valence(statement, valence)
         atom = Atom(
             type=AtomType.BELIEF,

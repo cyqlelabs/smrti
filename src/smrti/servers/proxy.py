@@ -97,6 +97,7 @@ def get_mem(tenant_id: str, write_space: str) -> Smrti:
                 tenant_id=tenant_id,
                 write_space=write_space,
                 ignore_patterns=cfg.IGNORE_PATTERNS or None,
+                temporal=cfg.TEMPORAL,
             )
     _instances.move_to_end(key)
     return _instances[key]
@@ -217,6 +218,30 @@ def _enrich_content(r: RecallResult, mem) -> str:
     return f"{atom.label}{entity_qualifier}{suffix}"
 
 
+def _temporal_suffix(r: RecallResult) -> str:
+    """Dates the extraction model pinned down for this memory's deixis.
+
+    "The session is tomorrow" is a lie by the time it is recalled, and the
+    resolution cannot be written back into the text without invalidating the
+    embedding taken when it was stored. It is appended here instead, where the
+    model reading the memory is the one who needs it.
+    """
+    items = r.atom.metadata.get("temporal")
+    if not isinstance(items, list):
+        return ""
+    pairs = [
+        # The span is the model's own words echoed back, and this lands in a
+        # system prompt: collapse whitespace runs so it cannot break out of
+        # its bullet line, exactly as the memory text above is.
+        f"{re.sub(r'\s+', ' ', item['text']).strip()} = {item['resolved']}"
+        for item in items
+        if isinstance(item, dict)
+        and isinstance(item.get("text"), str)
+        and isinstance(item.get("resolved"), str)
+    ]
+    return f" [dates: {'; '.join(pairs)}]" if pairs else ""
+
+
 def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, str]:
     """Format a recall result as a plain imperative instruction plus its severity."""
     severity = classify_memory(r)
@@ -224,6 +249,9 @@ def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, st
     # Stored memory text is injected into the system prompt: collapse whitespace
     # runs (incl. newlines) so it cannot break out of its bullet line, and cap it.
     text = re.sub(r"\s+", " ", text).strip()[: cfg.INJECT_MAX_CHARS]
+    # Appended after the cap: a truncated memory still needs its dates, and
+    # the suffix is a handful of characters either way.
+    text += _temporal_suffix(r)
     conf = r.atom.truth.confidence
     qualifier = "high" if conf >= 0.7 else "medium" if conf >= 0.3 else "low"
     if severity == "critical_warning":

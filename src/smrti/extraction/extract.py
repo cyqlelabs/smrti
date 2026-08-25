@@ -5,10 +5,13 @@ import asyncio
 import json
 import logging
 import os
+import re
 import time
 from typing import TYPE_CHECKING, Optional
 
 import httpx
+
+from smrti.core.provenance import ATOM_METADATA_JSON
 
 from .prompts import AGENT_EXTRACTION_PROMPT, CLAIMS_ONLY_PROMPT, ENTITY_TYPES, EXTRACTION_PROMPT
 
@@ -126,7 +129,13 @@ async def _post_chat(
 _ITEM_SHAPES = {
     "entities": ("name", "type"),
     "claims": ("subject", "predicate", "object"),
+    "temporal": ("text", "resolved"),
 }
+
+# An ISO calendar date and nothing else. The model is asked for one; anything
+# it returns that is not one is discarded rather than stored, because a
+# resolution the reader cannot trust is worse than none.
+_ISO_DATE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _validate_extraction(parsed: object) -> Optional[dict]:
@@ -154,6 +163,45 @@ def _validate_extraction(parsed: object) -> Optional[dict]:
     return out
 
 
+def _write_time(episode_id: str, mem: "Smrti") -> str:
+    """When the episode was stored, as the LLM's base for relative dates."""
+    row = mem.db.fetchone(
+        "SELECT created_at FROM atoms WHERE id = ? AND tenant_id = ?",
+        (episode_id, mem.tenant_id),
+    )
+    return (row["created_at"] if row and row["created_at"] else "") or ""
+
+
+def _temporal_block(write_time: str) -> str:
+    """The header that tells the model what "tomorrow" is relative to."""
+    return f"[Write time]\n{write_time}\n\n" if write_time else ""
+
+
+def _store_temporal(episode_id: str, mem: "Smrti", items: list) -> None:
+    """Record the LLM's resolved dates on the episode.
+
+    Metadata, not text: the episode was embedded when it was stored, and
+    rewriting its content now would leave the vector describing something the
+    row no longer says. Recall renders these beside the memory instead.
+    """
+    resolved = [
+        {"text": item["text"], "resolved": item["resolved"]}
+        for item in items
+        if isinstance(item, dict)
+        and isinstance(item.get("text"), str)
+        and isinstance(item.get("resolved"), str)
+        and _ISO_DATE.match(item["resolved"])
+    ]
+    if not resolved:
+        return
+    mem.db.execute(
+        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON},
+                                                 '$.temporal', json(?))
+            WHERE id = ? AND tenant_id = ?""",
+        (json.dumps(resolved), episode_id, mem.tenant_id),
+    )
+
+
 async def extract_knowledge(
     text: str,
     http: httpx.AsyncClient,
@@ -163,22 +211,28 @@ async def extract_knowledge(
     entity_context: str = "",
     source: str = "user",
     tenant_id: str = "",
+    write_time: str = "",
 ) -> Optional[dict]:
     """Call the upstream LLM to extract entities and claims from text.
 
-    Returns a dict with 'entities' and 'claims' lists, or None on failure.
+    Returns a dict with 'entities', 'claims' and 'temporal' lists, or None on
+    failure. ``write_time`` is the base the model resolves relative dates
+    against; the idioms no date parser reaches ("el finde que viene") are
+    covered here, at no extra call, because this request was being made
+    anyway.
     """
     from smrti.call_log import append as _log
 
     system_prompt = AGENT_EXTRACTION_PROMPT if source == "agent" else EXTRACTION_PROMPT
     if entity_context and source != "agent":
         user_content = (
+            f"{_temporal_block(write_time)}"
             f"[Known entities — use these to resolve pronouns and references]\n"
             f"{entity_context}\n\n"
             f"[Text to extract]\n{text}"
         )
     else:
-        user_content = text
+        user_content = f"{_temporal_block(write_time)}{text}" if write_time else text
 
     from smrti.servers import config as _cfg
     request_body = {
@@ -481,18 +535,21 @@ async def extract_and_link(
     Shared by all serve modes (proxy, MCP, REST). Silently no-ops if the LLM
     call fails or returns no usable structure.
     """
-    entity_context = await asyncio.get_running_loop().run_in_executor(
-        None, _build_entity_context, mem
+    loop = asyncio.get_running_loop()
+    entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
+    write_time = await loop.run_in_executor(None, _write_time, episode_id, mem)
+    extracted = await extract_knowledge(
+        content, _get_http(), upstream, auth, model, entity_context, source,
+        mem.tenant_id, write_time,
     )
-    extracted = await extract_knowledge(content, _get_http(), upstream, auth, model, entity_context, source, mem.tenant_id)
     if not extracted:
         return
 
     def _sync_work() -> None:
         entity_ids = _resolve_ner_entities(extracted.get("entities", []), episode_id, mem, source)
         _link_claims(extracted.get("claims", []), entity_ids, mem, episode_id, source)
+        _store_temporal(episode_id, mem, extracted.get("temporal", []))
 
-    loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, _sync_work)
 
 
@@ -507,6 +564,7 @@ async def extract_claims_only(
     model: str,
     entity_context: str = "",
     tenant_id: str = "",
+    write_time: str = "",
 ) -> Optional[dict]:
     """Call the LLM with a shorter claims-only prompt, given pre-extracted entities.
 
@@ -520,9 +578,10 @@ async def extract_claims_only(
     )
     system_prompt = CLAIMS_ONLY_PROMPT.replace("{entities_block}", entities_block)
 
-    user_content = text
+    user_content = f"{_temporal_block(write_time)}{text}" if write_time else text
     if entity_context:
         user_content = (
+            f"{_temporal_block(write_time)}"
             f"[Known entities — use these to resolve pronouns and references]\n"
             f"{entity_context}\n\n"
             f"[Text to extract]\n{text}"
@@ -701,8 +760,10 @@ async def extract_and_link_hybrid(
         return
 
     entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
+    write_time = await loop.run_in_executor(None, _write_time, episode_id, mem)
     claims_result = await extract_claims_only(
-        content, ner_entities, upstream, auth, model, entity_context, mem.tenant_id
+        content, ner_entities, upstream, auth, model, entity_context, mem.tenant_id,
+        write_time,
     )
     if not claims_result:
         return
@@ -735,6 +796,7 @@ async def extract_and_link_hybrid(
                 elif etype not in ("goal", "preference", "constraint"):
                     mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
         _link_claims(claims_result.get("claims", []), entity_ids, mem, episode_id, source)
+        _store_temporal(episode_id, mem, claims_result.get("temporal", []))
 
     await loop.run_in_executor(None, _sync_resolve_and_link)
 

@@ -13,7 +13,7 @@ import sqlite3
 import pytest
 
 from smrti import Smrti
-from smrti.core.db import close_database, fts_rowid, get_database
+from smrti.core.db import close_database, get_database, stable_rowid
 from smrti.retrieval.fan_out import (
     _fts_query,
     _lexical_entry_points,
@@ -56,13 +56,18 @@ def test_remembering_indexes_the_text_for_lexical_search(mem):
     assert rows[0]["content"] == "Roxana lives in San Benito"
 
 
-def test_the_lexical_row_is_keyed_by_a_rowid_derived_from_the_atom_id(mem):
+def test_both_indexes_are_keyed_by_a_rowid_derived_from_the_atom_id(mem):
+    """Neither virtual table can be searched by atom_id without a full scan."""
     atom_id = mem.remember("Roxana lives in San Benito")
 
-    row = mem.db.fetchone(
-        "SELECT atom_id FROM atoms_fts WHERE rowid = ?", (fts_rowid(atom_id),)
+    lexical = mem.db.fetchone(
+        "SELECT atom_id FROM atoms_fts WHERE rowid = ?", (stable_rowid(atom_id),)
     )
-    assert row["atom_id"] == atom_id
+    vector = mem.db.fetchone(
+        "SELECT atom_id FROM vec_atoms WHERE rowid = ?", (stable_rowid(atom_id),)
+    )
+    assert lexical["atom_id"] == atom_id
+    assert vector["atom_id"] == atom_id
 
 
 def test_relation_atoms_stay_out_of_the_lexical_index(mem):
@@ -170,6 +175,54 @@ def test_backfill_leaves_an_already_indexed_graph_alone(tmp_path):
     try:
         after = [dict(r) for r in db.fetchall("SELECT rowid, atom_id FROM atoms_fts")]
         assert after == before
+    finally:
+        close_database(db_path)
+
+
+def test_no_write_path_searches_a_virtual_table_by_atom_id(mem):
+    """A vec0 table answers `WHERE atom_id = ?` with a scan of every vector.
+
+    Running one on each write made the cost of remembering grow with the size
+    of the whole database — 86ms per write at twenty thousand atoms. Both
+    index tables are keyed on `stable_rowid` instead, and nothing may quietly
+    reintroduce the scan.
+    """
+    import pathlib as _pathlib
+
+    offenders = []
+    for path in _pathlib.Path("src/smrti").rglob("*.py"):
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
+            if "vec_atoms" in line and "atom_id = ?" in line:
+                offenders.append(f"{path}:{number}")
+    assert offenders == []
+
+
+def test_a_vector_written_under_the_old_scheme_is_refiled_on_open(tmp_path):
+    """An existing graph must not lose its vectors to the new keying."""
+    import struct
+
+    db_path = str(tmp_path / "legacy.db")
+    mem = Smrti(db_path=db_path, tenant_id="test", write_space="default")
+    atom_id = mem.remember("Roxana lives in San Benito")
+    # Rewrite the row the way a build without stable rowids would have.
+    row = mem.db.fetchone(
+        "SELECT embedding FROM vec_atoms WHERE rowid = ?", (stable_rowid(atom_id),)
+    )
+    mem.db.execute("DELETE FROM vec_atoms WHERE rowid = ?", (stable_rowid(atom_id),))
+    mem.db.execute(
+        "INSERT INTO vec_atoms (rowid, atom_id, embedding, tenant_id, space, label) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (1, atom_id, row["embedding"], "test", "default", "Roxana"),
+    )
+    close_database(db_path)
+
+    db = get_database(db_path)
+    try:
+        refiled = db.fetchone(
+            "SELECT atom_id FROM vec_atoms WHERE rowid = ?", (stable_rowid(atom_id),)
+        )
+        assert refiled["atom_id"] == atom_id
+        assert db.fetchone("SELECT COUNT(*) AS n FROM vec_atoms")["n"] == 1
     finally:
         close_database(db_path)
 

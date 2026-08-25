@@ -4,6 +4,8 @@ from __future__ import annotations
 import struct
 import uuid
 
+from smrti.core.db import stable_rowid
+
 
 def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
     """Find surprising associations between unconnected high-LTI atoms.
@@ -28,7 +30,7 @@ def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
 
     for atom in high_lti:
         vec_row = db.fetchone(
-            "SELECT embedding FROM vec_atoms WHERE atom_id = ?", (atom["id"],)
+            "SELECT embedding FROM vec_atoms WHERE rowid = ?", (stable_rowid(atom["id"]),)
         )
         if vec_row is not None:
             vec_bytes = vec_row["embedding"]

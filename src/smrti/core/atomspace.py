@@ -5,7 +5,7 @@ import json
 import struct
 from typing import Optional
 
-from smrti.core.db import Database, fts_write
+from smrti.core.db import Database, fts_write, stable_rowid, vec_delete, vec_insert
 from smrti.core.embed import EmbeddingProvider
 from smrti.core.models import (
     Atom,
@@ -104,9 +104,12 @@ class AtomSpace:
         # unsearchable by word if its index row was ever lost.
         if atom.type != AtomType.RELATION:
             statements.extend(fts_write(self._db, atom.id, atom.label, atom.content))
+            # By rowid, never by atom_id: a vec0 table answers a non-rowid
+            # predicate with a full scan of every vector in the database, so
+            # this one query used to make each write cost O(graph size).
             existing_vec = self._db.fetchone(
-                "SELECT atom_id FROM vec_atoms WHERE atom_id = ?",
-                (atom.id,),
+                "SELECT 1 FROM vec_atoms WHERE rowid = ?",
+                (stable_rowid(atom.id),),
             )
             content_changed = prior is not None and (
                 prior["label"] != atom.label or prior["content"] != atom.content
@@ -118,14 +121,9 @@ class AtomSpace:
                 embedding = self._embed.embed(text_to_embed)
                 vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
                 if existing_vec:
-                    statements.append(
-                        ("DELETE FROM vec_atoms WHERE atom_id = ?", (atom.id,))
-                    )
+                    statements.extend(vec_delete([atom.id]))
                 statements.append(
-                    (
-                        "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",
-                        (atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
-                    )
+                    vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label)
                 )
 
         self._db.execute_batch(statements)
@@ -195,14 +193,9 @@ class AtomSpace:
                 text_to_embed = f"{atom.label} {atom.content}"
             embedding = self._embed.embed(text_to_embed)
             vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+            statements.extend(vec_delete([atom.id]))
             statements.append(
-                ("DELETE FROM vec_atoms WHERE atom_id = ?", (atom.id,))
-            )
-            statements.append(
-                (
-                    "INSERT INTO vec_atoms (atom_id, embedding, tenant_id, space, label) VALUES (?, ?, ?, ?, ?)",
-                    (atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
-                )
+                vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label)
             )
 
         self._db.execute_batch(statements)

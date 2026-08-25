@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import struct
 
+from smrti.core.db import stable_rowid
 from smrti.core.models import (
     Atom,
     AtomPair,
@@ -46,8 +47,8 @@ def _get_space_atoms(tenant_id: str, space: str, db) -> list[Atom]:
 def _get_embedding(atom_id: str, db) -> list[float] | None:
     """Fetch the stored embedding for an atom."""
     row = db.fetchone(
-        "SELECT embedding FROM vec_atoms WHERE atom_id = ?",
-        (atom_id,),
+        "SELECT embedding FROM vec_atoms WHERE rowid = ?",
+        (stable_rowid(atom_id),),
     )
     if row is None:
         return None

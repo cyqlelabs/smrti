@@ -1,7 +1,7 @@
 """Consolidation epoch: the main memory evolution loop."""
 from __future__ import annotations
 
-from smrti.core.db import fts_delete
+from smrti.core.db import fts_delete, vec_delete
 from smrti.core.models import PERMANENT_PROBABILITY, EpochResult, TruthValue
 from smrti.core.provenance import (
     ATOM_FORGOTTEN,
@@ -350,7 +350,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
                 f"DELETE FROM atoms WHERE type = 'relation' AND tenant_id = ? AND (source_id IN ({ph}) OR target_id IN ({ph}))",
                 (tenant_id, *atom_ids, *atom_ids),
             ),
-            (f"DELETE FROM vec_atoms WHERE atom_id IN ({ph})", tuple(atom_ids)),
+            *vec_delete(atom_ids),
             *fts_delete(db, atom_ids),
             (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(atom_ids)),
             (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(atom_ids)),

@@ -24,6 +24,7 @@ flowchart TD
     subgraph RECEIVE ["  ① Receive  "]
         GATE["🔌 Interface\nMCP · REST · Proxy"]
         SENTIMENT["💜 Emotional Tone\nAuto-detected valence\n& intensity"]
+        WHEN["🗓️ Temporal Resolution\n'mañana' → 2026-08-27\nresolved against the write time"]
     end
 
     subgraph UNDERSTAND ["  ② Understand  "]
@@ -52,8 +53,11 @@ flowchart TD
 
     subgraph RETRIEVE ["  ⑤ Recall  "]
         KNN["🔎 Semantic Search\nVector similarity\nacross all memories"]
+        BM25["🔤 Lexical Search\nBM25 over the words\nthemselves · any language"]
+        FUSE["⚖️ Rank Fusion\nReciprocal Rank Fusion\npicks the candidate pool"]
         EXPAND["🌐 Graph Expansion\nFollow relation edges\nto related concepts"]
         SALIENCE["🏆 Salience Ranking\nSimilarity · Attention\nConfidence · Valence"]
+        DIVERSE["🎛️ Diversity Cap\nOne moment cannot fill\nthe answer twice over"]
     end
 
     subgraph CLASSIFY ["  ⑥ Classify  "]
@@ -65,7 +69,8 @@ flowchart TD
     RESPOND(["✨ Memory-Enriched Response\nBehavioral constraints injected first\nContext woven into the answer"])
 
     USER --> GATE
-    GATE --> SENTIMENT
+    GATE --> WHEN
+    WHEN --> SENTIMENT
     SENTIMENT --> NER
     NER --> RESOLVE
     RESOLVE --> PRONOUNS
@@ -77,9 +82,10 @@ flowchart TD
     ATOMS <-.->|"continuous\nbackground cycle"| DECAY
     DECAY --> PROPAGATE --> HEAL --> PROMOTE --> PRUNE
 
-    ATOMS -->|"on recall"| KNN
-    KNN --> EXPAND --> SALIENCE
-    SALIENCE --> CRITICAL & ANTIPATTERN & CONTEXT_OUT
+    ATOMS -->|"on recall"| KNN & BM25
+    KNN & BM25 --> FUSE
+    FUSE --> EXPAND --> SALIENCE --> DIVERSE
+    DIVERSE --> CRITICAL & ANTIPATTERN & CONTEXT_OUT
     CRITICAL & ANTIPATTERN & CONTEXT_OUT --> RESPOND
 
     classDef userNode fill:#312e81,stroke:#818cf8,stroke-width:2px,color:#e0e7ff,rx:20
@@ -94,11 +100,11 @@ flowchart TD
     classDef respondNode fill:#312e81,stroke:#818cf8,stroke-width:2px,color:#e0e7ff,rx:20
 
     class USER userNode
-    class GATE,SENTIMENT receiveNode
+    class GATE,SENTIMENT,WHEN receiveNode
     class NER,RESOLVE,PRONOUNS,CLAIMS,CONTEXT understandNode
     class ATOMS,TV,AV,VAL,EDGES storeNode
     class DECAY,PROPAGATE,HEAL,PROMOTE,PRUNE evolveNode
-    class KNN,EXPAND,SALIENCE retrieveNode
+    class KNN,BM25,FUSE,EXPAND,SALIENCE,DIVERSE retrieveNode
     class CRITICAL criticalNode
     class ANTIPATTERN warnNode
     class CONTEXT_OUT contextNode

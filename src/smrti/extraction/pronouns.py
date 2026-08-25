@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from smrti.core.db import fts_delete
+
 if TYPE_CHECKING:
     from smrti.extraction.ner import NERProvider
 
@@ -204,6 +206,7 @@ def merge_pronoun_into_named(
     )
     if row:
         db.execute("DELETE FROM vec_atoms WHERE atom_id = ?", (pronoun_atom_id,))
+        db.execute_batch(fts_delete(db, [pronoun_atom_id]))
         db.execute("DELETE FROM atoms WHERE id = ?", (pronoun_atom_id,))
 
 

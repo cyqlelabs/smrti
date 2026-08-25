@@ -58,6 +58,71 @@ _VEC_SCHEMA_SQL = """CREATE VIRTUAL TABLE IF NOT EXISTS vec_atoms USING vec0(
     +label      TEXT
 )"""
 
+# Lexical half of retrieval. Embedding distance answers "is this about the same
+# thing"; it does not answer "does this text contain this word", and the two
+# fail apart: a belief stored in one language scores well below a same-language
+# pair against the query that asks for it, even when both hold the same proper
+# nouns. BM25 over the raw text finds those in any language, so recall runs
+# both and fuses the ranked lists.
+#
+# ``remove_diacritics 2`` folds accents, so "Nicolás" is reachable by typing
+# "Nicolas". The table is standalone rather than external-content: atoms are
+# written through INSERT OR REPLACE, which does not fire delete triggers unless
+# recursive triggers are on, so a trigger-maintained index would silently
+# accumulate a second row per rewritten atom.
+_FTS_SCHEMA_SQL = """CREATE VIRTUAL TABLE IF NOT EXISTS atoms_fts USING fts5(
+    atom_id UNINDEXED,
+    label,
+    content,
+    tokenize='unicode61 remove_diacritics 2'
+)"""
+
+
+def fts_rowid(atom_id: str) -> int:
+    """The lexical index rowid for an atom.
+
+    FTS5 has no secondary index, so deleting by ``atom_id`` would scan the
+    whole index on every rewrite — and an atom is rewritten on every repeated
+    ``remember``. Deriving the rowid from the atom id instead makes both the
+    write and the delete an integer-key lookup. 56 bits of SHA-256: two atoms
+    colliding would cost one of them its lexical entry (it stays reachable by
+    vector), at a probability no graph this side of 10^8 atoms will meet.
+    """
+    return int.from_bytes(hashlib.sha256(atom_id.encode()).digest()[:7], "big")
+
+
+def fts_write(db: "Database", atom_id: str, label: str, content: str | None) -> list[tuple]:
+    """Statements that put an atom's current text in the lexical index.
+
+    Empty on a build with no FTS5, where the table does not exist: every
+    caller folds these into a batch, and one statement against a missing
+    table would fail the whole write.
+    """
+    if not db.fts_enabled:
+        return []
+    rowid = fts_rowid(atom_id)
+    return [
+        ("DELETE FROM atoms_fts WHERE rowid = ?", (rowid,)),
+        (
+            "INSERT INTO atoms_fts (rowid, atom_id, label, content) VALUES (?, ?, ?, ?)",
+            (rowid, atom_id, label, content or ""),
+        ),
+    ]
+
+
+def fts_delete(db: "Database", atom_ids: list[str]) -> list[tuple]:
+    """Statements removing atoms from the lexical index."""
+    if not db.fts_enabled or not atom_ids:
+        return []
+    ph = ",".join("?" * len(atom_ids))
+    return [
+        (
+            f"DELETE FROM atoms_fts WHERE rowid IN ({ph})",
+            tuple(fts_rowid(a) for a in atom_ids),
+        )
+    ]
+
+
 _SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS atoms (
     id          TEXT PRIMARY KEY,
@@ -177,6 +242,9 @@ class Database:
         self._write_lock = threading.Lock()
         self._read_pool: queue.Queue[sqlite3.Connection] = queue.Queue(maxsize=_READ_POOL_SIZE)
         self._migration_backup_done = False
+        # Whether this build of SQLite carries FTS5. Retrieval reads it to
+        # decide whether the lexical half of the search exists at all.
+        self.fts_enabled = False
 
     def initialize(self) -> None:
         self._write_conn = _make_connection(self._db_path)
@@ -192,6 +260,59 @@ class Database:
                 if stmt:
                     self._write_conn.execute(stmt)
             self._write_conn.commit()
+            self._init_atoms_fts()
+
+    def _init_atoms_fts(self) -> None:
+        """Create the lexical index, backfilling a graph written before it existed.
+
+        FTS5 is compiled into most SQLite builds but not all; where it is
+        missing the engine keeps working on vector search alone rather than
+        refusing to open the database.
+
+        The backfill is keyed on the index holding fewer atoms than the graph
+        does, not on the table being new. A process running a build without
+        this code writes atoms and no lexical rows, and after such a writer has
+        touched the database a one-time migration would already have run — so
+        the check is re-made every open, and repairs whatever drifted.
+        """
+        conn = self._write_conn
+        try:
+            conn.execute(_FTS_SCHEMA_SQL)
+            conn.commit()
+        except sqlite3.OperationalError:
+            self.fts_enabled = False
+            return
+        self.fts_enabled = True
+        if (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'atoms'"
+            ).fetchone()
+            is None
+        ):
+            return
+        indexed = conn.execute("SELECT COUNT(*) AS n FROM atoms_fts").fetchone()["n"]
+        stored = conn.execute(
+            "SELECT COUNT(*) AS n FROM atoms WHERE type != 'relation'"
+        ).fetchone()["n"]
+        if indexed >= stored:
+            return
+        rows = conn.execute(
+            "SELECT id, label, content FROM atoms WHERE type != 'relation'"
+        ).fetchall()
+        try:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("DELETE FROM atoms_fts")
+            conn.executemany(
+                "INSERT INTO atoms_fts (rowid, atom_id, label, content) VALUES (?, ?, ?, ?)",
+                [
+                    (fts_rowid(r["id"]), r["id"], r["label"], r["content"] or "")
+                    for r in rows
+                ],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _migrate_content_hash(self) -> None:
         """Add the content_hash column to pre-existing DBs and backfill episodes."""

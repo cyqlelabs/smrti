@@ -102,6 +102,16 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             ]
         }
 
+    elif name == "smrti_reinforce":
+        atom_ids = args.get("atom_ids") or []
+        weight = args.get("weight")
+        result = (
+            mem.reinforce(atom_ids)
+            if weight is None
+            else mem.reinforce(atom_ids, weight)
+        )
+        return {"status": "ok", "space": mem.write_space, **result}
+
     elif name == "smrti_reflect":
         result = mem.reflect()
         return result.model_dump()

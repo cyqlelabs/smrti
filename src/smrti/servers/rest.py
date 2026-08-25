@@ -171,6 +171,18 @@ class ReflectRequest(BaseModel):
     space: Optional[SpaceName] = None
 
 
+# An atom id is a UUID; the cap is on the shape, not on the space of names.
+AtomId = Annotated[str, Field(max_length=64)]
+
+
+class ReinforceRequest(BaseModel):
+    # A batch is what a client reports after one turn, so a few dozen ids is
+    # generous; an unbounded list is a whole-graph write behind one request.
+    atom_ids: list[AtomId] = Field(min_length=1, max_length=64)
+    weight: Optional[float] = Field(default=None, gt=0.0, le=1.0)
+    space: Optional[SpaceName] = None
+
+
 class PersonalityRequest(BaseModel):
     action: str  # "get", "set", "preset"
     preset: Optional[str] = None
@@ -227,6 +239,14 @@ async def recall(req: RecallRequest):
 @app.post("/reflect")
 async def reflect(req: Optional[ReflectRequest] = None):
     return await _run_sync(handle_tool, get_mem(req.space if req else None), "smrti_reflect", {})
+
+
+@app.post("/reinforce")
+async def reinforce(req: ReinforceRequest):
+    """Report that these memories were used, so being used can build confidence."""
+    return await _run_sync(
+        handle_tool, get_mem(req.space), "smrti_reinforce", req.model_dump()
+    )
 
 
 @app.post("/believe")

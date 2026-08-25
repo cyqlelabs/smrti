@@ -32,6 +32,7 @@ from smrti.extraction.sentiment import estimate_valence
 from smrti.extraction.resolve import EntityResolver
 from smrti.retrieval.fan_out import retrieve
 from smrti.evolution.epoch import run_epoch
+from smrti.evolution.reinforcement import DEFAULT_WEIGHT as _REINFORCE_WEIGHT, reinforce_atoms
 from smrti.personality.params import PersonalityProfile, load_preset
 from smrti.spaces.set_ops import (
     space_overlap as _space_overlap,
@@ -267,6 +268,25 @@ class Smrti:
             )
             self.atomspace.add_evidence(ev)
         return atom_id
+
+    def reinforce(
+        self, atom_ids: list[str], weight: float = _REINFORCE_WEIGHT
+    ) -> dict:
+        """Record that these memories were used, as evidence for their truth.
+
+        The caller decides what "used" means — a cheap proxy is that
+        distinctive words from a recalled atom turned up in the reply it
+        informed. The engine trusts the report the way it trusts any other
+        evidence, and no further: the weight is small, the update converges,
+        and each atom banks at most a few reports per consolidation.
+
+        Returns the ids that took the evidence and, for each one that did
+        not, why — unknown in this space, deliberately forgotten, or already
+        capped this epoch.
+        """
+        return reinforce_atoms(
+            atom_ids, self.tenant_id, self.write_space, self.db, weight
+        )
 
     def reflect(self) -> EpochResult:
         with _get_reflect_lock(self.tenant_id, self.write_space):

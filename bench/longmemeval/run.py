@@ -25,6 +25,7 @@ from ..harness import (
     load_json,
     require_dataset,
     resolve_answering,
+    resolve_extraction,
 )
 from .adapter import aggregate, evaluate_question, ingest, load_questions
 
@@ -45,7 +46,8 @@ DATASET_HINT = (
 )
 
 
-def run(config: dict, dataset: str, db_path: str, answering: dict | None = None) -> dict:
+def run(config: dict, dataset: str, db_path: str, answering: dict | None = None,
+        extraction: dict | None = None) -> dict:
     """Ingest every question's history and score its recall."""
     questions = load_questions(dataset, config.get("question_limit") or None)
     rows = []
@@ -58,7 +60,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None)
             tenant_id="longmemeval",
             write_space=f"q_{question.question_id or position}",
         )
-        stored = ingest(question, mem)
+        stored = ingest(question, mem, extraction)
         row = evaluate_question(
             question,
             mem,
@@ -129,12 +131,14 @@ def main(argv: list[str] | None = None) -> int:
     tolerance = config.pop("tolerance", 0.01)
 
     answering = resolve_answering(args, parser)
+    extraction = resolve_extraction(args)
+    config["extraction"] = bool(extraction)
     db_path, scratch = args.db, None
     if db_path is None:
         scratch = tempfile.TemporaryDirectory()
         db_path = os.path.join(scratch.name, "bench.db")
     try:
-        result = run(config, args.dataset, db_path, answering)
+        result = run(config, args.dataset, db_path, answering, extraction)
     finally:
         if scratch is not None:
             scratch.cleanup()

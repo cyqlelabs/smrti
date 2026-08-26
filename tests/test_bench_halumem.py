@@ -143,6 +143,21 @@ def test_assistant_turns_are_stored_as_agent_authored(mem, dataset):
     assert "Good to meet you" in agent[0]["content"]
 
 
+def test_extraction_runs_once_per_episode_when_asked_for(mem, dataset, monkeypatch):
+    seen = []
+
+    async def _fake(atom_id, content, m, auth, model, upstream, source, mode="hybrid"):
+        seen.append((content, source))
+
+    monkeypatch.setattr("smrti.extraction.extract.extract_and_link_serialized", _fake)
+    user = load_users(dataset)[0]
+
+    ingest(user, mem, {"url": "http://x/v1", "model": "m", "mode": "hybrid", "auth": ""})
+
+    assert [c for c, _ in seen] == [t.content for t in user.turns]
+    assert ("Good to meet you, Martin.", "agent") in seen
+
+
 def test_turn_timestamps_become_the_write_time(mem, dataset):
     user = load_users(dataset)[0]
     ingest(user, mem)

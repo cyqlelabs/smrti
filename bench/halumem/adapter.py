@@ -141,14 +141,17 @@ def select_questions(user: User, per_user: int | None) -> list[Question]:
     return picked
 
 
-def ingest(user: User, mem) -> int:
+def ingest(user: User, mem, extraction: dict | None = None) -> int:
     """Store one persona's dialogue as episodes, keeping the turn timestamps.
 
     Assistant turns are filed as agent-authored, which is what they are: the
     engine trusts its own past output less than the user's, and a benchmark
     that hid that would measure a configuration nobody runs.
     """
+    from ..harness import run_extraction
+
     stored = 0
+    episodes: list[tuple[str, str, str]] = []
     for turn in user.turns:
         atom_id = mem.remember(
             turn.content,
@@ -156,6 +159,7 @@ def ingest(user: User, mem) -> int:
         )
         if not atom_id:
             continue
+        episodes.append((atom_id, turn.content, "agent" if turn.role == "assistant" else "user"))
         if turn.at is not None:
             stamp = turn.at.strftime("%Y-%m-%d %H:%M:%S")
             mem.db.execute(
@@ -163,6 +167,7 @@ def ingest(user: User, mem) -> int:
                 (stamp, stamp, atom_id),
             )
         stored += 1
+    run_extraction(mem, episodes, extraction)
     return stored
 
 

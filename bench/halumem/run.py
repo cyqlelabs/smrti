@@ -26,6 +26,7 @@ from ..harness import (
     load_json,
     require_dataset,
     resolve_answering,
+    resolve_extraction,
     write_baseline,
 )
 from .adapter import aggregate, ingest, load_users, recall_for, select_questions
@@ -46,7 +47,8 @@ DATASET_HINT = (
 )
 
 
-def run(config: dict, dataset: str, db_path: str, answering: dict) -> dict:
+def run(config: dict, dataset: str, db_path: str, answering: dict,
+        extraction: dict | None = None) -> dict:
     users = load_users(dataset, config.get("user_limit") or None)
     rows: list[dict] = []
     for position, user in enumerate(users, start=1):
@@ -56,7 +58,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict) -> dict:
             tenant_id="halumem",
             write_space=f"u_{user.uuid or position}",
         )
-        stored = ingest(user, mem)
+        stored = ingest(user, mem, extraction)
         questions = select_questions(user, config.get("questions_per_user") or None)
         items = [
             {
@@ -150,6 +152,8 @@ def main(argv: list[str] | None = None) -> int:
     config = load_json(args.config)
     if args.limit is not None:
         config["user_limit"] = args.limit
+    extraction = resolve_extraction(args)
+    config["extraction"] = bool(extraction)
     tolerance = config.pop("tolerance", 0.01)
 
     db_path, scratch = args.db, None
@@ -157,7 +161,7 @@ def main(argv: list[str] | None = None) -> int:
         scratch = tempfile.TemporaryDirectory()
         db_path = os.path.join(scratch.name, "halumem.db")
     try:
-        result = run(config, args.dataset, db_path, answering)
+        result = run(config, args.dataset, db_path, answering, extraction)
     finally:
         if scratch is not None:
             scratch.cleanup()

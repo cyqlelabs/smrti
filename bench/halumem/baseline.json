@@ -1,9 +1,9 @@
 {
   "config_hash": "49fb36a8eca87044",
-  "recorded_at": "2026-08-26T20:25:01+00:00",
+  "recorded_at": "2026-08-26T23:44:46+00:00",
   "questions": 180,
-  "correct_rate": 0.5222222222222223,
-  "hallucination_rate": 0.42777777777777776,
-  "omission_rate": 0.05,
-  "boundary_hallucination_rate": 0.058823529411764705
+  "correct_rate": 0.5166666666666667,
+  "hallucination_rate": 0.39444444444444443,
+  "omission_rate": 0.08888888888888889,
+  "boundary_hallucination_rate": 0.029411764705882353
 }

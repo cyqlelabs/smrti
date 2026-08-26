@@ -41,10 +41,7 @@ BASELINE_KEYS = (
     GATED_METRIC, "omission_rate", "boundary_hallucination_rate",
 )
 
-DATASET_HINT = (
-    "HaluMem is downloaded separately from the IAAR-Shanghai/HaluMem dataset; "
-    "point --dataset at HaluMem-Medium.jsonl."
-)
+DATASET_HINT = "Run `make datasets` to fetch it, or point --dataset at your own copy."
 
 
 def run(config: dict, dataset: str, db_path: str, answering: dict,

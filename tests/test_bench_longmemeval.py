@@ -9,6 +9,7 @@ ones claimed, and that a regression against the baseline fails the run.
 from __future__ import annotations
 
 import json
+import pathlib
 import sys
 
 import pytest
@@ -399,9 +400,33 @@ def test_recording_a_baseline_keeps_only_the_summary(tmp_path):
 # ── the CLI ──────────────────────────────────────────────────────────────────
 
 
+def test_every_dataset_the_makefile_defaults_to_can_be_fetched():
+    """`make bench` defaulted to paths nothing in the repo ever created."""
+    import re
+
+    from bench.fetch import DATASETS
+
+    makefile = (pathlib.Path(__file__).parent.parent / "Makefile").read_text()
+    defaults = set(re.findall(r"\?= data/(\S+)", makefile))
+    assert defaults
+    assert defaults <= set(DATASETS), f"no fetch rule for {defaults - set(DATASETS)}"
+
+
+def test_a_partial_download_is_never_left_behind(tmp_path, monkeypatch):
+    """A dropped connection must not look like a finished dataset."""
+    import bench.fetch as fetch
+
+    monkeypatch.setattr(fetch, "DATA_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        fetch, "DATASETS", {"tiny.json": ("http://example.invalid/x", "stand-in")}
+    )
+    assert fetch.main(["tiny.json"]) == 1
+    assert list(tmp_path.iterdir()) == []
+
+
 def test_a_missing_dataset_is_a_clear_failure(capsys):
     assert main(["--dataset", "/nonexistent/longmemeval_s.json"]) == 2
-    assert "downloaded separately" in capsys.readouterr().err
+    assert "make datasets" in capsys.readouterr().err
 
 
 def test_the_harness_runs_end_to_end_and_records_a_baseline(tmp_path, dataset, capsys):

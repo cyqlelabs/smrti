@@ -144,13 +144,16 @@ def load_questions(path: str, limit: int | None = None) -> list[Question]:
     return picked
 
 
-def ingest(question: Question, mem) -> dict[str, Turn]:
+def ingest(question: Question, mem, extraction: dict | None = None) -> dict[str, Turn]:
     """Store one question's history as episodes, keeping the session dates.
 
     Returns the atom id of every stored turn, so a recall result can be told
     apart from the gold evidence by identity rather than by string matching.
     """
+    from ..harness import run_extraction
+
     stored: dict[str, Turn] = {}
+    episodes: list[tuple[str, str, str]] = []
     for turn in question.turns:
         # The benchmark's assistant turns are the model's own words, and the
         # engine already trusts those less than the user's — the same
@@ -161,6 +164,7 @@ def ingest(question: Question, mem) -> dict[str, Turn]:
         )
         if not atom_id:
             continue
+        episodes.append((atom_id, turn.content, "agent" if turn.role == "assistant" else "user"))
         if turn.date is not None:
             stamp = turn.date.strftime("%Y-%m-%d %H:%M:%S")
             mem.db.execute(
@@ -168,6 +172,7 @@ def ingest(question: Question, mem) -> dict[str, Turn]:
                 (stamp, stamp, atom_id),
             )
         stored[atom_id] = turn
+    run_extraction(mem, episodes, extraction)
     return stored
 
 

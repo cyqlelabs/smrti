@@ -494,48 +494,37 @@ pytest tests/ -v
 
 ## Benchmarks
 
-Three harnesses live in `bench/`, each ingesting a published dataset as episodes and answering its questions through `recall`. Retrieval and answering are scored separately on purpose: a strong answering model can carry a weak candidate set, and that is exactly the regression a gate exists to catch.
+Two harnesses live in `bench/`, each ingesting a published dataset as episodes and answering its questions through `recall`. Retrieval and answering are scored separately on purpose: a strong answering model can carry a weak candidate set, and that is exactly the regression a gate exists to catch.
 
 Measured on 2026-08-26 — smrti as a pure vector + BM25 store, extraction off, `top_k=50`, `deterministic` preset, gemini-3.7-flash answering and judging.
 
 | Benchmark | Scope | Retrieval | Answers | Notes |
 | --------- | ----- | --------- | ------- | ----- |
 | [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) | 40 questions, one per ability in turn | **0.900** hit · 0.869 evidence recall | **0.825** | 5 of 6 abilities retrieve perfectly |
-| [LoCoMo](https://github.com/snap-research/locomo) | 10 conversations, 200 questions | **0.692** hit · 0.595 evidence recall | **0.579** | adversarial refusal 0.171 |
 | [HaluMem](https://huggingface.co/datasets/IAAR-Shanghai/HaluMem) | 3 personas, 180 questions | — | **0.522** correct | hallucination 0.428 · omission 0.050 |
 
 ```bash
 make bench DATASET=path/to/longmemeval_s.json        # fails if the hit rate drops
-make bench-locomo LOCOMO=path/to/locomo10.json
 make bench-halumem HALUMEM=path/to/HaluMem-Medium.jsonl
 
 # add --extract-url/--extract-model to any of them to build the entity graph
 ```
 
-Each benchmark locks its config (model, `top_k`, personality, subset) beside a recorded baseline, and refuses to compare numbers measured under different configs. Subsets are deterministic and balanced across question types — the datasets are grouped by ability, so the front of a file is one skill many times over. None of the three is a CI gate: they need dataset downloads, the embedding model, and a judge key.
+Each benchmark locks its config (model, `top_k`, personality, subset) beside a recorded baseline, and refuses to compare numbers measured under different configs. Subsets are deterministic and balanced across question types — the datasets are grouped by ability, so the front of a file is one skill many times over. Neither is a CI gate: they need dataset downloads, the embedding model, and a judge key.
 
 ### What the numbers say
 
 **Where it is strong.** LongMemEval retrieves the annotated evidence for five of six abilities without a miss, and temporal reasoning and knowledge updates convert that into perfect answers once memories reach the model stamped with their dates. On HaluMem's *memory boundary* questions — asked about things the user never said — smrti answers correctly 94% of the time and invents something 5.9% of the time. Knowing what you were not told is the hard half of remembering.
 
-**Where it is weak.** HaluMem's synthesis categories hallucinate badly: multi-hop inference 70%, generalization 72%. LoCoMo's open-domain questions retrieve at 0.500 against 0.780 for temporal ones, and only 17% of its adversarial questions draw the refusal they deserve. The shape is consistent — smrti finds what it stored and stumbles when an answer has to be *assembled* from several memories.
+**Where it is weak.** HaluMem's synthesis categories hallucinate badly: multi-hop inference 70%, generalization 72%, dynamic update 65%. And smrti almost never declines to answer — it omits 5.0% where published systems omit 17–35% — so what would be an admission of ignorance comes out as an assertion instead. It finds what it stored and stumbles when an answer has to be *assembled* from several memories.
 
-**What the entity graph costs.** The table runs without extraction, and turning it on makes LoCoMo worse, not better:
+**What the entity graph costs.** The table runs without extraction. `--extract-url`/`--extract-model` build the entity and claim graph as episodes land, at 1.25 s and one LLM call per turn against 18 ms without — about seven hours for a full LongMemEval run. Its effect on these two benchmarks is unmeasured.
 
-| LoCoMo, 10 conversations | extraction off | extraction on |
-| ------------------------ | -------------- | ------------- |
-| retrieval hit            | **0.692**      | 0.277         |
-| answer accuracy          | **0.579**      | 0.277         |
-
-Extraction built 5,067 concepts, 652 beliefs, 583 goals and 23,909 edges over 5,882 episodes, and those atoms rank in the same list as the turns they came from. They take only 15% of the returned slots, but they displace the annotated evidence past the cut: at `top_k=100` retrieval recovers to 0.541, still short of 0.692. Some of that is the benchmark's shape — LoCoMo defines its gold as dialogue turns, so it cannot credit an answer assembled from concepts — but answer accuracy fell by the same margin, and that metric does not care where the answer came from.
-
-Extraction also costs 1.25 s and one LLM call per turn against 18 ms without, so a full LongMemEval run with it on is about seven hours.
-
-**Not implemented.** HaluMem's memory-extraction and memory-update tasks, and LoCoMo's event summarization.
+**Not implemented.** HaluMem's memory-extraction and memory-update tasks.
 
 ### Reading these against published results
 
-Published comparisons report judged answer accuracy over full datasets, so treat the table as a position, not a ranking. The subsets here are small (40 to 200 questions, where a single question moves a category by several points), a single judge grades them where published protocols average three, and the answering model differs. LongMemEval leaderboard figures for reference: MemOS 77.8, Memobase 72.4, Mem0 66.4, Zep 63.8.
+Published comparisons report judged answer accuracy over full datasets, so treat the table as a position, not a ranking. The subsets here are small (40 to 180 questions, where a single question moves a category by several points), a single judge grades them where published protocols average three, and the answering model differs. LongMemEval leaderboard figures for reference: MemOS 77.8, Memobase 72.4, Mem0 66.4, Zep 63.8.
 
 ## License
 

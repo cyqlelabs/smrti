@@ -211,6 +211,37 @@ def test_assistant_turns_are_stored_as_agent_authored(mem, dataset):
     assert atom.metadata["source"] == "agent"
 
 
+def test_ingest_builds_no_graph_unless_extraction_is_asked_for(mem, dataset):
+    """The facade never extracts — only the server modes do.
+
+    The benchmarks ingest through the facade, so a config key claiming
+    extraction was off described a state the harness could not change. It is a
+    flag now, and this pins the default it names.
+    """
+    question = load_questions(dataset)[0]
+
+    ingest(question, mem)
+
+    assert mem.status()["by_type"] == {"episode": 4}
+
+
+def test_extraction_runs_once_per_episode_in_order(mem, dataset, monkeypatch):
+    """Serialized within a space, because that is the engine's own rule."""
+    seen = []
+
+    async def _fake(atom_id, content, m, auth, model, upstream, source, mode="hybrid"):
+        seen.append((content, source))
+
+    monkeypatch.setattr("smrti.extraction.extract.extract_and_link_serialized", _fake)
+    question = load_questions(dataset)[0]
+
+    ingest(question, mem, {"url": "http://x/v1", "model": "m", "mode": "hybrid", "auth": ""})
+
+    assert [c for c, _ in seen] == [t.content for t in question.turns]
+    # The assistant's own words stay agent-authored through extraction too.
+    assert ("That's a big milestone", "agent") in seen
+
+
 # ── scoring ──────────────────────────────────────────────────────────────────
 
 

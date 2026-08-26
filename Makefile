@@ -2,10 +2,15 @@ DATASET ?= data/longmemeval_s.json
 HALUMEM ?= data/HaluMem-Medium.jsonl
 BENCH_ARGS ?=
 
-.PHONY: test bench bench-baseline bench-halumem bench-all
+.PHONY: test datasets bench bench-baseline bench-halumem bench-all
 
 test:
 	pytest tests/ -q
+
+# Fetch the benchmark datasets into data/. Neither ships with the repo, and
+# without them every bench target below fails on a fresh clone.
+datasets:
+	PYTHONPATH=. python -m bench.fetch
 
 # Retrieval regression harness. Required before releasing any change that
 # touches retrieval; not a CI gate, since it needs the dataset and the

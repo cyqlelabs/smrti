@@ -13,3 +13,6 @@ src/smrti/_version.py
 .coverage
 coverage.xml
 coverage.json
+
+# Benchmark datasets, fetched by `make datasets`
+data/

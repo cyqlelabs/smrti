@@ -41,9 +41,7 @@ BASELINE_KEYS = (
     GATED_METRIC, "evidence_recall", "session_hit_rate",
 )
 
-DATASET_HINT = (
-    "LongMemEval-S is downloaded separately; point --dataset at the JSON file."
-)
+DATASET_HINT = "Run `make datasets` to fetch it, or point --dataset at your own copy."
 
 
 def run(config: dict, dataset: str, db_path: str, answering: dict | None = None,

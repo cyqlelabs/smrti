@@ -290,7 +290,7 @@ def test_a_missing_dataset_is_a_clear_failure(capsys):
         "--dataset", "/nonexistent/HaluMem-Medium.jsonl",
         "--answer-url", "http://localhost/v1", "--answer-model", "m",
     ]) == 2
-    assert "IAAR-Shanghai/HaluMem" in capsys.readouterr().err
+    assert "make datasets" in capsys.readouterr().err
 
 
 def test_running_without_an_answering_model_is_refused(dataset):

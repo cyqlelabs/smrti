@@ -504,13 +504,14 @@ Measured on 2026-08-26 — smrti as a pure vector + BM25 store, extraction off, 
 | [HaluMem](https://huggingface.co/datasets/IAAR-Shanghai/HaluMem) | 3 personas, 180 questions | — | **0.522** correct | hallucination 0.428 · omission 0.050 |
 
 ```bash
-make bench DATASET=path/to/longmemeval_s.json        # fails if the hit rate drops
-make bench-halumem HALUMEM=path/to/HaluMem-Medium.jsonl
+make datasets        # fetch both into data/ (265MB + 32MB, once)
+make bench           # fails if the retrieval hit rate drops
+make bench-halumem   # fails if the hallucination rate rises
 
-# add --extract-url/--extract-model to any of them to build the entity graph
+# add --extract-url/--extract-model to either to build the entity graph
 ```
 
-Each benchmark locks its config (model, `top_k`, personality, subset) beside a recorded baseline, and refuses to compare numbers measured under different configs. Subsets are deterministic and balanced across question types — the datasets are grouped by ability, so the front of a file is one skill many times over. Neither is a CI gate: they need dataset downloads, the embedding model, and a judge key.
+Each benchmark locks its config (model, `top_k`, personality, subset) beside a recorded baseline, and refuses to compare numbers measured under different configs. Subsets are deterministic and balanced across question types — the datasets are grouped by ability, so the front of a file is one skill many times over. Neither is a CI gate: they need the datasets, the embedding model, and a judge key.
 
 ### What the numbers say
 

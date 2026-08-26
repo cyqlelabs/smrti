@@ -320,3 +320,27 @@ def test_a_session_of_distinct_turns_survives_recall_intact(mem):
     results = mem.recall("what do you know about my studies", top_k=4, min_confidence=0.0)
 
     assert len(results) == 4
+
+def test_the_repeat_allowance_grows_with_the_answer():
+    """A duplicate wastes a fifth of a five-slot answer and 2% of a fifty-slot one."""
+    from smrti.retrieval.diversify import _repeat_allowance
+
+    assert _repeat_allowance(5) == 2
+    assert _repeat_allowance(10) == 2
+    assert _repeat_allowance(50) == 8
+
+
+def test_a_large_answer_keeps_evidence_the_small_answer_cap_would_evict():
+    """The LongMemEval regression at top_k=50: cap 2 pushed real turns out."""
+    similar = [
+        _result(f"the deploy on Tuesday failed with error {n}", 1.0 - n / 100)
+        for n in range(6)
+    ]
+    other = [
+        _result(f"an unrelated note {n}", 0.5 - n / 100, created_at=LATER)
+        for n in range(30)
+    ]
+
+    kept = diversify(similar + other, top_k=30)
+
+    assert all(r in kept for r in similar)

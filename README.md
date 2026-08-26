@@ -500,8 +500,8 @@ Measured on 2026-08-26 — smrti as a pure vector + BM25 store, extraction off, 
 
 | Benchmark | Scope | Retrieval | Answers | Notes |
 | --------- | ----- | --------- | ------- | ----- |
-| [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) | 40 questions, one per ability in turn | **0.900** hit · 0.869 evidence recall | **0.825** | 5 of 6 abilities retrieve perfectly |
-| [HaluMem](https://huggingface.co/datasets/IAAR-Shanghai/HaluMem) | 3 personas, 180 questions | — | **0.522** correct | hallucination 0.428 · omission 0.050 |
+| [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) | 40 questions, one per ability in turn | **0.975** hit · 0.912 evidence recall | **0.900** | 5 of 6 abilities retrieve without a miss |
+| [HaluMem](https://huggingface.co/datasets/IAAR-Shanghai/HaluMem) | 3 personas, 180 questions | — | **0.517** correct | hallucination 0.394 · omission 0.089 |
 
 ```bash
 make datasets        # fetch both into data/ (265MB + 32MB, once)
@@ -515,9 +515,9 @@ Each benchmark locks its config (model, `top_k`, personality, subset) beside a r
 
 ### What the numbers say
 
-**Where it is strong.** LongMemEval retrieves the annotated evidence for five of six abilities without a miss, and temporal reasoning and knowledge updates convert that into perfect answers once memories reach the model stamped with their dates. On HaluMem's *memory boundary* questions — asked about things the user never said — smrti answers correctly 94% of the time and invents something 5.9% of the time. Knowing what you were not told is the hard half of remembering.
+**Where it is strong.** LongMemEval retrieves the annotated evidence for five of six abilities without a miss, and temporal reasoning and the assistant's-own-words questions convert that into perfect answers. On HaluMem's *memory boundary* questions — asked about things the user never said — smrti answers correctly 97% of the time and invents something 2.9% of the time. Knowing what you were not told is the hard half of remembering.
 
-**Where it is weak.** HaluMem's synthesis categories hallucinate badly: multi-hop inference 70%, generalization 72%, dynamic update 65%. And smrti almost never declines to answer — it omits 5.0% where published systems omit 17–35% — so what would be an admission of ignorance comes out as an assertion instead. It finds what it stored and stumbles when an answer has to be *assembled* from several memories.
+**Where it is weak.** HaluMem's synthesis categories hallucinate badly: dynamic update 71%, multi-hop inference 63%, generalization 62%. And smrti rarely declines to answer — it omits 8.9% where published systems omit 17–35% — so what would be an admission of ignorance often comes out as an assertion instead. It finds what it stored and stumbles when an answer has to be *assembled* from several memories.
 
 **What the entity graph costs.** The table runs without extraction. `--extract-url`/`--extract-model` build the entity and claim graph as episodes land, at 1.25 s and one LLM call per turn against 18 ms without — about seven hours for a full LongMemEval run. Its effect on these two benchmarks is unmeasured.
 

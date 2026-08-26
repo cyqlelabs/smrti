@@ -1,9 +1,9 @@
 {
   "config_hash": "f128bf017114cd73",
-  "recorded_at": "2026-08-26T19:55:44+00:00",
+  "recorded_at": "2026-08-26T23:54:09+00:00",
   "questions": 40,
   "scored_questions": 40,
-  "retrieval_hit_rate": 0.9,
-  "evidence_recall": 0.86875,
+  "retrieval_hit_rate": 0.975,
+  "evidence_recall": 0.9120833333333334,
   "session_hit_rate": 1.0
 }

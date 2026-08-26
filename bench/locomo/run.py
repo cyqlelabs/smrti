@@ -35,7 +35,8 @@ DATASET_HINT = (
 )
 
 
-def run(config: dict, dataset: str, db_path: str, answering: dict | None = None) -> dict:
+def run(config: dict, dataset: str, db_path: str, answering: dict | None = None,
+        extraction: dict | None = None) -> dict:
     import asyncio
 
     conversations = load_conversations(dataset, config.get("conversation_limit") or None)
@@ -49,7 +50,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None)
             tenant_id="locomo",
             write_space=f"c_{conversation.sample_id or position}",
         )
-        stored = ingest(conversation, mem)
+        stored = ingest(conversation, mem, extraction)
         questions = select_questions(
             conversation, config.get("questions_per_conversation") or None
         )
@@ -124,15 +125,17 @@ def main(argv: list[str] | None = None) -> int:
         config["conversation_limit"] = args.limit
     tolerance = config.pop("tolerance", 0.01)
 
-    from ..harness import resolve_answering
+    from ..harness import resolve_answering, resolve_extraction
 
     answering = resolve_answering(args, parser)
+    extraction = resolve_extraction(args)
+    config["extraction"] = bool(extraction)
     db_path, scratch = args.db, None
     if db_path is None:
         scratch = tempfile.TemporaryDirectory()
         db_path = os.path.join(scratch.name, "locomo.db")
     try:
-        result = run(config, args.dataset, db_path, answering)
+        result = run(config, args.dataset, db_path, answering, extraction)
     finally:
         if scratch is not None:
             scratch.cleanup()

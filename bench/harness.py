@@ -90,6 +90,12 @@ def build_parser(prog: str, config_path: str, baseline_path: str) -> argparse.Ar
     parser.add_argument("--answer-model", default=None)
     parser.add_argument("--judge-model", default=None, help="defaults to --answer-model")
     parser.add_argument("--concurrency", type=int, default=8, help="answer/judge calls in flight")
+    # Extraction is what turns stored turns into a graph. It is off unless
+    # asked for, because it costs an LLM call per episode and the number it
+    # changes is the one the benchmark reports.
+    parser.add_argument("--extract-url", default=None, help="LLM endpoint for entity/claim extraction")
+    parser.add_argument("--extract-model", default=None)
+    parser.add_argument("--extract-mode", default="hybrid", choices=("hybrid", "llm", "local"))
     return parser
 
 
@@ -112,6 +118,54 @@ def resolve_answering(args, parser: argparse.ArgumentParser) -> dict | None:
         ),
         "concurrency": max(1, args.concurrency),
     }
+
+
+def resolve_extraction(args) -> dict | None:
+    """The extraction endpoint, or None to store episodes and nothing else.
+
+    Without this the benchmarks measure smrti as a vector plus BM25 store: the
+    entity and claim graph is built by the server modes, never by the facade
+    they ingest through, so leaving it out is a measurement decision and has
+    to be an explicit one.
+    """
+    if not getattr(args, "extract_url", None):
+        return None
+    return {
+        "url": args.extract_url.rstrip("/"),
+        "model": args.extract_model or "",
+        "mode": args.extract_mode,
+        "auth": (
+            f"Bearer {os.environ['SMRTI_BENCH_API_KEY']}"
+            if os.environ.get("SMRTI_BENCH_API_KEY")
+            else ""
+        ),
+    }
+
+
+def run_extraction(mem, episodes: list[tuple[str, str, str]], extraction: dict | None) -> int:
+    """Build the entity and claim graph over episodes just stored.
+
+    Sequential within a space on purpose — that is the engine's own rule.
+    ``extract_and_link_serialized`` holds a per-(tenant, space) lock so each
+    episode's entities are committed before the next one's prompt is built,
+    and a benchmark that raced them would measure a graph the engine never
+    produces.
+    """
+    if not extraction or not episodes:
+        return 0
+    import asyncio
+
+    from smrti.extraction.extract import extract_and_link_serialized
+
+    async def _all() -> None:
+        for atom_id, content, source in episodes:
+            await extract_and_link_serialized(
+                atom_id, content, mem, extraction["auth"], extraction["model"],
+                extraction["url"], source, mode=extraction["mode"],
+            )
+
+    asyncio.run(_all())
+    return len(episodes)
 
 
 def require_dataset(path: str, hint: str) -> bool:

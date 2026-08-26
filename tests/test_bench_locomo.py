@@ -165,6 +165,39 @@ def test_the_session_date_becomes_the_write_time(mem, dataset):
     assert row["created_at"] == "2023-05-08 13:56:00"
 
 
+def test_ingest_builds_no_graph_unless_extraction_is_asked_for(mem, dataset):
+    """The facade never extracts — only the server modes do.
+
+    The benchmarks ingest through the facade, so a config key claiming
+    extraction was off described a state the harness could not change. It is a
+    flag now, and this pins the default it names.
+    """
+    conversation = load_conversations(dataset)[0]
+
+    ingest(conversation, mem)
+
+    assert mem.status()["by_type"] == {"episode": 4}
+
+
+def test_extraction_runs_once_per_episode_in_order(mem, dataset, monkeypatch):
+    """Serialized within a space, because that is the engine's own rule."""
+    import bench.harness as harness
+
+    seen = []
+
+    async def _fake(atom_id, content, m, auth, model, upstream, source, mode="hybrid"):
+        seen.append(content)
+
+    monkeypatch.setattr(
+        "smrti.extraction.extract.extract_and_link_serialized", _fake
+    )
+    conversation = load_conversations(dataset)[0]
+
+    ingest(conversation, mem, {"url": "http://x/v1", "model": "m", "mode": "hybrid", "auth": ""})
+
+    assert seen == [f"{t.speaker}: {t.text}" for t in conversation.turns]
+
+
 # ── scoring ──────────────────────────────────────────────────────────────────
 
 

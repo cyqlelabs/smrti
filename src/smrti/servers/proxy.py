@@ -229,16 +229,21 @@ def _temporal_suffix(r: RecallResult) -> str:
     items = r.atom.metadata.get("temporal")
     if not isinstance(items, list):
         return ""
-    pairs = [
-        # The span is the model's own words echoed back, and this lands in a
-        # system prompt: collapse whitespace runs so it cannot break out of
-        # its bullet line, exactly as the memory text above is.
-        f"{re.sub(r'\s+', ' ', item['text']).strip()} = {item['resolved']}"
-        for item in items
-        if isinstance(item, dict)
-        and isinstance(item.get("text"), str)
-        and isinstance(item.get("resolved"), str)
-    ]
+    # The span is the model's own words echoed back, and this lands in a system
+    # prompt: collapse whitespace runs so it cannot break out of its bullet
+    # line, exactly as the memory text above is. The substitution stays out of
+    # the f-string — a backslash inside one is a syntax error before 3.12, and
+    # this package supports 3.10.
+    pairs = []
+    for item in items:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("text"), str)
+            or not isinstance(item.get("resolved"), str)
+        ):
+            continue
+        span = re.sub(r"\s+", " ", item["text"]).strip()
+        pairs.append(f"{span} = {item['resolved']}")
     return f" [dates: {'; '.join(pairs)}]" if pairs else ""
 
 

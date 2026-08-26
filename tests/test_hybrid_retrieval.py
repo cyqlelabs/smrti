@@ -386,3 +386,26 @@ def test_fusion_breaks_ties_deterministically():
 
 def test_fusion_of_nothing_is_nothing():
     assert _rrf_fuse([[], []], limit=10) == []
+
+def test_only_the_lexical_head_joins_the_fused_pool(mem, monkeypatch):
+    """BM25's head holds the proper nouns; its tail is stop-word noise.
+
+    Fusing the full lexical ranking cost five points of LongMemEval retrieval
+    hit rate by diluting the scored pool, and a ten-candidate head cost none.
+    """
+    import smrti.retrieval.fan_out as fan_out
+
+    seen = {}
+    real = fan_out._lexical_entry_points
+
+    def spy(query, tenant_id, read_spaces, db, limit):
+        seen["limit"] = limit
+        return real(query, tenant_id, read_spaces, db, limit)
+
+    monkeypatch.setattr(fan_out, "_lexical_entry_points", spy)
+    for n in range(60):
+        mem.remember(f"note number {n} about the garden")
+
+    mem.recall("Esmeralda", top_k=50, min_confidence=0.0)
+
+    assert seen["limit"] == fan_out._FTS_POOL

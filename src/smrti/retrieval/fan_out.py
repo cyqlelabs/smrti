@@ -51,6 +51,15 @@ _RRF_K = 60
 # still a query, and every term is a separate posting-list walk.
 _FTS_MAX_TERMS = 32
 
+# How many BM25 candidates join the fused pool. The lexical half is a
+# high-precision supplement, not a co-equal ranking: its head holds the
+# proper-noun matches the embedding missed, and its tail is every atom
+# sharing a stop-word with the query. Fusing that tail dilutes the scored
+# pool — measured on LongMemEval-S, a full-pool fusion cost five points of
+# retrieval hit rate and a ten-candidate head cost none, while the
+# cross-language recall the index exists for lives entirely in the head.
+_FTS_POOL = 10
+
 
 def _blob_to_vec(blob) -> list[float]:
     n = len(blob) // 4
@@ -234,7 +243,9 @@ def retrieve(
     # wrong: a fact stored in one language sits a long way from the question
     # that asks for it in another, while the proper nouns both of them carry
     # are byte-identical.
-    lexical_ids = _lexical_entry_points(query, tenant_id, read_spaces, db, knn_pool)
+    lexical_ids = _lexical_entry_points(
+        query, tenant_id, read_spaces, db, min(_FTS_POOL, knn_pool)
+    )
     entry_ids = _rrf_fuse([knn_ids, lexical_ids], knn_pool)
 
     if not entry_ids:
@@ -338,8 +349,20 @@ def retrieve(
         # agent's stored reply competes with the user testimony it was
         # derived from — and when the reply was wrong, ranking it first
         # re-serves the mistake as memory.
+        #
+        # The discount spares the similarity term. Attention, confidence and
+        # valence say how much the graph has come to trust the atom, and an
+        # agent's say in that is what the discount exists to shrink;
+        # similarity says how much the atom is *about the question*, which is
+        # a property of the query. Discounting it too buried the one memory
+        # that held the answer whenever that memory was the agent's own reply
+        # — "what did you recommend?" has no user-authored answer, and
+        # measured on LongMemEval the whole single-session-assistant category
+        # scored zero. On equal relevance the user's version still wins,
+        # because only the agent's standing terms are shrunk.
         if atom.metadata.get("source") == "agent":
-            salience *= agent_trust
+            standing = salience - w_similarity * similarity
+            salience = w_similarity * similarity + agent_trust * standing
         results.append(RecallResult(atom=atom, salience=salience, similarity=similarity))
 
     results.sort(key=lambda r: r.salience, reverse=True)

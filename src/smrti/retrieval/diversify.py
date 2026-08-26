@@ -37,9 +37,17 @@ _TIME_CLUSTER_SECONDS = 600
 # thing said again. The same threshold the echo test uses against the query.
 _DUPLICATE_OVERLAP = 0.7
 
-# How many times one moment may say the same thing. Two leaves room for a
-# statement and its correction; a third is the same thing a third time.
+# How many times one moment may say the same thing, per six slots of answer.
+# The floor of two leaves room for a statement and its correction in a small
+# answer, where one duplicate wastes a fifth of the response; a fifty-slot
+# answer can afford more repetition and cannot afford to evict evidence, so
+# the allowance grows with what a duplicate actually costs the reader.
 _MAX_REPEATS = 2
+_SLOTS_PER_REPEAT = 6
+
+
+def _repeat_allowance(top_k: int) -> int:
+    return max(_MAX_REPEATS, top_k // _SLOTS_PER_REPEAT)
 
 # Slots held for beliefs when the candidate pool has them. Beliefs are the
 # standing facts — what the engine actually knows — and they are the first
@@ -112,7 +120,7 @@ def diversify(
             repeats = sum(
                 1 for other in kept if containment(words, other) >= _DUPLICATE_OVERLAP
             )
-            if repeats >= _MAX_REPEATS:
+            if repeats >= _repeat_allowance(top_k):
                 deferred.append(result)
                 continue
             kept.append(words)

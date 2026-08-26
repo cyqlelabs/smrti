@@ -21,7 +21,13 @@ from bench.longmemeval.adapter import (
     parse_date,
     parse_question,
 )
-from bench.longmemeval.run import compare, config_hash, main, write_baseline
+from bench.longmemeval.run import (
+    compare,
+    config_hash,
+    load_baseline,
+    main,
+    write_baseline,
+)
 from smrti import Smrti
 
 
@@ -330,6 +336,22 @@ def test_the_committed_baseline_names_the_config_it_was_measured_under():
         assert baseline["scored_questions"] > 0
 
 
+def test_a_baseline_file_that_does_not_exist_yet_reads_as_unrecorded(tmp_path):
+    """Failing here would throw away the run that just finished."""
+    assert load_baseline(str(tmp_path / "never-written.json")) == {}
+
+
+def test_a_run_against_a_missing_baseline_still_reports(tmp_path, dataset, capsys):
+    code = main([
+        "--dataset", dataset,
+        "--baseline", str(tmp_path / "never-written.json"),
+        "--db", str(tmp_path / "run.db"),
+    ])
+
+    assert code == 0
+    assert "--update-baseline" in capsys.readouterr().err
+
+
 def test_recording_a_baseline_keeps_only_the_summary(tmp_path):
     path = tmp_path / "baseline.json"
     write_baseline(
@@ -472,6 +494,49 @@ def test_answering_sees_only_the_recalled_memories():
     assert "Esmeralda started school" in http.payloads[0]["messages"][1]["content"]
 
 
+def test_the_answering_model_is_told_when_the_question_was_asked():
+    """A third of the benchmark is unanswerable without a "now"."""
+    import asyncio
+
+    from bench.longmemeval.answering import answer_question
+
+    http = _FakeHTTP("last month")
+    asyncio.run(
+        answer_question(
+            http, "http://localhost/v1", "", "m", "How long ago did I move?",
+            ["[2023-05-18] I moved to San Benito"], "2023/06/20 (Tue) 10:00",
+        )
+    )
+
+    sent = http.payloads[0]["messages"][1]["content"]
+    assert "[Question asked on]\n2023/06/20" in sent
+    assert sent.index("[Question asked on]") < sent.index("[Memories]")
+
+
+def test_a_run_without_a_question_date_omits_the_header():
+    import asyncio
+
+    from bench.longmemeval.answering import answer_question
+
+    http = _FakeHTTP("Esmeralda")
+    asyncio.run(
+        answer_question(
+            http, "http://localhost/v1", "", "m", "Who?", ["a memory"],
+        )
+    )
+
+    assert "[Question asked on]" not in http.payloads[0]["messages"][1]["content"]
+
+
+def test_the_answering_model_is_told_to_make_recommendations():
+    """A rubric reference grades the suggestion, not a fact lookup."""
+    from bench.longmemeval.answering import ANSWER_PROMPT, JUDGE_PROMPT
+
+    assert "recommendation" in ANSWER_PROMPT
+    assert "prefer" in JUDGE_PROMPT
+    assert "declines to answer is never correct" in JUDGE_PROMPT
+
+
 @pytest.mark.parametrize(
     "verdict,expected",
     [
@@ -506,7 +571,7 @@ def test_the_harness_scores_answers_when_a_model_is_named(tmp_path, dataset, cap
 
     async def _fake_score(answering, question, memories):
         asked.append(memories)
-        return True
+        return "Esmeralda", True
 
     monkeypatch.setattr(run_module, "_score_answer", _fake_score)
 
@@ -519,8 +584,8 @@ def test_the_harness_scores_answers_when_a_model_is_named(tmp_path, dataset, cap
     ])
 
     assert json.loads(capsys.readouterr().out)["answer_accuracy"] == 1.0
-    # The answering model sees the recalled memories and nothing else.
-    assert asked and all(isinstance(m, str) for m in asked[0])
+    # Every memory reaches the model stamped with the day it was recorded.
+    assert asked and all(m.startswith("[2023-05-1") for m in asked[0])
 
 
 def test_answer_accuracy_is_none_when_no_model_is_named(tmp_path, dataset, capsys):

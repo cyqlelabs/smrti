@@ -241,3 +241,38 @@ def test_server_modes_resolve_deixis_by_default():
     from smrti.servers import config as cfg
 
     assert cfg.TEMPORAL is True
+
+
+# ── failing open ─────────────────────────────────────────────────────────────
+
+
+def test_a_parser_that_raises_resolves_nothing(monkeypatch):
+    """dateparser is a dependency, not a promise — a miss must cost nothing."""
+    import dateparser
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("locale data missing")
+
+    monkeypatch.setattr(dateparser, "parse", _boom)
+
+    assert resolve_spans("La sesión es mañana", BASE, StubNER([("mañana", "date")])) == []
+
+
+def test_an_empty_span_is_never_annotated():
+    """Scanning for an empty string would never advance and never return."""
+    from smrti.extraction.temporal import _append
+
+    assert _append("La sesión es mañana", "", " [resolved: 2026-08-27]") == (
+        "La sesión es mañana"
+    )
+
+
+def test_a_failure_anywhere_leaves_the_text_exactly_as_written(monkeypatch):
+    import smrti.extraction.temporal as temporal_mod
+
+    def _boom(*args, **kwargs):
+        raise RuntimeError("something unforeseen")
+
+    monkeypatch.setattr(temporal_mod, "resolve_spans", _boom)
+
+    assert annotate("The session is tomorrow", BASE) == "The session is tomorrow"

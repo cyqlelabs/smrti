@@ -244,6 +244,16 @@ def test_an_unreadable_reinforcement_count_does_not_stop_the_report(mem):
     assert mem.reinforce([atom_id])["reinforced"] == [atom_id]
 
 
+def test_metadata_that_is_valid_json_but_not_an_object_is_ignored(mem):
+    """`json_valid` passes a bare list; the code still has to survive it."""
+    atom_id = mem.believe("an atom whose metadata is a list", probability=0.8)
+    mem.db.execute("UPDATE atoms SET metadata = '[1, 2]' WHERE id = ?", (atom_id,))
+    before = _confidence(mem, atom_id)
+
+    assert mem.reinforce([atom_id])["reinforced"] == [atom_id]
+    assert _confidence(mem, atom_id) > before
+
+
 def test_reporting_nothing_does_nothing(mem):
     assert mem.reinforce([]) == {"reinforced": [], "skipped": []}
 

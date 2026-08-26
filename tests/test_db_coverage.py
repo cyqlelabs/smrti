@@ -297,3 +297,78 @@ def test_context_manager_closes_the_database(db_path):
         database.initialize()
         assert database._write_conn is not None
     assert database._write_conn is None
+
+
+# ── the two search indexes ────────────────────────────────────────────────────
+
+
+def test_deleting_no_atoms_produces_no_statement():
+    """An empty IN (…) list is a syntax error, so the caller gets nothing."""
+    from smrti.core.db import vec_delete
+
+    assert vec_delete([]) == []
+
+
+def test_a_build_without_fts5_opens_the_database_anyway(db_path):
+    """Retrieval falls back to vectors alone rather than refusing to start."""
+    database = _fresh_connection(db_path)
+    try:
+        def _no_fts5(sql, *args):
+            if "atoms_fts" in sql:
+                raise sqlite3.OperationalError("no such module: fts5")
+            return database._write_conn.execute(sql, *args)
+
+        with _wrapped_write_conn(database, execute=_no_fts5):
+            database._init_atoms_fts()
+        assert database.fts_enabled is False
+    finally:
+        database.close()
+
+
+def test_the_lexical_index_is_not_built_before_the_atoms_table_exists(db_path):
+    database = Database(db_path)
+    database._write_conn = _make_connection(db_path)
+    try:
+        database._init_atoms_fts()
+        assert database.fts_enabled is True
+        row = database._write_conn.execute(
+            "SELECT COUNT(*) AS n FROM atoms_fts"
+        ).fetchone()
+        assert row["n"] == 0
+    finally:
+        database.close()
+
+
+def test_a_failed_lexical_backfill_rolls_back(db_path):
+    get_database(db_path)
+    close_database(db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        "INSERT INTO atoms (id, type, label, tenant_id, space) "
+        "VALUES ('a1', 'concept', 'Alice', 't', 's')"
+    )
+    conn.execute("DELETE FROM atoms_fts")
+    conn.commit()
+    conn.close()
+
+    database = _fresh_connection(db_path)
+    try:
+        def _fail(sql, *args):
+            raise sqlite3.Error("boom")
+
+        with _wrapped_write_conn(database, executemany=_fail) as wrapped:
+            with pytest.raises(sqlite3.Error):
+                database._init_atoms_fts()
+            assert wrapped.rollbacks == 1
+    finally:
+        database.close()
+
+
+def test_rowids_read_as_stable_when_there_is_no_vector_table(db_path):
+    """Nothing stored cannot be stored wrongly, so no rebuild is owed."""
+    database = Database(db_path)
+    database._write_conn = _make_connection(db_path)
+    try:
+        assert database._vec_rowids_are_stable() is True
+    finally:
+        database.close()

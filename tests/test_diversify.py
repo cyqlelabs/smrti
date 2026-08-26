@@ -215,6 +215,23 @@ def test_a_belief_below_the_surfacing_floor_claims_no_reserved_slot():
     assert faint in kept
 
 
+def test_the_reserve_leaves_episodes_only_the_slots_it_did_not_take():
+    """Held by pre-selecting the beliefs, not by a second cap on episodes."""
+    episodes = [
+        _result(f"a remark about topic {n}", 1.0 - n / 100,
+                created_at=f"2026-08-25 {19 + n}:00:00")
+        for n in range(4)
+    ]
+    facts = [_result(f"standing fact number {n}", 0.5 - n / 100, AtomType.BELIEF)
+             for n in range(2)]
+
+    kept = diversify(episodes + facts, top_k=4)
+
+    # Two slots are reserved, so only two of the four episodes fit.
+    assert len([r for r in kept if r.atom.type == AtomType.EPISODE]) == 2
+    assert len([r for r in kept if r.atom.type == AtomType.BELIEF]) == 2
+
+
 def test_a_single_topic_graph_still_answers_with_a_full_top_k():
     kept = diversify(_restatements(8), top_k=5)
 

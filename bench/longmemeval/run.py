@@ -9,10 +9,7 @@ it fails loudly rather than printing a number and exiting 0.
 """
 from __future__ import annotations
 
-import argparse
 import asyncio
-import hashlib
-import json
 import os
 import sys
 import tempfile
@@ -20,8 +17,16 @@ from datetime import datetime, timezone
 
 from smrti import Smrti
 
+from ..answering import score_batch
+from ..harness import (
+    build_parser,
+    config_hash,
+    finish,
+    load_json,
+    require_dataset,
+    resolve_answering,
+)
 from .adapter import aggregate, evaluate_question, ingest, load_questions
-from .answering import answer_question, judge_answer
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(_HERE, "config.json")
@@ -30,53 +35,14 @@ BASELINE_PATH = os.path.join(_HERE, "baseline.json")
 # The metric a release is gated on. Answer accuracy moves with whatever model
 # is answering; this one moves only when retrieval does.
 GATED_METRIC = "retrieval_hit_rate"
+BASELINE_KEYS = (
+    "config_hash", "recorded_at", "questions", "scored_questions",
+    GATED_METRIC, "evidence_recall", "session_hit_rate",
+)
 
-
-def config_hash(config: dict) -> str:
-    """Fingerprint of the settings a measurement was taken under.
-
-    A baseline recorded at top_k=10 says nothing about a run at top_k=50, and
-    comparing them silently would report a ranking regression that is really a
-    changed knob.
-    """
-    canonical = json.dumps(config, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(canonical.encode()).hexdigest()[:16]
-
-
-def load_json(path: str) -> dict:
-    with open(path, encoding="utf-8") as handle:
-        return json.load(handle)
-
-
-def load_baseline(path: str) -> dict:
-    """The recorded baseline, or an empty one when there is no file yet.
-
-    A baseline that has never been written reads the same as one that was
-    written before anything was measured: nothing to compare against. Failing
-    with a traceback instead would throw away the run that just finished.
-    """
-    try:
-        return load_json(path)
-    except FileNotFoundError:
-        return {}
-
-
-async def _score_answer(
-    answering: dict, question, memories: list[str]
-) -> tuple[str, bool]:
-    """Generate an answer from the recalled memories and have it judged."""
-    import httpx
-
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as http:
-        answer = await answer_question(
-            http, answering["url"], answering["auth"], answering["model"],
-            question.question, memories, question.question_date,
-        )
-        correct = await judge_answer(
-            http, answering["url"], answering["auth"], answering["judge_model"],
-            question.question, question.answer, answer,
-        )
-        return answer, correct
+DATASET_HINT = (
+    "LongMemEval-S is downloaded separately; point --dataset at the JSON file."
+)
 
 
 def run(config: dict, dataset: str, db_path: str, answering: dict | None = None) -> dict:
@@ -97,7 +63,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None)
             question,
             mem,
             stored,
-            top_k=config.get("top_k", 10),
+            top_k=config.get("top_k", 50),
             min_confidence=config.get("min_confidence", 0.0),
         )
         if answering:
@@ -113,15 +79,25 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None)
                 for atom in recalled
                 if atom
             ]
+            scored = asyncio.run(
+                score_batch(
+                    answering,
+                    [{
+                        "question": question.question,
+                        "reference": question.answer,
+                        "memories": memories,
+                        "asked_on": question.question_date,
+                    }],
+                    concurrency=answering["concurrency"],
+                )
+            )[0]
             # The generated answer is kept beside the verdict: a score with no
             # answer under it cannot be argued with.
-            row["answer"], row["answer_correct"] = asyncio.run(
-                _score_answer(answering, question, memories)
-            )
+            row["answer"], row["answer_correct"] = scored["answer"], scored["verdict"]
         rows.append(row)
         print(
             f"[{position}/{len(questions)}] {question.question_id} "
-            f"turns={len(stored)} hit={rows[-1]['evidence_hit']}",
+            f"turns={len(stored)} hit={row['evidence_hit']}",
             file=sys.stderr,
         )
     judged = [r for r in rows if "answer_correct" in r]
@@ -138,65 +114,10 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None)
     }
 
 
-def compare(result: dict, baseline: dict, tolerance: float) -> tuple[bool, str]:
-    """(ok, message) for this run against the recorded baseline."""
-    recorded = baseline.get(GATED_METRIC)
-    if recorded is None:
-        return True, (
-            f"no baseline recorded — this run measured {GATED_METRIC}="
-            f"{result[GATED_METRIC]:.3f}; commit it with --update-baseline"
-        )
-    if baseline.get("config_hash") != result["config_hash"]:
-        return False, (
-            "baseline was recorded under a different config "
-            f"({baseline.get('config_hash')} vs {result['config_hash']}); "
-            "re-record it before reading anything into the numbers"
-        )
-    delta = result[GATED_METRIC] - recorded
-    if delta < -tolerance:
-        return False, (
-            f"{GATED_METRIC} dropped {abs(delta):.3f} "
-            f"({recorded:.3f} → {result[GATED_METRIC]:.3f}), "
-            f"past the {tolerance:.3f} tolerance"
-        )
-    return True, (
-        f"{GATED_METRIC} {recorded:.3f} → {result[GATED_METRIC]:.3f} "
-        f"({delta:+.3f})"
-    )
-
-
-def write_baseline(result: dict, path: str) -> None:
-    keep = (
-        "config_hash", "recorded_at", "questions", "scored_questions",
-        GATED_METRIC, "evidence_recall", "session_hit_rate",
-    )
-    with open(path, "w", encoding="utf-8") as handle:
-        json.dump({key: result[key] for key in keep}, handle, indent=2)
-        handle.write("\n")
-
-
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="bench.longmemeval")
-    parser.add_argument("--dataset", required=True, help="LongMemEval-S JSON file")
-    parser.add_argument("--config", default=CONFIG_PATH)
-    parser.add_argument("--baseline", default=BASELINE_PATH)
-    parser.add_argument("--db", default=None, help="scratch DB (default: a temp file)")
-    parser.add_argument("--limit", type=int, default=None, help="override question_limit")
-    parser.add_argument("--update-baseline", action="store_true")
-    parser.add_argument("--json", dest="json_out", default=None, help="write the full result here")
-    # The answering half never gates a release: a model that answers well from
-    # a bad candidate set would hide exactly the regression the gate is for.
-    parser.add_argument("--answer-url", default=None, help="OpenAI-compatible base URL, e.g. http://localhost:8421/v1")
-    parser.add_argument("--answer-model", default=None)
-    parser.add_argument("--judge-model", default=None, help="defaults to --answer-model")
+    parser = build_parser("bench.longmemeval", CONFIG_PATH, BASELINE_PATH)
     args = parser.parse_args(argv)
-
-    if not os.path.exists(args.dataset):
-        print(
-            f"dataset not found: {args.dataset}\n"
-            "LongMemEval-S is downloaded separately; point --dataset at the JSON file.",
-            file=sys.stderr,
-        )
+    if not require_dataset(args.dataset, DATASET_HINT):
         return 2
 
     config = load_json(args.config)
@@ -207,47 +128,18 @@ def main(argv: list[str] | None = None) -> int:
     # invalidate every baseline on file.
     tolerance = config.pop("tolerance", 0.01)
 
-    db_path = args.db
-    scratch = None
+    answering = resolve_answering(args, parser)
+    db_path, scratch = args.db, None
     if db_path is None:
         scratch = tempfile.TemporaryDirectory()
         db_path = os.path.join(scratch.name, "bench.db")
-    answering = None
-    if args.answer_url:
-        if not args.answer_model:
-            parser.error("--answer-url also needs --answer-model")
-        answering = {
-            "url": args.answer_url.rstrip("/"),
-            "model": args.answer_model,
-            "judge_model": args.judge_model or args.answer_model,
-            # Read from the environment, never from a flag: a key in argv is a
-            # key in the shell history and in every process listing.
-            "auth": (
-                f"Bearer {os.environ['SMRTI_BENCH_API_KEY']}"
-                if os.environ.get("SMRTI_BENCH_API_KEY")
-                else ""
-            ),
-        }
-
     try:
         result = run(config, args.dataset, db_path, answering)
     finally:
         if scratch is not None:
             scratch.cleanup()
 
-    print(json.dumps({k: v for k, v in result.items() if k != "rows"}, indent=2))
-    if args.json_out:
-        with open(args.json_out, "w", encoding="utf-8") as handle:
-            json.dump(result, handle, indent=2)
-
-    if args.update_baseline:
-        write_baseline(result, args.baseline)
-        print(f"baseline updated: {args.baseline}", file=sys.stderr)
-        return 0
-
-    ok, message = compare(result, load_baseline(args.baseline), tolerance)
-    print(message, file=sys.stderr)
-    return 0 if ok else 1
+    return finish(args, result, tolerance, GATED_METRIC, BASELINE_KEYS)
 
 
 if __name__ == "__main__":

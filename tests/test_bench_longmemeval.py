@@ -21,13 +21,8 @@ from bench.longmemeval.adapter import (
     parse_date,
     parse_question,
 )
-from bench.longmemeval.run import (
-    compare,
-    config_hash,
-    load_baseline,
-    main,
-    write_baseline,
-)
+from bench.harness import compare, config_hash, load_baseline, write_baseline
+from bench.longmemeval.run import BASELINE_KEYS, main
 from smrti import Smrti
 
 
@@ -293,33 +288,34 @@ def _result(rate: float, config="abc") -> dict:
 
 
 def test_a_drop_past_the_tolerance_fails_the_run():
-    ok, message = compare(_result(0.60), {"retrieval_hit_rate": 0.70, "config_hash": "abc"}, 0.01)
+    ok, message = compare(_result(0.60), {"retrieval_hit_rate": 0.70, "config_hash": "abc"}, 0.01, "retrieval_hit_rate")
 
     assert ok is False
     assert "dropped" in message
 
 
 def test_a_drop_inside_the_tolerance_passes():
-    ok, _ = compare(_result(0.695), {"retrieval_hit_rate": 0.70, "config_hash": "abc"}, 0.01)
+    ok, _ = compare(_result(0.695), {"retrieval_hit_rate": 0.70, "config_hash": "abc"}, 0.01, "retrieval_hit_rate")
     assert ok is True
 
 
 def test_an_improvement_passes():
-    ok, message = compare(_result(0.80), {"retrieval_hit_rate": 0.70, "config_hash": "abc"}, 0.01)
+    ok, message = compare(_result(0.80), {"retrieval_hit_rate": 0.70, "config_hash": "abc"}, 0.01, "retrieval_hit_rate")
     assert ok is True
     assert "+0.100" in message
 
 
 def test_a_baseline_from_a_different_config_is_refused():
     ok, message = compare(
-        _result(0.80), {"retrieval_hit_rate": 0.70, "config_hash": "other"}, 0.01
+        _result(0.80), {"retrieval_hit_rate": 0.70, "config_hash": "other"}, 0.01,
+        "retrieval_hit_rate",
     )
     assert ok is False
     assert "different config" in message
 
 
 def test_an_unrecorded_baseline_passes_and_says_so():
-    ok, message = compare(_result(0.80), {"retrieval_hit_rate": None}, 0.01)
+    ok, message = compare(_result(0.80), {"retrieval_hit_rate": None}, 0.01, "retrieval_hit_rate")
     assert ok is True
     assert "--update-baseline" in message
 
@@ -361,6 +357,7 @@ def test_recording_a_baseline_keeps_only_the_summary(tmp_path):
             "evidence_recall": 0.6, "session_hit_rate": 0.8, "rows": [{"big": "row"}],
         },
         str(path),
+        BASELINE_KEYS,
     )
 
     recorded = json.loads(path.read_text(encoding="utf-8"))
@@ -480,7 +477,7 @@ class _FakeHTTP:
 def test_answering_sees_only_the_recalled_memories():
     import asyncio
 
-    from bench.longmemeval.answering import answer_question
+    from bench.answering import answer_question
 
     http = _FakeHTTP("Esmeralda")
     answer = asyncio.run(
@@ -498,7 +495,7 @@ def test_the_answering_model_is_told_when_the_question_was_asked():
     """A third of the benchmark is unanswerable without a "now"."""
     import asyncio
 
-    from bench.longmemeval.answering import answer_question
+    from bench.answering import answer_question
 
     http = _FakeHTTP("last month")
     asyncio.run(
@@ -516,7 +513,7 @@ def test_the_answering_model_is_told_when_the_question_was_asked():
 def test_a_run_without_a_question_date_omits_the_header():
     import asyncio
 
-    from bench.longmemeval.answering import answer_question
+    from bench.answering import answer_question
 
     http = _FakeHTTP("Esmeralda")
     asyncio.run(
@@ -530,7 +527,7 @@ def test_a_run_without_a_question_date_omits_the_header():
 
 def test_the_answering_model_is_told_to_make_recommendations():
     """A rubric reference grades the suggestion, not a fact lookup."""
-    from bench.longmemeval.answering import ANSWER_PROMPT, JUDGE_PROMPT
+    from bench.answering import ANSWER_PROMPT, JUDGE_PROMPT
 
     assert "recommendation" in ANSWER_PROMPT
     assert "prefer" in JUDGE_PROMPT
@@ -549,7 +546,7 @@ def test_the_answering_model_is_told_to_make_recommendations():
 def test_the_judge_reads_only_the_json_it_asked_for(verdict, expected):
     import asyncio
 
-    from bench.longmemeval.answering import judge_answer
+    from bench.answering import judge_answer
 
     assert (
         asyncio.run(
@@ -569,11 +566,11 @@ def test_the_harness_scores_answers_when_a_model_is_named(tmp_path, dataset, cap
     baseline.write_text(json.dumps({"retrieval_hit_rate": None}), encoding="utf-8")
     asked: list[list[str]] = []
 
-    async def _fake_score(answering, question, memories):
-        asked.append(memories)
-        return "Esmeralda", True
+    async def _fake_score(answering, items, verdict="binary", concurrency=8):
+        asked.extend(item["memories"] for item in items)
+        return [{"answer": "Esmeralda", "verdict": True} for _ in items]
 
-    monkeypatch.setattr(run_module, "_score_answer", _fake_score)
+    monkeypatch.setattr(run_module, "score_batch", _fake_score)
 
     run_module.main([
         "--dataset", dataset,

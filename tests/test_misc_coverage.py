@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import pathlib
 import re
 import tempfile
 from unittest.mock import patch
@@ -141,3 +142,30 @@ def test_db_context_manager():
             assert row["n"] == 1
     finally:
         os.unlink(db_path)
+
+def test_no_source_file_uses_syntax_newer_than_the_declared_floor():
+    """pyproject says 3.10; the interpreter running these tests may be newer.
+
+    A backslash inside an f-string expression is legal from 3.12 and a syntax
+    error before it, so one slipped through a green local suite and broke every
+    job in the CI matrix. The 3.12 tokenizer splits f-strings into pieces, so
+    this walks the AST instead: every FormattedValue's own source segment must
+    be free of backslashes, whatever interpreter is reading it.
+    """
+    import ast
+
+    offenders = []
+    for base in ("src", "bench", "tests"):
+        for path in pathlib.Path(base).rglob("*.py"):
+            source = path.read_text(encoding="utf-8")
+            for node in ast.walk(ast.parse(source, filename=str(path))):
+                if not isinstance(node, ast.FormattedValue):
+                    continue
+                segment = ast.get_source_segment(source, node.value)
+                if segment and "\\" in segment:
+                    offenders.append(f"{path}:{node.lineno}: {segment}")
+
+    assert offenders == [], (
+        "backslash inside an f-string expression is a SyntaxError before "
+        f"Python 3.12, which this package still supports: {offenders}"
+    )

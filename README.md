@@ -508,6 +508,8 @@ Measured on 2026-08-26 — smrti as a pure vector + BM25 store, extraction off, 
 make bench DATASET=path/to/longmemeval_s.json        # fails if the hit rate drops
 make bench-locomo LOCOMO=path/to/locomo10.json
 make bench-halumem HALUMEM=path/to/HaluMem-Medium.jsonl
+
+# add --extract-url/--extract-model to any of them to build the entity graph
 ```
 
 Each benchmark locks its config (model, `top_k`, personality, subset) beside a recorded baseline, and refuses to compare numbers measured under different configs. Subsets are deterministic and balanced across question types — the datasets are grouped by ability, so the front of a file is one skill many times over. None of the three is a CI gate: they need dataset downloads, the embedding model, and a judge key.
@@ -518,7 +520,18 @@ Each benchmark locks its config (model, `top_k`, personality, subset) beside a r
 
 **Where it is weak.** HaluMem's synthesis categories hallucinate badly: multi-hop inference 70%, generalization 72%. LoCoMo's open-domain questions retrieve at 0.500 against 0.780 for temporal ones, and only 17% of its adversarial questions draw the refusal they deserve. The shape is consistent — smrti finds what it stored and stumbles when an answer has to be *assembled* from several memories.
 
-**What is not measured yet.** Every number above runs with `SMRTI_EXTRACT=0`, so the entity and claim graph — the part built to join facts together — takes no part in them. HaluMem's memory-extraction and memory-update tasks, and LoCoMo's event summarization, are not implemented.
+**What the entity graph costs.** The table runs without extraction, and turning it on makes LoCoMo worse, not better:
+
+| LoCoMo, 10 conversations | extraction off | extraction on |
+| ------------------------ | -------------- | ------------- |
+| retrieval hit            | **0.692**      | 0.277         |
+| answer accuracy          | **0.579**      | 0.277         |
+
+Extraction built 5,067 concepts, 652 beliefs, 583 goals and 23,909 edges over 5,882 episodes, and those atoms rank in the same list as the turns they came from. They take only 15% of the returned slots, but they displace the annotated evidence past the cut: at `top_k=100` retrieval recovers to 0.541, still short of 0.692. Some of that is the benchmark's shape — LoCoMo defines its gold as dialogue turns, so it cannot credit an answer assembled from concepts — but answer accuracy fell by the same margin, and that metric does not care where the answer came from.
+
+Extraction also costs 1.25 s and one LLM call per turn against 18 ms without, so a full LongMemEval run with it on is about seven hours.
+
+**Not implemented.** HaluMem's memory-extraction and memory-update tasks, and LoCoMo's event summarization.
 
 ### Reading these against published results
 

@@ -96,18 +96,16 @@ def diversify(
     # episodes from the same moment are ever compared, so this stays small
     # however wide the candidate pool is.
     kept_by_cluster: dict[str, list[set[str]]] = {}
-    episodes = 0
-    episode_budget = top_k - reserve
 
+    # The reserve needs no second guard here. Those slots are already filled
+    # above, so an episode can only be considered while fewer than top_k
+    # atoms are held, and the walk stops at top_k either way.
     for result in results:
         if len(selected) >= top_k:
             break
         if result.atom.id in selected_ids:
             continue
         if result.atom.type == AtomType.EPISODE:
-            if episodes >= episode_budget:
-                deferred.append(result)
-                continue
             cluster = _cluster_key(result)
             words = word_set(result.atom.content or result.atom.label)
             kept = kept_by_cluster.setdefault(cluster, [])
@@ -118,7 +116,6 @@ def diversify(
                 deferred.append(result)
                 continue
             kept.append(words)
-            episodes += 1
         selected.append(result)
         selected_ids.add(result.atom.id)
 

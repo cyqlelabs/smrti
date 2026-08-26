@@ -265,6 +265,25 @@ def test_the_injected_dates_cannot_break_out_of_their_line(mem):
     assert "\n" not in line
 
 
+def test_the_proxy_skips_a_malformed_resolution(mem):
+    """Metadata can be hand-edited or written by an older build."""
+    from smrti.core.models import RecallResult
+    from smrti.servers.proxy import _format_memory
+
+    episode_id = mem.remember("The review is next Friday")
+    mem.db.execute(
+        "UPDATE atoms SET metadata = json_set(metadata, '$.temporal', "
+        "json('[{\"text\": 5}, {\"text\": \"next Friday\", "
+        "\"resolved\": \"2026-08-28\"}]')) WHERE id = ?",
+        (episode_id,),
+    )
+    atom = mem.atomspace.get_atom(episode_id, "test", "default")
+
+    line, _ = _format_memory(RecallResult(atom=atom, salience=0.5, similarity=0.5))
+
+    assert "[dates: next Friday = 2026-08-28]" in line
+
+
 def test_the_proxy_leaves_a_memory_without_resolutions_alone(mem):
     from smrti.core.models import RecallResult
     from smrti.servers.proxy import _format_memory

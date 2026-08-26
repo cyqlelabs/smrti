@@ -183,18 +183,23 @@ def select_questions(
     return picked
 
 
-def ingest(conversation: Conversation, mem) -> dict[str, Turn]:
+def ingest(conversation: Conversation, mem, extraction: dict | None = None) -> dict[str, Turn]:
     """Store one conversation as episodes, keeping speaker and session date.
 
     Both speakers are the user here: LoCoMo is two people talking, not a
     person and an assistant, so nothing is filed as agent-authored and the
     source discount never applies.
     """
+    from ..harness import run_extraction
+
     stored: dict[str, Turn] = {}
+    episodes: list[tuple[str, str, str]] = []
     for turn in conversation.turns:
-        atom_id = mem.remember(f"{turn.speaker}: {turn.text}")
+        content = f"{turn.speaker}: {turn.text}"
+        atom_id = mem.remember(content)
         if not atom_id:
             continue
+        episodes.append((atom_id, content, "user"))
         if turn.date is not None:
             stamp = turn.date.strftime("%Y-%m-%d %H:%M:%S")
             mem.db.execute(
@@ -202,6 +207,7 @@ def ingest(conversation: Conversation, mem) -> dict[str, Turn]:
                 (stamp, stamp, atom_id),
             )
         stored[atom_id] = turn
+    run_extraction(mem, episodes, extraction)
     return stored
 
 

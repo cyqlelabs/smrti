@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from smrti.core.models import PERMANENT_PROBABILITY, EpochResult, TruthValue
 from smrti.core.provenance import (
+    ATOM_FORGOTTEN,
     ATOM_METADATA_JSON,
     ATOM_OWN_INTENSITY,
     ATOM_OWN_VALENCE,
@@ -184,15 +185,23 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # Concepts and goals are derived index nodes, not testimony, and keep
     # decaying freely, as does everything agent-authored.
     #
-    # A belief asserted at PERMANENT_PROBABILITY is exempt from confidence
-    # decay outright rather than merely floored. The floor keeps a memory
-    # reachable; it does not keep it competitive, because it pins every aged
-    # atom to the same value while anything stored in the last hour still
-    # carries several times that — and confidence is the heaviest term in
-    # salience on most presets. A permanent fact that recall can find but
-    # never ranks is one the caller experiences as forgotten. forget() still
-    # reaches these atoms: it lowers confidence directly rather than through
-    # decay, and what it sets is then left standing.
+    # A belief asserted at PERMANENT_PROBABILITY is not merely exempt from
+    # confidence decay: the epoch lifts it back to the confidence it was
+    # asserted with. The floor keeps a memory reachable; it does not keep it
+    # competitive, because it pins every aged atom to the same value while
+    # anything stored in the last hour still carries several times that — and
+    # confidence is the heaviest term in salience on most presets. A permanent
+    # fact that recall can find but never ranks is one the caller experiences
+    # as forgotten. Exemption alone is not enough either: it protects what the
+    # current code writes, but a writer running pre-permanence code — a stale
+    # process serving old code loaded before an upgrade landed on disk — mints
+    # such beliefs drowned, and a one-time startup repair cannot lift damage
+    # done after it has run. The lift is therefore part of the epoch itself,
+    # so the damage heals whenever a current process next touches the space.
+    # forget() still wins: it stamps the atoms it sinks, the stamp is what
+    # tells a forget from decay drowning, and a stamped atom is never lifted.
+    # An unstamped atom below the surfacing floor predates stamping and is
+    # left where it is — nothing tells a legacy forget from a decay victim.
     min_conf = _param(p, "min_confidence_to_surface", 0.1)
     decay_sql = f"""UPDATE atoms SET
                sti        = sti        * (1.0 - ?),
@@ -202,7 +211,11 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
                                      WHEN lti >= ? THEN ?
                                      ELSE 0.0 END),
                confidence = MAX(CASE WHEN type = 'belief' AND probability >= ?
-                                     THEN confidence
+                                     THEN CASE
+                                         WHEN {ATOM_FORGOTTEN} THEN confidence
+                                         WHEN confidence >= ?
+                                             THEN MAX(confidence, probability)
+                                         ELSE confidence END
                                      ELSE confidence * (1.0 - ?) END,
                                 CASE WHEN type IN ('episode', 'belief')
                                           AND confidence >= ? THEN ?
@@ -220,7 +233,8 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         db.execute(
             decay_sql.format(comparison),
             (sti_rate, lti_rate, _LTI_FLOOR_CRITICAL, floor, floor,
-             permanent_at, conf_rate, conf_floor, conf_floor, tenant_id, space),
+             permanent_at, conf_floor, conf_rate, conf_floor, conf_floor,
+             tenant_id, space),
         )
 
     # 2b. Propagate STI and valence to 1-hop neighbors

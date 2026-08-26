@@ -27,7 +27,7 @@ from smrti.core.models import (
     Valence,
     atom_from_row,
 )
-from smrti.core.provenance import SOURCE_AGENT, VALENCE_STATED
+from smrti.core.provenance import ATOM_METADATA_JSON, SOURCE_AGENT, VALENCE_STATED
 from smrti.extraction.sentiment import estimate_valence
 from smrti.extraction.resolve import EntityResolver
 from smrti.retrieval.fan_out import retrieve
@@ -252,14 +252,23 @@ class Smrti:
             return run_epoch(self.tenant_id, self.write_space, self.db, self.embed)
 
     def forget(self, query: str, top_k: int = 5) -> list[str]:
-        """Soften memories matching query by reducing their confidence."""
+        """Soften memories matching query by reducing their confidence.
+
+        Each atom is also stamped as deliberately sunk: the epoch lifts a
+        drowned permanent belief back to its asserted probability, and the
+        stamp is what keeps that lift from undoing a forget.
+        """
         results = self.recall(query=query, top_k=top_k)
         forgotten = []
         for r in results:
             if r.atom.space != self.write_space:
                 continue
             self.db.execute(
-                "UPDATE atoms SET confidence = confidence * 0.3 WHERE id = ? AND tenant_id = ? AND space = ?",
+                f"""UPDATE atoms SET
+                        confidence = confidence * 0.3,
+                        metadata = json_set({ATOM_METADATA_JSON},
+                                            '$.forgotten', json('true'))
+                    WHERE id = ? AND tenant_id = ? AND space = ?""",
                 (r.atom.id, self.tenant_id, self.write_space),
             )
             forgotten.append(r.atom.label)

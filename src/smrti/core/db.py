@@ -10,17 +10,6 @@ from typing import Any
 
 import sqlite_vec
 
-from smrti.core.models import PERMANENT_PROBABILITY
-from smrti.core.provenance import ATOM_SOURCE
-
-# Data repairs are recorded by name because, unlike a schema migration, there
-# is no column whose presence proves the work was already done.
-_PERMANENT_CONFIDENCE_REPAIR = "permanent_belief_confidence"
-
-# Mirrors the personality table's own default, for a graph whose space has no
-# personality row of its own yet.
-_DEFAULT_MIN_CONFIDENCE = 0.1
-
 _registry: dict[str, "Database"] = {}
 _registry_lock = threading.Lock()
 
@@ -198,7 +187,6 @@ class Database:
             self._migrate_content_hash()
             self._migrate_personality_columns()
             self._migrate_intrinsic_valence()
-            self._repair_permanent_confidence()
             for statement in _SCHEMA_SQL.strip().split(";"):
                 stmt = statement.strip()
                 if stmt:
@@ -267,70 +255,6 @@ class Database:
             conn.execute("BEGIN IMMEDIATE")
             for column in missing:
                 conn.execute(f"ALTER TABLE atoms ADD COLUMN {column} REAL")
-            conn.commit()
-        except Exception:
-            conn.rollback()
-            raise
-
-    def _repair_permanent_confidence(self) -> None:
-        """Lift permanent beliefs that earlier releases decayed into the floor.
-
-        Before permanence existed, a belief asserted at
-        ``PERMANENT_PROBABILITY`` faded like any other and settled on the
-        surfacing floor, where recall can still reach it but it ranks below
-        whatever was stored most recently — the graph keeps the fact and never
-        offers it. Those atoms are restored to the probability they were
-        asserted with.
-
-        This runs once and is recorded, because ``forget()`` also lowers
-        confidence: a repair that ran on every startup would undo a deliberate
-        forget the next time the process restarted. Atoms already below the
-        floor are left where they are for the same reason — nothing tells a
-        memory decay drowned from one the caller sank on purpose.
-        """
-        conn = self._write_conn
-        conn.execute(
-            "CREATE TABLE IF NOT EXISTS applied_repairs ("
-            "name TEXT PRIMARY KEY, applied_at TEXT DEFAULT (datetime('now')))"
-        )
-        if conn.execute(
-            "SELECT 1 FROM applied_repairs WHERE name = ?",
-            (_PERMANENT_CONFIDENCE_REPAIR,),
-        ).fetchone():
-            return
-        tables = {
-            r["name"]
-            for r in conn.execute(
-                "SELECT name FROM sqlite_master WHERE type = 'table' "
-                "AND name IN ('atoms', 'personality')"
-            )
-        }
-        # A database this new has nothing to repair, and its atoms are already
-        # born permanent. Recording it keeps the repair from firing later,
-        # once the graph has memories a forget() may have deliberately sunk.
-        if {"atoms", "personality"} <= tables:
-            self._backup_before_migration()
-        try:
-            conn.commit()
-            conn.execute("BEGIN IMMEDIATE")
-            if {"atoms", "personality"} <= tables:
-                conn.execute(
-                    f"""UPDATE atoms SET confidence = probability,
-                                         updated_at = datetime('now')
-                        WHERE type = 'belief'
-                          AND probability >= ?
-                          AND confidence < probability
-                          AND {ATOM_SOURCE} != 'agent'
-                          AND confidence >= COALESCE((
-                              SELECT min_confidence_to_surface FROM personality p
-                              WHERE p.tenant_id = atoms.tenant_id
-                                AND p.space = atoms.space), ?)""",
-                    (PERMANENT_PROBABILITY, _DEFAULT_MIN_CONFIDENCE),
-                )
-            conn.execute(
-                "INSERT INTO applied_repairs (name) VALUES (?)",
-                (_PERMANENT_CONFIDENCE_REPAIR,),
-            )
             conn.commit()
         except Exception:
             conn.rollback()

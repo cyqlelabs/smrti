@@ -33,6 +33,16 @@ ATOM_SOURCE = (
 # input, so unreadable metadata is replaced rather than appended to.
 ATOM_METADATA_JSON = "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END"
 
+# Whether forget() deliberately sank this atom. The stamp is what tells a
+# forget from decay drowning: the epoch lifts a drowned permanent belief back
+# to its asserted probability, and without the stamp that lift would undo
+# every deliberate forget one epoch later. An atom with no stamp predates
+# stamping and reads as never forgotten.
+ATOM_FORGOTTEN = (
+    "COALESCE(CASE WHEN json_valid(metadata) "
+    "THEN json_extract(metadata, '$.forgotten') END, 0)"
+)
+
 # An atom's own tone read back from SQL, falling back to the current value for
 # rows written before the columns existed. Only propagation reads the drifting
 # pair; everything that judges a memory reads these.

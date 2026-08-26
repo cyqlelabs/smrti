@@ -1,7 +1,9 @@
 DATASET ?= data/longmemeval_s.json
+LOCOMO ?= data/locomo10.json
+HALUMEM ?= data/HaluMem-Medium.jsonl
 BENCH_ARGS ?=
 
-.PHONY: test bench bench-baseline
+.PHONY: test bench bench-baseline bench-locomo bench-halumem bench-all
 
 test:
 	pytest tests/ -q
@@ -15,3 +17,15 @@ bench:
 
 bench-baseline:
 	PYTHONPATH=. python -m bench.longmemeval.run --dataset $(DATASET) --update-baseline $(BENCH_ARGS)
+
+# LoCoMo — ten very long conversations between two speakers, questions
+# annotated by the reasoning they need. Same retrieval gate as above.
+bench-locomo:
+	PYTHONPATH=. python -m bench.locomo.run --dataset $(LOCOMO) $(BENCH_ARGS)
+
+# HaluMem — what the system says when it does not know. Needs an answering
+# model, and gates on the hallucination rate rising.
+bench-halumem:
+	PYTHONPATH=. python -m bench.halumem.run --dataset $(HALUMEM) $(BENCH_ARGS)
+
+bench-all: bench bench-locomo bench-halumem

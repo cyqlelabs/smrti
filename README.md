@@ -492,16 +492,37 @@ The published package ships `smrti` only, so this one command needs the repo: cl
 pytest tests/ -v
 ```
 
-### Retrieval benchmark
+## Benchmarks
 
-`bench/longmemeval` ingests LongMemEval-S conversation histories as episodes and answers its questions through `recall`, scoring retrieval hit rate separately from answer accuracy — a model that answers well from a bad candidate set hides the regression the harness exists to catch. Run it before releasing any change that touches retrieval; it is not a CI gate, since it needs the dataset and the embedding model.
+Three harnesses live in `bench/`, each ingesting a published dataset as episodes and answering its questions through `recall`. Retrieval and answering are scored separately on purpose: a strong answering model can carry a weak candidate set, and that is exactly the regression a gate exists to catch.
+
+Measured on 2026-08-26 — smrti as a pure vector + BM25 store, extraction off, `top_k=50`, `deterministic` preset, gemini-3.7-flash answering and judging.
+
+| Benchmark | Scope | Retrieval | Answers | Notes |
+| --------- | ----- | --------- | ------- | ----- |
+| [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval) | 40 questions, one per ability in turn | **0.900** hit · 0.869 evidence recall | **0.825** | 5 of 6 abilities retrieve perfectly |
+| [LoCoMo](https://github.com/snap-research/locomo) | 10 conversations, 200 questions | **0.692** hit · 0.595 evidence recall | **0.579** | adversarial refusal 0.171 |
+| [HaluMem](https://huggingface.co/datasets/IAAR-Shanghai/HaluMem) | 3 personas, 180 questions | — | **0.522** correct | hallucination 0.428 · omission 0.050 |
 
 ```bash
-make bench DATASET=path/to/longmemeval_s.json      # fails if the hit rate drops
-make bench-baseline DATASET=path/to/longmemeval_s.json   # record a new baseline
+make bench DATASET=path/to/longmemeval_s.json        # fails if the hit rate drops
+make bench-locomo LOCOMO=path/to/locomo10.json
+make bench-halumem HALUMEM=path/to/HaluMem-Medium.jsonl
 ```
 
-The locked config (model, top_k, personality, question subset) lives in `bench/longmemeval/config.json` and the recorded numbers in `baseline.json`. A baseline measured under a different config is refused rather than compared. The subset is deterministic and takes one question per type in turn — the dataset is grouped by type, so the front of the file is one ability forty times over.
+Each benchmark locks its config (model, `top_k`, personality, subset) beside a recorded baseline, and refuses to compare numbers measured under different configs. Subsets are deterministic and balanced across question types — the datasets are grouped by ability, so the front of a file is one skill many times over. None of the three is a CI gate: they need dataset downloads, the embedding model, and a judge key.
+
+### What the numbers say
+
+**Where it is strong.** LongMemEval retrieves the annotated evidence for five of six abilities without a miss, and temporal reasoning and knowledge updates convert that into perfect answers once memories reach the model stamped with their dates. On HaluMem's *memory boundary* questions — asked about things the user never said — smrti answers correctly 94% of the time and invents something 5.9% of the time. Knowing what you were not told is the hard half of remembering.
+
+**Where it is weak.** HaluMem's synthesis categories hallucinate badly: multi-hop inference 70%, generalization 72%. LoCoMo's open-domain questions retrieve at 0.500 against 0.780 for temporal ones, and only 17% of its adversarial questions draw the refusal they deserve. The shape is consistent — smrti finds what it stored and stumbles when an answer has to be *assembled* from several memories.
+
+**What is not measured yet.** Every number above runs with `SMRTI_EXTRACT=0`, so the entity and claim graph — the part built to join facts together — takes no part in them. HaluMem's memory-extraction and memory-update tasks, and LoCoMo's event summarization, are not implemented.
+
+### Reading these against published results
+
+Published comparisons report judged answer accuracy over full datasets, so treat the table as a position, not a ranking. The subsets here are small (40 to 200 questions, where a single question moves a category by several points), a single judge grades them where published protocols average three, and the answering model differs. LongMemEval leaderboard figures for reference: MemOS 77.8, Memobase 72.4, Mem0 66.4, Zep 63.8.
 
 ## License
 

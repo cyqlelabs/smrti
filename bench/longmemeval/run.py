@@ -48,19 +48,35 @@ def load_json(path: str) -> dict:
         return json.load(handle)
 
 
-async def _score_answer(answering: dict, question, memories: list[str]) -> bool:
+def load_baseline(path: str) -> dict:
+    """The recorded baseline, or an empty one when there is no file yet.
+
+    A baseline that has never been written reads the same as one that was
+    written before anything was measured: nothing to compare against. Failing
+    with a traceback instead would throw away the run that just finished.
+    """
+    try:
+        return load_json(path)
+    except FileNotFoundError:
+        return {}
+
+
+async def _score_answer(
+    answering: dict, question, memories: list[str]
+) -> tuple[str, bool]:
     """Generate an answer from the recalled memories and have it judged."""
     import httpx
 
     async with httpx.AsyncClient(timeout=httpx.Timeout(120.0)) as http:
         answer = await answer_question(
             http, answering["url"], answering["auth"], answering["model"],
-            question.question, memories,
+            question.question, memories, question.question_date,
         )
-        return await judge_answer(
+        correct = await judge_answer(
             http, answering["url"], answering["auth"], answering["judge_model"],
             question.question, question.answer, answer,
         )
+        return answer, correct
 
 
 def run(config: dict, dataset: str, db_path: str, answering: dict | None = None) -> dict:
@@ -89,8 +105,17 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None)
                 mem.atomspace.get_atom(atom_id, mem.tenant_id, mem.write_space)
                 for atom_id in row["returned_ids"]
             )
-            memories = [atom.content or atom.label for atom in recalled if atom]
-            row["answer_correct"] = asyncio.run(
+            # Each memory carries the day it was recorded. A memory store that
+            # loses when something was said cannot answer when it happened,
+            # and the benchmark asks that of a third of its questions.
+            memories = [
+                f"[{(atom.created_at or '')[:10]}] {atom.content or atom.label}"
+                for atom in recalled
+                if atom
+            ]
+            # The generated answer is kept beside the verdict: a score with no
+            # answer under it cannot be argued with.
+            row["answer"], row["answer_correct"] = asyncio.run(
                 _score_answer(answering, question, memories)
             )
         rows.append(row)
@@ -220,7 +245,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"baseline updated: {args.baseline}", file=sys.stderr)
         return 0
 
-    ok, message = compare(result, load_json(args.baseline), tolerance)
+    ok, message = compare(result, load_baseline(args.baseline), tolerance)
     print(message, file=sys.stderr)
     return 0 if ok else 1
 

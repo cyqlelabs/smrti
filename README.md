@@ -107,13 +107,13 @@ smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow f
 
 **`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a Bayesian truth value, attention weight, and valence score. Leave `valence` unset and it is read from the text; pass one and the memory is filed as a deliberate report, which is what lets recall raise it to a behavioral constraint. A belief asserted at probability ≥ 0.95 is permanent: it keeps the confidence it was asserted with and is exempt from decay. Relative dates are resolved against the moment you write them, so "the session is tomorrow" still names a day when you read it next week — on in every server mode, and `Smrti(temporal=True)` for a direct caller, since it costs an NER pass per write. Evidence is append-only; truth values update via PLN revision. Entities and relation edges are extracted automatically (the LLM is only called when GLiNER finds ≥2 entities, cutting LLM calls ~40–60%).
 
-**`recall()`** — Searches twice and fuses the results: a vector KNN over the query embedding beside a BM25 search of the same spaces, merged by Reciprocal Rank Fusion. The lexical half earns its place on the queries the embedding gets wrong — a fact stored in one language sits a long way from the question that asks for it in another, while the proper nouns both carry are identical. Fusion only chooses the candidates; salience still decides the ranking, after 1-hop graph expansion:
+**`recall()`** — Searches twice and fuses the results: a vector KNN over the query embedding beside a BM25 search of the same spaces, merged by Reciprocal Rank Fusion. The lexical half earns its place on the queries the embedding gets wrong — a fact stored in one language sits a long way from the question that asks for it in another, while the proper nouns both carry are identical. Only its top ten candidates join the pool: that head holds the proper-noun matches, and its tail is every atom sharing a stop-word with the query. Fusion only chooses the candidates; salience still decides the ranking, after 1-hop graph expansion:
 
 ```
 S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w_val × |valence| × intensity
 ```
 
-When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. The valence terms read the tone an atom was written with, never the mood it absorbed from its neighbors during propagation. An episode that just restates the query loses its similarity term — the question is not the answer — and agent-authored atoms are scaled by `agent_source_trust`, so a model's own reply never outranks the user testimony it came from. A last pass caps how much of the answer one moment may fill: an episode repeating one already chosen from the same minutes yields its slot, and beliefs keep a couple of slots so the standing facts survive a wall of chatter. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`); a critical warning takes a valence you set yourself, on an atom that can hold a proposition — never a bare concept.
+When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. The valence terms read the tone an atom was written with, never the mood it absorbed from its neighbors during propagation. An episode that just restates the query loses its similarity term — the question is not the answer. `agent_source_trust` discounts what an agent-authored atom has earned in the graph, its attention, confidence and valence terms, but leaves similarity alone: on equal relevance the user's version wins, and a question only the model's own reply can answer still gets answered. A last pass caps how much of the answer one moment may fill: an episode repeating one already chosen from the same minutes yields its slot once that moment has spent its allowance, which is two repeats or one per six slots of answer, whichever is larger. A duplicate wastes a fifth of a five-slot reply and two percent of a fifty-slot one. Beliefs keep a couple of slots either way, so the standing facts survive a wall of chatter. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`); a critical warning takes a valence you set yourself, on an atom that can hold a proposition — never a bare concept.
 
 **`reinforce()`** — Reports that memories were used, which is the one way confidence climbs without the caller restating the fact. Everything else rides it down toward the surfacing floor, and an atom below that floor can never be recalled, so it can never be restated, so nothing lifts it back. The client decides what "used" means — the cheap proxy is that distinctive words from a recalled atom turned up in the reply it informed. The evidence is weak on purpose: a small weight, an update that converges rather than ratchets, a cap per consolidation, the agent-source discount, and never a memory you asked to forget.
 
@@ -145,16 +145,16 @@ claude mcp add smrti -- smrti serve mcp
 }
 ```
 
-| Tool          | Description                                                                                       |
-| ------------- | ------------------------------------------------------------------------------------------------- |
-| `remember`    | Store an episode, goal, or belief (use `type=belief` + `evidence` to assert a probabilistic fact) |
-| `recall`      | Semantic search with salience scoring and severity classification                                 |
-| `reflect`     | Run a consolidation epoch                                                                         |
-| `forget`      | Lower confidence on a memory                                                                      |
-| `status`      | Memory statistics and the tenant's spaces                                                         |
-| `personality` | Get or set the personality preset                                                                 |
-| `space_query` | Compare two spaces: `op=overlap` (Jaccard), `op=intersection`, `op=diff`                          |
-| `space_merge` | Materialize a bridge space from the overlap between two spaces                                    |
+| Tool                  | Description                                                                                       |
+| --------------------- | ------------------------------------------------------------------------------------------------- |
+| `smrti_remember`      | Store an episode, goal, or belief (use `type=belief` + `evidence` to assert a probabilistic fact) |
+| `smrti_recall`        | Semantic search with salience scoring and severity classification                                 |
+| `smrti_reflect`       | Run a consolidation epoch                                                                         |
+| `smrti_forget`        | Lower confidence on a memory                                                                      |
+| `smrti_status`        | Memory statistics and the tenant's spaces                                                         |
+| `smrti_personality`   | Get or set the personality preset                                                                 |
+| `smrti_space_query`   | Compare two spaces: `op=overlap` (Jaccard), `op=intersection`, `op=diff`                          |
+| `smrti_space_merge`   | Materialize a bridge space from the overlap between two spaces                                    |
 
 ### REST API
 
@@ -377,7 +377,7 @@ Each preset tunes 17 hyperparameters. To create a custom personality, start from
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| `agent_source_trust` | 0.5 | Standing of agent-authored atoms. Scales their salience at recall and accelerates their decay; lower = model output fades faster while user-stated facts persist |
+| `agent_source_trust` | 0.5 | Standing of agent-authored atoms. Discounts every salience term but similarity at recall, and accelerates their decay; lower = model output fades faster while user-stated facts persist |
 
 **Emotional dynamics** — shape how valence influences behavior:
 
@@ -446,7 +446,7 @@ graph TD
     Core & Retrieval & Evolution & Extraction & Spaces --> SQL
 ```
 
-**Retrieval pipeline:** Embed query → KNN over tenant partition, fused by Reciprocal Rank Fusion with a BM25 search of the same spaces (entry pool scales with graph size) → filter to read spaces → 1-hop graph expansion, highest-standing endpoints first → salience scoring → diversity cap → top-k
+**Retrieval pipeline:** Embed query → KNN over tenant partition, fused by Reciprocal Rank Fusion with the top ten hits of a BM25 search of the same spaces (entry pool scales with graph size) → filter to read spaces → 1-hop graph expansion, highest-standing endpoints first → salience scoring → diversity cap → top-k
 
 **Consolidation epoch** (runs automatically every `SMRTI_REFLECT_INTERVAL` seconds, or manually via `reflect()`):
 

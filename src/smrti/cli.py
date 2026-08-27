@@ -1,4 +1,4 @@
-"""CLI for smrti: smrti serve mcp|rest|proxy, smrti stop, smrti init, smrti status."""
+"""CLI for smrti: smrti serve mcp|rest|viz|proxy|town, smrti stop, smrti init, smrti status."""
 from __future__ import annotations
 
 import contextlib

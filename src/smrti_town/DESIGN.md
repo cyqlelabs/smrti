@@ -1,5 +1,9 @@
 # Smrti-Town: Game Design Document
 
+This is the game smrti-town is being built toward, not the game it is today. Where
+a section describes something unwired, it says so; [README.md](README.md) is the
+description of what currently runs.
+
 ## 1. Opening Sequence
 
 The game starts with an empty grass field. No buildings, no people, no UI clutter. Just terrain.
@@ -341,27 +345,11 @@ transparent background, no anti-aliasing, consistent top-left lighting, game-rea
 
 The LLM is called at these moments (never in the hot tick path):
 
-1. **Mayor/Council generation** — Character creation with personality, bio, governing style.
-2. **Council meetings** — Given town state, generate debate and proposal.
-3. **New resident generation** — Given housing type, generate person/family.
-4. **Citizen petitions** — Given unmet needs, generate petition text.
-5. **Event narration** — Describe weddings, crises, festivals in character.
-6. **Dialogue** — When citizens interact, generate in-character conversation.
+1. **Mayor/Council generation** — Character creation with personality, bio, governing style. *Wired.*
+2. **Council meetings** — Given town state, generate debate and proposal. *Wired.*
+3. **New resident generation** — Given housing type, generate person/family. *Wired.*
+4. **Citizen petitions** — Given unmet needs, generate petition text. *Planned — petitions read from templates today.*
+5. **Event narration** — Describe weddings, crises, festivals in character. *Planned — `events.py` has no callers.*
+6. **Dialogue** — When citizens interact, generate in-character conversation. *Wired.*
 
-All LLM calls include the building catalog so the model picks from valid options. All calls have template fallbacks.
-
----
-
-## 12. Comparison: Old vs New
-
-| Old smrti-town | New smrti-town |
-|---------------|---------------|
-| Pre-built world (Millbrook) | Empty field, player places Town Hall |
-| Hardcoded 6 agents | LLM generates everyone |
-| Primitive drawn shapes | Real isometric pixel art sprites |
-| Flat economy (wallet + prices) | Full economic simulation (treasury, taxes, trade, entrepreneurship) |
-| Rule-based decisions only | Council AI debates and proposes via LLM |
-| Random population | Immigration driven by pull factors |
-| Static skills | Skill development -> profession pipeline |
-| Petitions detect keywords | Petitions emerge from unmet needs in the simulation |
-| Buildings are boxes | Varied sprites per building type |
+Council proposals carry the building catalog in the prompt, so the model can only pick something the engine knows how to build. Every call has a template fallback.

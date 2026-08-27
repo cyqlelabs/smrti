@@ -2,7 +2,7 @@
 
 A city-builder where every citizen has a real memory graph.
 
-Each citizen carries a [Smrti](../smrti/) memory engine — beliefs stored as graph nodes with Bayesian truth values, emotional valence, and salience weights. Citizens decide what to do based on what they remember. A mayor and council debate what to build, citizens petition for what they need, and newcomers arrive when the town gives them a reason to.
+Each citizen carries a [Smrti](../../README.md) memory engine — beliefs stored as graph nodes with Bayesian truth values, emotional valence, and salience weights. Citizens decide what to do based on what they remember. A mayor and council debate what to build, citizens petition for what they need, and newcomers arrive when the town gives them a reason to.
 
 Point it at a local LLM and it generates the people. Watch it run in an isometric Phaser canvas. Query any citizen's memories over REST.
 
@@ -169,4 +169,4 @@ Every citizen reads from their own space plus `World_Space` and `Space_Culture`,
 
 `smrti-town` is not packaged separately — it lives in `src/smrti_town/` alongside `src/smrti/` and imports the `Smrti` class directly. Every citizen owns a `Smrti` instance.
 
-See [../smrti/](../smrti/) for the full memory engine documentation.
+See the [Smrti README](../../README.md) for the full memory engine documentation.

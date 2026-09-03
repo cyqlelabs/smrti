@@ -63,6 +63,12 @@ INITIAL_CONFIDENCE = {
     "relation": 0.5,
 }
 
+# Relations that describe the graph's own bookkeeping rather than a fact about
+# an entity: an episode mentioning it, association discovery's paraphrase
+# links, bridge edges, and the contradiction edges supersession draws. Every
+# other relation is a claim the extractor read from a sentence.
+STRUCTURAL_RELATIONS = ("mentions", "associated", "bridge", "contradicts")
+
 # What a claim that has been replaced by a later one is held at. Not zero —
 # it was true when it was stated — but under the antipattern line, so recall
 # reads a superseded preference or constraint as something to avoid rather

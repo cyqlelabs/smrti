@@ -232,6 +232,49 @@ def test_atoms_forgotten_by_the_old_forget_are_sunk_below_the_floor(tmp_path):
     assert mem.db.fetchone("SELECT 1 FROM atoms WHERE id = ?", (atom_id,)) is None
 
 
+class _RefusingRepairWrite:
+    """A connection that refuses the repair's first write, so it must roll back."""
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, *args):
+        if "SET" in sql and "intrinsic_valence = COALESCE" in sql:
+            raise sqlite3.OperationalError("disk I/O error")
+        return self._conn.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+
+def test_a_failed_repair_rolls_back_every_change_and_raises(tmp_path):
+    path = str(tmp_path / "old.db")
+    get_database(path)
+    close_database(path)
+    conn = sqlite3.connect(path)
+    _legacy_entity(conn, "alice", "Alice", entity_type="person")
+    _legacy_entity(conn, "python", "Python")
+    _legacy_edge(conn, "hub", "alice", "python", "associated", confidence=0.2)
+    conn.commit()
+    conn.close()
+    db = Database(path)
+    real = _make_connection(path)
+    db._write_conn = _RefusingRepairWrite(real)
+    db._migration_backup_done = True
+
+    with pytest.raises(sqlite3.OperationalError):
+        db._repair_legacy_rows()
+
+    assert not real.in_transaction
+    real.close()
+    check = sqlite3.connect(path)
+    try:
+        assert check.execute("SELECT intrinsic_valence FROM atoms WHERE id = 'python'").fetchone()[0] is None
+        assert check.execute("SELECT COUNT(*) FROM atoms WHERE id = 'hub'").fetchone()[0] == 1
+    finally:
+        check.close()
+
+
 def test_repairs_do_nothing_on_a_file_with_no_graph_yet(tmp_path):
     path = str(tmp_path / "empty.db")
     db = Database(path)

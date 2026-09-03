@@ -70,15 +70,15 @@ def test_heals_orphaned_episodes(mem):
         )
         assert row is not None, f"Episode {ep_id} should now mention person"
 
-    # Check that associated edges person -> concept were created
+    # And nothing else: the placeholder person -> concept edges an earlier
+    # version drew made the person a hub joined to every concept in the space.
     for concept_id in (concept_a, concept_b):
         row = mem.db.fetchone(
-            """SELECT confidence FROM atoms WHERE type = 'relation' AND relation = 'associated'
+            """SELECT 1 FROM atoms WHERE type = 'relation'
                AND source_id = ? AND target_id = ? AND tenant_id = ? AND space = ?""",
             (person_id, concept_id, mem.tenant_id, mem.write_space),
         )
-        assert row is not None, f"Person should be associated with concept {concept_id}"
-        assert row["confidence"] == pytest.approx(0.2)
+        assert row is None, "healing must not turn the person into a hub"
 
 
 def test_no_healing_when_person_already_linked(mem):

@@ -11,7 +11,8 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 
-from smrti.core.provenance import ATOM_METADATA_JSON
+from smrti.core.models import SUPERSEDED_PROBABILITY, Evidence
+from smrti.core.provenance import ATOM_METADATA_JSON, SOURCE_AGENT
 
 from .prompts import AGENT_EXTRACTION_PROMPT, CLAIMS_ONLY_PROMPT, ENTITY_TYPES, EXTRACTION_PROMPT
 
@@ -194,12 +195,46 @@ def _store_temporal(episode_id: str, mem: "Smrti", items: list) -> None:
     ]
     if not resolved:
         return
+    # Merge, never replace. The write-time tier (GLiNER + dateparser) files
+    # its resolutions here first and is authoritative for the spans it
+    # handled — it is deterministic where the model is not — so the model
+    # only adds spans the parser could not reach. One list, one reading per
+    # span.
+    existing = _existing_temporal(episode_id, mem)
+    seen = {item["text"].casefold() for item in existing}
+    merged = existing + [
+        item for item in resolved if item["text"].casefold() not in seen
+    ]
+    if merged == existing:
+        return
     mem.db.execute(
         f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON},
                                                  '$.temporal', json(?))
             WHERE id = ? AND tenant_id = ?""",
-        (json.dumps(resolved), episode_id, mem.tenant_id),
+        (json.dumps(merged), episode_id, mem.tenant_id),
     )
+
+
+def _existing_temporal(episode_id: str, mem: "Smrti") -> list[dict]:
+    row = mem.db.fetchone(
+        "SELECT metadata FROM atoms WHERE id = ? AND tenant_id = ?",
+        (episode_id, mem.tenant_id),
+    )
+    if row is None:
+        return []
+    try:
+        items = json.loads(row["metadata"] or "{}").get("temporal")
+    except (TypeError, ValueError, AttributeError):
+        return []
+    if not isinstance(items, list):
+        return []
+    return [
+        {"text": item["text"], "resolved": item["resolved"]}
+        for item in items
+        if isinstance(item, dict)
+        and isinstance(item.get("text"), str)
+        and isinstance(item.get("resolved"), str)
+    ]
 
 
 async def extract_knowledge(
@@ -308,6 +343,14 @@ def _get_sole_person(mem: "Smrti") -> tuple[str, str] | None:
     return (rows[0]["label"], rows[0]["id"])
 
 
+# Relations that describe the graph's own bookkeeping rather than a fact
+# about the entity, and so have no place in the model's view of it.
+_STRUCTURAL_RELATIONS = ("mentions", "associated", "bridge", "contradicts")
+
+# How many recorded facts each known entity carries into the prompt.
+_CONTEXT_CLAIMS_PER_ENTITY = 6
+
+
 def _build_entity_context(mem: "Smrti") -> str:
     """Return a compact list of salient named entities from the memory graph.
 
@@ -315,9 +358,16 @@ def _build_entity_context(mem: "Smrti") -> str:
     that "I" resolves to "Nico" even when the name isn't in the current message.
     Covers all entity types that can plausibly be referenced by a pronoun or
     short noun phrase: person, organization, project, tool, location, event, goal.
+
+    Each entity also carries what the graph already records about it
+    (``Alice (person): lives_in Amsterdam; works_for Acme``). That is what
+    lets the model say a new fact *replaces* an old one — the ``supersedes``
+    field on a claim — which is the one way the graph ever learns that a
+    belief has stopped being true. Superseded claims are left out: the model
+    should see the current state, not the history.
     """
     rows = mem.db.fetchall(
-        """SELECT label, entity_type
+        """SELECT id, label, entity_type
            FROM atoms
            WHERE tenant_id = ? AND space = ? AND type IN ('concept', 'belief', 'goal')
              AND source_id IS NULL AND entity_type IS NOT NULL
@@ -325,11 +375,40 @@ def _build_entity_context(mem: "Smrti") -> str:
            LIMIT 30""",
         (mem.tenant_id, mem.write_space),
     )
+    entities = [
+        (row["id"], row["label"], row["entity_type"] or "")
+        for row in rows
+        if (row["entity_type"] or "") in _COREF_TYPES
+    ]
+    if not entities:
+        return ""
+
+    ids = [atom_id for atom_id, _, _ in entities]
+    ph = ",".join("?" * len(ids))
+    rel_ph = ",".join("?" * len(_STRUCTURAL_RELATIONS))
+    claims = mem.db.fetchall(
+        f"""SELECT r.source_id AS subject_id, r.relation AS predicate, t.label AS object
+            FROM atoms r JOIN atoms t ON t.id = r.target_id
+            WHERE r.type = 'relation' AND r.tenant_id = ? AND r.space = ?
+              AND r.source_id IN ({ph})
+              AND r.relation NOT IN ({rel_ph})
+              AND (CASE WHEN json_valid(r.metadata)
+                        THEN json_extract(r.metadata, '$.superseded_by') END) IS NULL
+            ORDER BY r.confidence DESC, r.created_at DESC""",
+        (mem.tenant_id, mem.write_space, *ids, *_STRUCTURAL_RELATIONS),
+    )
+    facts: dict[str, list[str]] = {}
+    for claim in claims:
+        held = facts.setdefault(claim["subject_id"], [])
+        if len(held) < _CONTEXT_CLAIMS_PER_ENTITY:
+            held.append(f"{claim['predicate']} {claim['object']}")
+
     lines = []
-    for row in rows:
-        etype = row["entity_type"] or ""
-        if etype in _COREF_TYPES:
-            lines.append(f"- {row['label']} ({etype})")
+    for atom_id, label, etype in entities:
+        line = f"- {label} ({etype})"
+        if facts.get(atom_id):
+            line += ": " + "; ".join(facts[atom_id])
+        lines.append(line)
     return "\n".join(lines)
 
 
@@ -441,6 +520,25 @@ def _resolve_ner_entities(
     return entity_ids
 
 
+# Lower an atom's tone to a claim's, in both pairs. The claim is the model's
+# reading of what was said about the atom — an estimate, so it never marks
+# the valence as stated — but it is a better estimate of the atom's own tone
+# than the neutral default an extracted concept is born with, so it reaches
+# the intrinsic pair that every judgement reads and not only the drifting one
+# propagation moves. Only ever downward: a claim can make a memory graver,
+# never lighter.
+_LOWER_TONE_SQL = """UPDATE atoms SET
+        valence = MIN(valence, ?),
+        intensity = MAX(intensity, ?),
+        intrinsic_valence = MIN(COALESCE(intrinsic_valence, valence), ?),
+        intrinsic_intensity = MAX(COALESCE(intrinsic_intensity, intensity), ?)
+    WHERE id = ?"""
+
+def _lower_tone(mem: "Smrti", atom_id: str, valence: float) -> None:
+    intensity = min(1.0, abs(valence))
+    mem.db.execute(_LOWER_TONE_SQL, (valence, intensity, valence, intensity, atom_id))
+
+
 def _link_claims(
     claims: list[dict],
     entity_ids: dict[str, str],
@@ -454,6 +552,11 @@ def _link_claims(
     valence, non-string labels) is logged and skipped, never aborting the
     batch. Valence is clamped to [-1, 1] and intensity to [0, 1] before any
     DB write.
+
+    A claim carrying ``supersedes`` replaces an earlier claim with the same
+    subject and predicate: the old edge is marked, linked to the new one by a
+    ``contradicts`` edge naming it the loser, and filed negative evidence
+    against — see :func:`_supersede`.
     """
     _resolver = None
     min_valence = 0.0
@@ -476,36 +579,113 @@ def _link_claims(
             if subj_id and obj_id and subj_id != obj_id:
                 predicate = claim.get("predicate", "related_to")
                 claim_valence = max(-1.0, min(1.0, float(claim.get("valence") or 0.0)))
-                intensity = min(1.0, abs(claim_valence))
-                mem.atomspace.link_atoms(
+                new_edge = mem.atomspace.link_atoms(
                     subj_id, obj_id, predicate,
                     mem.tenant_id, mem.write_space,
                     valence=claim_valence,
                 )
-                # Propagate negative claim valence to the target atom immediately.
-                # Epoch propagation can't do this because relation atoms have no
-                # neighbors of their own — propagate_valence finds nothing.
+                # Lower the target's tone to the claim's straight away. Epoch
+                # propagation cannot: relation atoms have no neighbours of
+                # their own, so propagate_valence finds nothing to move.
                 if claim_valence < -0.3:
-                    mem.db.execute(
-                        "UPDATE atoms SET valence = MIN(valence, ?), intensity = MAX(intensity, ?) WHERE id = ?",
-                        (claim_valence, intensity, obj_id),
-                    )
+                    _lower_tone(mem, obj_id, claim_valence)
                     if claim_valence < min_valence:
                         min_valence = claim_valence
                 # Safety net: promote target atom to goal type on has_goal claims
                 if predicate == "has_goal":
                     _promote_to_goal(obj_id, mem)
+                old_label = claim.get("supersedes")
+                if isinstance(old_label, str) and old_label.strip():
+                    _supersede(
+                        mem, subj_id, predicate, old_label.strip(), obj_id,
+                        new_edge, entity_ids, episode_id, source,
+                    )
         except Exception as exc:
             logger.warning("skipping malformed claim %r: %s", claim, exc)
             continue
 
-    # Propagate the strongest negative claim valence to the source episode so it
-    # classifies as critical_warning without relying on sentiment estimation.
+    # Carry the gravest claim's tone back to the episode it came from. This is
+    # still an estimate — it never sets VALENCE_STATED, so the episode cannot
+    # become a behavioural constraint on the model's reading alone — but it is
+    # the better estimate, and it ranks and protects the memory accordingly.
     if episode_id and min_valence < -0.3:
-        mem.db.execute(
-            "UPDATE atoms SET valence = MIN(valence, ?), intensity = MAX(intensity, ?) WHERE id = ?",
-            (min_valence, min(1.0, abs(min_valence)), episode_id),
+        _lower_tone(mem, episode_id, min_valence)
+
+
+def _supersede(
+    mem: "Smrti",
+    subj_id: str,
+    predicate: str,
+    old_label: str,
+    new_obj_id: str,
+    new_edge_id: str,
+    entity_ids: dict[str, str],
+    episode_id: str,
+    source: str,
+) -> None:
+    """Record that the new claim replaces an older one about the same subject.
+
+    This is the producer the contradiction step was missing, and the one path
+    by which a belief's probability can fall. For the old claim edge, and for
+    the old object too when it is a belief atom (a superseded preference or
+    constraint): a ``contradicts`` edge from the new to the old naming the old
+    one as the loser, so the epoch cuts it to ``SUPERSEDED_PROBABILITY``
+    rather than adjudicating by confidence (the older claim is usually the
+    more confident, having been mentioned more); negative evidence against
+    it, so the log records why; and, on the edge, a ``superseded_by`` mark
+    that drops it from the entity context and from the proxy's rendering of
+    the entity. A superseded belief then reads as a known antipattern at
+    recall: the thing the user used to prefer.
+    """
+    old_obj_id = _db_resolve_label(old_label, entity_ids, mem)
+    if not old_obj_id or old_obj_id == new_obj_id:
+        return
+    old_edge = mem.db.fetchone(
+        """SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
+           AND relation = ? AND tenant_id = ? AND space = ? AND id != ?""",
+        (subj_id, old_obj_id, predicate, mem.tenant_id, mem.write_space, new_edge_id),
+    )
+    if old_edge is None:
+        # The earlier claim may have been extracted under a different wording
+        # of the same predicate; any factual edge to the old object will do.
+        rel_ph = ",".join("?" * len(_STRUCTURAL_RELATIONS))
+        old_edge = mem.db.fetchone(
+            f"""SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
+                AND relation NOT IN ({rel_ph}) AND tenant_id = ? AND space = ? AND id != ?
+                ORDER BY created_at DESC LIMIT 1""",
+            (subj_id, old_obj_id, *_STRUCTURAL_RELATIONS, mem.tenant_id, mem.write_space, new_edge_id),
         )
+    if old_edge is None:
+        return
+    old_edge_id = old_edge["id"]
+    mem.db.execute(
+        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.superseded_by', ?)
+            WHERE id = ? AND tenant_id = ? AND space = ?""",
+        (new_edge_id, old_edge_id, mem.tenant_id, mem.write_space),
+    )
+
+    new_obj = mem.db.fetchone("SELECT label FROM atoms WHERE id = ?", (new_obj_id,))
+    note = f"superseded: {predicate} {old_label} -> {new_obj['label'] if new_obj else new_obj_id}"
+    trust = _agent_trust(mem) if source == SOURCE_AGENT else 1.0
+    pairs = [(new_edge_id, old_edge_id)]
+    old_obj = mem.db.fetchone("SELECT type FROM atoms WHERE id = ?", (old_obj_id,))
+    if old_obj and old_obj["type"] == "belief":
+        pairs.append((new_obj_id, old_obj_id))
+    for winner, loser in pairs:
+        mem.atomspace.link_atoms(
+            winner, loser, "contradicts", mem.tenant_id, mem.write_space,
+            metadata={"loser": loser},
+        )
+        mem.atomspace.add_evidence(Evidence(
+            atom_id=loser,
+            observed_probability=SUPERSEDED_PROBABILITY,
+            weight=trust,
+            source_episode_id=episode_id or None,
+            text=note,
+            source=source,
+            tenant_id=mem.tenant_id,
+            space=mem.write_space,
+        ))
 
 
 def _promote_to_goal(atom_id: str, mem: "Smrti") -> None:

@@ -19,8 +19,10 @@ from smrti import Smrti
 
 from ..answering import score_batch
 from ..harness import (
+    apply_run_modes,
     build_parser,
     config_hash,
+    consolidate,
     finish,
     load_json,
     require_dataset,
@@ -59,6 +61,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None,
             write_space=f"q_{question.question_id or position}",
         )
         stored = ingest(question, mem, extraction)
+        consolidate(mem, config.get("epochs", 0))
         row = evaluate_question(
             question,
             mem,
@@ -131,6 +134,7 @@ def main(argv: list[str] | None = None) -> int:
     answering = resolve_answering(args, parser)
     extraction = resolve_extraction(args)
     config["extraction"] = bool(extraction)
+    apply_run_modes(args, config)
     db_path, scratch = args.db, None
     if db_path is None:
         scratch = tempfile.TemporaryDirectory()

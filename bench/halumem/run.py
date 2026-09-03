@@ -19,9 +19,11 @@ from smrti import Smrti
 
 from ..answering import score_batch
 from ..harness import (
+    apply_run_modes,
     build_parser,
     compare,
     config_hash,
+    consolidate,
     load_baseline,
     load_json,
     require_dataset,
@@ -56,6 +58,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict,
             write_space=f"u_{user.uuid or position}",
         )
         stored = ingest(user, mem, extraction)
+        consolidate(mem, config.get("epochs", 0))
         questions = select_questions(user, config.get("questions_per_user") or None)
         items = [
             {
@@ -151,6 +154,7 @@ def main(argv: list[str] | None = None) -> int:
         config["user_limit"] = args.limit
     extraction = resolve_extraction(args)
     config["extraction"] = bool(extraction)
+    apply_run_modes(args, config)
     tolerance = config.pop("tolerance", 0.01)
 
     db_path, scratch = args.db, None

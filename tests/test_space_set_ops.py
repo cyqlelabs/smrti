@@ -581,15 +581,15 @@ def test_epoch_discovers_bridges():
         mem_a.remember("Python web development with FastAPI", type="belief", probability=0.9)
         mem_b.remember("Python scripting for home automation", type="belief", probability=0.8)
 
-        # Fast-forward epoch counter to 9 so next reflect triggers bridge discovery
+        # Bridging is an explicit call, never an epoch side effect: ten epochs
+        # must leave the tenant's space list exactly as it was.
         mem_a.db.execute(
             "UPDATE personality SET epoch_count = 9 WHERE tenant_id = ? AND space = ?",
             ("t1", "work"),
         )
         result = mem_a.reflect()
-        # The bridges_created field should be present (may be 0 if threshold not met)
-        assert hasattr(result, "bridges_created")
-        assert result.bridges_created >= 0
+        assert not hasattr(result, "bridges_created")
+        assert mem_a.list_spaces() == ["hobby", "work"]
     finally:
         mem_a.close()
         mem_b.close()

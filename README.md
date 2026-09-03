@@ -8,7 +8,7 @@
 
 **Long-term memory for AI agents in a single SQLite file.** Your agent remembers what matters, forgets what doesn't, and never repeats a critical mistake — no vector database, no external services, no infrastructure.
 
-Inspired by <a href="https://github.com/opencog/atomspace" target="_blank">AtomSpace</a>: memories are graph nodes with Bayesian truth values, emotional valence, and attention weights. Embedding similarity is only the entry point — a fast index to seed graph traversal. What gets recalled and why is governed by graph topology, probabilistic truth maintenance (PLN), attentional economics (STI/LTI), and emotional valence. Similarity is one signal among five, not the ranking.
+Inspired by <a href="https://github.com/opencog/atomspace" target="_blank">AtomSpace</a>: memories are graph nodes with truth values, attention weights, and emotional valence. Retrieval fuses vector and lexical search, expands one hop through the relations extracted from what you stored, and ranks by relevance scaled by standing — attention (STI/LTI), confidence built from evidence, and the tone a memory was written with — under a personality that decides how much each counts. Relevance gates the rest: nothing outranks a memory about the question because it is important elsewhere. Consolidation runs when the agent is used, not when the clock ticks, and decays, promotes, supersedes and prunes what it holds.
 
 - [Install](#install)
 - [Quick Start](#quick-start)
@@ -105,19 +105,21 @@ smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow f
 
 > [Full pipeline diagram →](docs/pipeline.md)
 
-**`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a Bayesian truth value, attention weight, and valence score. Leave `valence` unset and it is read from the text; pass one and the memory is filed as a deliberate report, which is what lets recall raise it to a behavioral constraint. A belief asserted at probability ≥ 0.95 is permanent: it keeps the confidence it was asserted with and is exempt from decay. Relative dates are resolved against the moment you write them, so "the session is tomorrow" still names a day when you read it next week — on in every server mode, and `Smrti(temporal=True)` for a direct caller, since it costs an NER pass per write. Evidence is append-only; truth values update via PLN revision. Entities and relation edges are extracted automatically (the LLM is only called when GLiNER finds ≥2 entities, cutting LLM calls ~40–60%).
+**`remember()`** — Embeds and stores text as a typed atom (concept, belief, episode, or goal) with a truth value, attention weight, and valence. Leave `valence` unset and it is read from the text; pass one and the memory is filed as a deliberate report, which is what lets recall raise it to a behavioral constraint. `intensity` is how strongly the tone is felt, a separate dimension you can state; left unset it is `|valence|`. `type="belief"` is `believe()`: one atom per kind whichever door it came through, born unsure at confidence 0.3 and earning more through evidence, or born certain when asserted at probability ≥ 0.95 — a permanent belief keeps the confidence it was asserted with and is exempt from decay. The `evidence` you give `believe()` is recorded on the evidence log, so a belief can list why it is believed (`evidence(atom_id)`), not only how confident the engine has become. Relative dates are resolved against the moment you write them, so "the session is tomorrow" still names a day when you read it next week — on in every server mode, and `Smrti(temporal=True)` for a direct caller, since it costs an NER pass per write; the resolutions are filed in one place, which the extraction model adds to but never overwrites. Entities and relation edges are extracted automatically (the LLM is only called when GLiNER finds ≥2 entities, cutting LLM calls ~40–60%), and a claim that replaces an earlier one about the same subject — a new city, a new employer, a changed preference — is recorded as superseding it.
 
-**`recall()`** — Searches twice and fuses the results: a vector KNN over the query embedding beside a BM25 search of the same spaces, merged by Reciprocal Rank Fusion. The lexical half earns its place on the queries the embedding gets wrong — a fact stored in one language sits a long way from the question that asks for it in another, while the proper nouns both carry are identical. Only its top ten candidates join the pool: that head holds the proper-noun matches, and its tail is every atom sharing a stop-word with the query. Fusion only chooses the candidates; salience still decides the ranking, after 1-hop graph expansion:
+**`recall()`** — Searches twice and fuses the results: a vector KNN over the query embedding beside a BM25 search of the same spaces, merged by Reciprocal Rank Fusion. The lexical half earns its place on the queries the embedding gets wrong — a fact stored in one language sits a long way from the question that asks for it in another, while the proper nouns both carry are identical. Only its top ten candidates join the pool: that head holds the proper-noun matches, and its tail is every atom sharing a stop-word with the query. Fusion only chooses the candidates; salience decides the ranking, after 1-hop graph expansion:
 
 ```
-S = w_sim × similarity + w_sti × sti + w_conf × confidence + w_lti × lti + w_val × |valence| × intensity
+S = similarity × ( w_sim + w_sti × sti + w_conf × confidence + w_lti × lti + w_val × |valence| × intensity )
 ```
 
-When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. The valence terms read the tone an atom was written with, never the mood it absorbed from its neighbors during propagation. An episode that just restates the query loses its similarity term — the question is not the answer. `agent_source_trust` discounts what an agent-authored atom has earned in the graph, its attention, confidence and valence terms, but leaves similarity alone: on equal relevance the user's version wins, and a question only the model's own reply can answer still gets answered. A last pass caps how much of the answer one moment may fill: an episode repeating one already chosen from the same minutes yields its slot once that moment has spent its allowance, which is two repeats or one per six slots of answer, whichever is larger. A duplicate wastes a fifth of a five-slot reply and two percent of a fifty-slot one. Beliefs keep a couple of slots either way, so the standing facts survive a wall of chatter. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`); a critical warning takes a valence you set yourself, on an atom that can hold a proposition — never a bare concept.
+Relevance gates standing. The four standing terms say how much the graph has come to trust an atom; similarity says how much it is about the question, and the two multiply rather than add, so an atom that is not about the question cannot be salient to it however important it is otherwise, and among atoms that are, standing decides the order. (Added, they let a well-connected person concept at similarity zero outrank every episode that answered.) When valence < −0.5, weight shifts dynamically from STI to valence so critical errors outrank recent trivia. The valence terms read the tone an atom was written with, never the mood it absorbed from its neighbors during propagation. An episode that is a copy of the query scores nothing — the question is not the answer. `agent_source_trust` discounts the standing an agent-authored atom has earned but leaves similarity alone: on equal relevance the user's version wins, and a question only the model's own reply can answer still gets answered. A last pass caps how much of the answer one moment may fill: an episode repeating one already chosen from the same minutes yields its slot once that moment has spent its allowance, which is two repeats or one per six slots of answer, whichever is larger. Beliefs keep a couple of slots either way, so the standing facts survive a wall of chatter. Results below the personality's `min_confidence_to_surface` are excluded unless you pass your own floor; a memory you asked to forget is excluded at any floor. Each result carries a severity classification (`critical_warning`, `known_antipattern`, or `context`); a critical warning takes a valence you set yourself, on an atom that can hold a proposition — never a bare concept — and a known antipattern is a belief whose probability has fallen below 0.3, which is where a superseded preference or constraint ends up.
+
+**`forget()`** — Stops the memories matching a query from surfacing. Their confidence is sunk below the surfacing floor, they are stamped so that no recall returns them at any floor and no consolidation lifts them back, and the long-term floors that exempt user testimony from pruning are released, so the next epoch may remove them. Finding them boosts nothing: forgetting a memory must not make it more prominent.
 
 **`reinforce()`** — Reports that memories were used, which is the one way confidence climbs without the caller restating the fact. Everything else rides it down toward the surfacing floor, and an atom below that floor can never be recalled, so it can never be restated, so nothing lifts it back. The client decides what "used" means — the cheap proxy is that distinctive words from a recalled atom turned up in the reply it informed. The evidence is weak on purpose: a small weight, an update that converges rather than ratchets, a cap per consolidation, the agent-source discount, and never a memory you asked to forget.
 
-**`reflect()`** — Runs automatically every 60 s (`SMRTI_REFLECT_INTERVAL`). Merges pending evidence via PLN, decays attention and confidence, propagates both to neighbors, heals orphaned episodes, promotes high-STI atoms to long-term importance, resolves contradictions, and prunes low-salience atoms. User-stated episodes and beliefs decay only as far as the surfacing floor — direct testimony never stops being recallable — while concepts, goals, and everything agent-authored keep fading. The personality profile governs every weight and threshold. Every atom also carries provenance (`user` vs `agent`): model-authored content decays faster and gets a lower long-term-importance floor, so what you told the agent outlives what it inferred.
+**`reflect()`** — One consolidation epoch. The servers run one every `SMRTI_REFLECT_INTERVAL` seconds (default 60) for each space that was *used* during the interval — an idle space, served or not, does not age, so an epoch is a unit of the agent's activity rather than of the server's uptime. It revises pending evidence (the count-based PLN revision rule: confidence is an evidence count, and every observation adds to it), decays attention and confidence, propagates both to neighbors, heals orphaned episodes, promotes high-STI atoms to long-term importance, resolves contradictions — a superseded claim is cut to probability 0.1 and loses confidence — and prunes what has fallen below the floors. User-stated episodes and beliefs decay only as far as the surfacing floor — direct testimony never stops being recallable, unless you forgot it — while concepts, goals, and everything agent-authored keep fading. The personality profile governs every weight and threshold. Every atom also carries provenance (`user` vs `agent`): model-authored content decays faster and gets a lower long-term-importance floor, so what you told the agent outlives what it inferred.
 
 ## Server Modes
 
@@ -252,7 +254,7 @@ All server modes read the same environment variables. Everything works with zero
 | `SMRTI_TENANT_ID`        | `default`            | Tenant partition (hard isolation)                  |
 | `SMRTI_SPACE`            | `default`            | Write space                                        |
 | `SMRTI_READ_SPACES`      | write space          | Comma-separated spaces to read from                |
-| `SMRTI_REFLECT_INTERVAL` | `60`                 | Auto-consolidation interval in seconds (0 = off)   |
+| `SMRTI_REFLECT_INTERVAL` | `60`                 | Consolidation interval in seconds (0 = off); each interval runs one epoch for every space used during it, none for an idle space |
 | `SMRTI_RUN_DIR`          | `~/.smrti/run`       | Where `smrti serve` writes PID files so `smrti stop` can find its servers |
 | `SMRTI_IGNORE_PATTERNS`  | —                    | Newline-separated regexes; matching content is dropped before storage (see below) |
 
@@ -270,7 +272,7 @@ All server modes read the same environment variables. Everything works with zero
 | ----------------------------- | ------------------------ | -------------------------------------------------------- |
 | `SMRTI_UPSTREAM_URL`          | `https://api.openai.com` | Upstream OpenAI-compatible API                           |
 | `SMRTI_RECALL_TOP_K`          | `5`                      | Memories to inject per request                           |
-| `SMRTI_RECALL_MIN_CONFIDENCE` | `0.3`                    | Confidence floor for injected memories                   |
+| `SMRTI_RECALL_MIN_CONFIDENCE` | personality floor        | Confidence floor for injected memories; unset means the preset's `min_confidence_to_surface` |
 | `SMRTI_QUERY_MODE`            | `concat`                 | Recall query source: `concat` recent context or `last` message only |
 | `SMRTI_QUERY_CONTEXT_MSGS`    | `5`                      | Recent messages included in the recall query             |
 | `SMRTI_QUERY_MAX_CHARS`       | `500`                    | Max characters of the recall query                       |
@@ -325,7 +327,7 @@ Each space consolidates independently. The researcher forgets fast; the deployer
 
 Things people build with this: agent teams with private working memory and shared project context, multi-agent simulations where each agent remembers the same event differently, and role-based perspectives for the same user across contexts.
 
-Spaces also support set-theory operations — overlap, intersection, difference, union, symmetric difference — and can materialize **bridge spaces** from the overlap between two spaces. Reachable as the `space_query` and `space_merge` MCP tools and as the `POST /space_query` and `POST /space_merge` REST endpoints.
+Spaces also support set-theory operations — overlap, intersection, difference, union, symmetric difference — and can materialize **bridge spaces** from the overlap between two spaces. Reachable as the `space_query` and `space_merge` MCP tools and as the `POST /space_query` and `POST /space_merge` REST endpoints. A bridge is grown only when you ask for one; the consolidation epoch never compares spaces on its own.
 
 ## Personality System
 
@@ -359,9 +361,9 @@ Each preset tunes 17 hyperparameters. To create a custom personality, start from
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| `confidence_decay_rate` | 0.02 | Per-epoch confidence decay. Higher = memories fade faster |
-| `confidence_update_lr` | 0.3 | Learning rate for PLN evidence merges. Higher = new evidence has more impact |
-| `min_confidence_to_surface` | 0.1 | Floor below which atoms are excluded from recall results |
+| `confidence_decay_rate` | 0.02 | Per-epoch confidence decay. Higher = memories fade faster. An epoch runs once per reflect interval in which the space was used |
+| `confidence_update_lr` | 0.3 | How many evidence units one observation is worth, times its weight. Higher = new evidence moves the belief further |
+| `min_confidence_to_surface` | 0.1 | Floor below which atoms are excluded from recall results when the caller passes no floor of its own, and below which user testimony stops decaying |
 
 **Attention dynamics** — control what stays in focus:
 
@@ -370,7 +372,7 @@ Each preset tunes 17 hyperparameters. To create a custom personality, start from
 | `sti_decay_rate` | 0.1 | Per-epoch STI decay. Higher = faster attention loss |
 | `sti_boost_on_access` | 0.5 | STI added each time an atom is recalled. Higher = stronger recency bias |
 | `sti_propagation_factor` | 0.15 | Fraction of STI boost propagated to linked atoms. Higher = broader activation |
-| `lti_promotion_threshold` | 0.7 | Cumulative STI required to increment LTI. Higher = harder to become permanent |
+| `lti_promotion_threshold` | 0.7 | STI above which an atom's LTI is raised to half its STI (never lowered). Higher = harder to earn long-term importance |
 | `lti_decay_rate` | 0.01 | Per-epoch LTI decay. Higher = long-term importance erodes faster |
 
 **Provenance** — weighs what the agent wrote against what the user said:
@@ -383,8 +385,8 @@ Each preset tunes 17 hyperparameters. To create a custom personality, start from
 
 | Parameter | Default | Effect |
 |-----------|---------|--------|
-| `valence_weight` | 0.2 | Global scaling factor for emotional influence on salience |
-| `valence_propagation` | 0.1 | Fraction of valence propagated to linked atoms during epochs |
+| `valence_weight` | 0.2 | Strength of the weight shift from STI to valence for severely negative memories |
+| `valence_propagation` | 0.1 | Fraction of valence propagated to linked atoms during epochs. Propagation moves an atom's *mood* (the `valence` a recall result reports), never the tone it was written with, which is what the engine's own judgements read; the mood is for callers that want to know how a memory feels now — a citizen in smrti-town avoids a place its memories have soured on |
 | `mood_inertia` | 0.8 | Resistance to mood shifts (0 = reactive, 1 = stable) |
 
 </details>
@@ -446,19 +448,20 @@ graph TD
     Core & Retrieval & Evolution & Extraction & Spaces --> SQL
 ```
 
-**Retrieval pipeline:** Embed query → KNN over tenant partition, fused by Reciprocal Rank Fusion with the top ten hits of a BM25 search of the same spaces (entry pool scales with graph size) → filter to read spaces → 1-hop graph expansion, highest-standing endpoints first → salience scoring → diversity cap → top-k
+**Retrieval pipeline:** Embed query → KNN over tenant partition, fused by Reciprocal Rank Fusion with the top ten hits of a BM25 search of the same spaces (entry pool scales with graph size) → filter to read spaces → 1-hop graph expansion, highest-standing endpoints first → salience scoring (relevance × standing) → diversity cap → top-k
 
-**Consolidation epoch** (runs automatically every `SMRTI_REFLECT_INTERVAL` seconds, or manually via `reflect()`):
+**Consolidation epoch** (one per `SMRTI_REFLECT_INTERVAL` for each space used during it, or manually via `reflect()`):
 
-1. Process pending evidence via Bayesian update
-2. Decay STI, LTI, and confidence (user-stated episodes and beliefs stop at the surfacing floor; permanent beliefs do not decay)
+1. Revise pending evidence (count-based PLN revision)
+2. Decay STI, LTI, and confidence (user-stated episodes and beliefs stop at the surfacing floor; permanent beliefs do not decay; forgotten atoms hold no floor)
 3. Propagate STI and valence to 1-hop neighbors
-4. Heal orphaned episodes (link to most salient person)
+4. Heal orphaned episodes (link to the sole person, or to the one person the episode names)
 5. Promote high-STI atoms to LTI
-6. Resolve contradictions (weaken less confident belief)
-7. Discover cross-domain connections (every 10th epoch)
-8. Materialize cross-space bridge atoms (every 10th epoch)
-9. Prune atoms below confidence/LTI floors
+6. Resolve contradictions (a superseded claim is cut to probability 0.1 and loses confidence; an unnamed contradiction weakens the less confident side)
+7. Discover associations between similar high-LTI atoms that are not yet linked (every 10th epoch)
+8. Prune atoms below confidence/LTI floors
+
+Bridge spaces are grown only when asked (`space_merge`), never by the epoch.
 
 ## Data Model
 
@@ -472,9 +475,10 @@ graph TD
 
 Each atom carries:
 
-- **TruthValue** — `probability` [0,1] and `confidence` [0,1], merged via PLN revision
+- **TruthValue** — `probability` [0,1] and `confidence` [0,1]. Confidence is an evidence count in disguise (`c = n / (n + 1)`), and every observation — a stated reason, a re-mention, a report of use, a supersession — is revised in by the same count-based rule (PLN revision, `k = 1`). For episodes and concepts, which hold no proposition, confidence is retention strength: it gates surfacing rather than truth. Every kind of atom is born at one confidence (`INITIAL_CONFIDENCE`), whatever path created it
 - **AttentionValue** — `sti` (short-term importance, decays fast) and `lti` (long-term, accumulates)
-- **Valence** — emotional tone [-1,1] and intensity [0,1], kept as two pairs: the tone the atom was written with, which everything judging the memory reads, and the current mood, which propagation moves toward its neighbors each epoch
+- **Valence** — emotional tone [-1,1] and intensity [0,1], kept as two pairs: the tone the atom was written with, which everything judging the memory reads, and the current mood, which propagation moves toward its neighbors each epoch and which a recall result reports as `valence`
+- **Evidence** — an append-only log of observations: the probability observed, its weight, who reported it, and what it was (`text`)
 
 ## smrti-town
 
@@ -496,7 +500,7 @@ pytest tests/ -v
 
 Two harnesses live in `bench/`, each ingesting a published dataset as episodes and answering its questions through `recall`. Retrieval and answering are scored separately on purpose: a strong answering model can carry a weak candidate set, and that is exactly the regression a gate exists to catch.
 
-Measured on 2026-08-26 — smrti as a pure vector + BM25 store, extraction off, `top_k=50`, `deterministic` preset, gemini-3.7-flash answering and judging.
+Measured on 2026-08-26 — smrti as a pure vector + BM25 store: extraction off, no consolidation epochs, `top_k=50`, `deterministic` preset, gemini-3.7-flash answering and judging. In that configuration every atom has zero attention and a constant confidence, so the numbers measure the retrieval half alone. They also predate the ranking change that scales standing by relevance; re-run `make bench` before reading them against the current engine.
 
 | Benchmark | Scope | Retrieval | Answers | Notes |
 | --------- | ----- | --------- | ------- | ----- |
@@ -509,9 +513,11 @@ make bench           # fails if the retrieval hit rate drops
 make bench-halumem   # fails if the hallucination rate rises
 
 # add --extract-url/--extract-model to either to build the entity graph
+# add --epochs N to consolidate each history N times before querying it
+# add --top-k 5 to measure at the proxy's injection budget (10 for the MCP tool)
 ```
 
-Each benchmark locks its config (model, `top_k`, personality, subset) beside a recorded baseline, and refuses to compare numbers measured under different configs. Subsets are deterministic and balanced across question types — the datasets are grouped by ability, so the front of a file is one skill many times over. Neither is a CI gate: they need the datasets, the embedding model, and a judge key.
+Each benchmark locks its config (model, `top_k`, personality, subset) beside a recorded baseline, and refuses to compare numbers measured under different configs; `--epochs` and `--top-k` enter the fingerprint when set, so a run under either mode is reported on its own rather than gated against a baseline that never ran them. Subsets are deterministic and balanced across question types — the datasets are grouped by ability, so the front of a file is one skill many times over. Neither is a CI gate: they need the datasets, the embedding model, and a judge key.
 
 ### What the numbers say
 
@@ -519,7 +525,7 @@ Each benchmark locks its config (model, `top_k`, personality, subset) beside a r
 
 **Where it is weak.** HaluMem's synthesis categories hallucinate badly: dynamic update 71%, multi-hop inference 63%, generalization 62%. And smrti rarely declines to answer — it omits 8.9% where published systems omit 17–35% — so what would be an admission of ignorance often comes out as an assertion instead. It finds what it stored and stumbles when an answer has to be *assembled* from several memories.
 
-**What the entity graph costs.** The table runs without extraction. `--extract-url`/`--extract-model` build the entity and claim graph as episodes land, at 1.25 s and one LLM call per turn against 18 ms without — about seven hours for a full LongMemEval run. Its effect on these two benchmarks is unmeasured.
+**What the entity graph costs.** The table runs without extraction. `--extract-url`/`--extract-model` build the entity and claim graph as episodes land, at 1.25 s and one LLM call per turn against 18 ms without — about seven hours for a full LongMemEval run. Its effect on these two benchmarks is unmeasured, as is the effect of consolidation (`--epochs`).
 
 **Not implemented.** HaluMem's memory-extraction and memory-update tasks.
 

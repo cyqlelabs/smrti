@@ -1,19 +1,30 @@
 """Entity resolution: exact -> alias -> fuzzy -> embedding -> create."""
 from __future__ import annotations
 
-import json
+import logging
 import struct
 import uuid
 
 from rapidfuzz import fuzz, process
 
-from smrti.core.db import fts_write, vec_insert
+from smrti.core.atomspace import AtomSpace
+from smrti.core.models import (
+    INITIAL_CONFIDENCE,
+    Atom,
+    AtomType,
+    AttentionValue,
+    EntityType,
+    TruthValue,
+)
 from smrti.core.provenance import (
     ATOM_METADATA_JSON,
     ATOM_SOURCE,
     SOURCE_AGENT,
     SOURCE_USER,
 )
+
+
+logger = logging.getLogger("smrti.resolve")
 
 
 class EntityResolver:
@@ -176,11 +187,13 @@ class EntityResolver:
         self._adopt_if_user_mention(atom_id, tenant_id, space)
         self.db.execute(
             """INSERT INTO evidence
-                   (id, atom_id, observed_probability, weight, source_episode_id, tenant_id, space)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                   (id, atom_id, observed_probability, weight, source_episode_id,
+                    text, source, tenant_id, space)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 str(uuid.uuid4()), atom_id, self._MENTION_PROBABILITY,
-                self.trust, self.episode_id or None, tenant_id, space,
+                self.trust, self.episode_id or None, "mentioned again",
+                self.source, tenant_id, space,
             ),
         )
 
@@ -232,33 +245,47 @@ class EntityResolver:
         space: str,
         vec: list[float] | None = None,
     ) -> str:
-        atom_id = str(uuid.uuid4())
         atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
+        try:
+            typed = EntityType(entity_type)
+        except ValueError:
+            typed = EntityType.CONCEPT
         # Provenance is recorded on the derived atom, not just the episode it
         # came from: the epoch decays and prunes atoms, and without a source of
         # its own an agent-extracted concept is indistinguishable from a fact
         # the user stated. Truth and attention start scaled by trust.
-        metadata = json.dumps({"source": SOURCE_AGENT}) if self.source == SOURCE_AGENT else "{}"
-        self.db.execute(
-            """INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, metadata,
-                                  probability, confidence, sti, lti)
-               VALUES (?, ?, ?, ?, ?, ?, ?, 0.8, ?, ?, ?)""",
-            (
-                atom_id, atom_type, name, entity_type, tenant_id, space, metadata,
-                0.6 * self.trust, 1.0 * self.trust, 0.3 * self.trust,
+        #
+        # Written through AtomSpace like every other atom, so the row carries
+        # everything a row must — the intrinsic valence pair above all. A
+        # direct INSERT used to leave those columns NULL, and an atom with no
+        # intrinsic tone is judged on the mood it absorbs from its neighbours,
+        # which for the most-mentioned concepts meant the mood of every
+        # complaint that ever mentioned them.
+        atom = Atom(
+            id=str(uuid.uuid4()),
+            type=AtomType(atom_type),
+            label=name,
+            entity_type=typed,
+            truth=TruthValue(
+                probability=0.8,
+                confidence=INITIAL_CONFIDENCE[atom_type] * self.trust,
             ),
+            attention=AttentionValue(sti=1.0 * self.trust, lti=0.3 * self.trust),
+            tenant_id=tenant_id,
+            space=space,
+            metadata={"source": SOURCE_AGENT} if self.source == SOURCE_AGENT else {},
         )
-
-        # This atom is written straight to SQL rather than through AtomSpace, so
-        # both search indexes have to be filled here too.
-        self.db.execute_batch(fts_write(self.db, atom_id, name, None))
-
-        try:
-            if vec is None:
+        # Extraction runs in the background of a write that already succeeded,
+        # so a failed encoding costs the atom its vector, not the pipeline
+        # its run: the atom stays reachable by label and by the lexical
+        # index, and the next change to its text re-embeds it.
+        if vec is None:
+            try:
                 vec = self.embed_engine.embed(name)
-            vec_bytes = struct.pack(f"{len(vec)}f", *vec)
-            self.db.execute(*vec_insert(atom_id, vec_bytes, tenant_id, space, name))
-        except Exception:
-            pass
-
-        return atom_id
+            except Exception:
+                logger.warning("could not embed %r; created without a vector", name, exc_info=True)
+                vec = None
+        return AtomSpace(self.db, self.embed_engine).add_atom(
+            atom, embedding=None if vec is None else list(vec),
+            require_vector=vec is not None,
+        )

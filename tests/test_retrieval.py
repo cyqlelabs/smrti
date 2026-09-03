@@ -37,9 +37,19 @@ def test_recall_returns_salience(mem):
 
 
 def test_min_confidence_filter(mem):
-    mem.remember("low confidence fact", probability=0.3)
-    results = mem.recall("low confidence fact", min_confidence=0.9)
-    assert len(results) == 0 or all(r.atom.truth.confidence >= 0.9 for r in results)
+    """The floor excludes, and only excludes, atoms below it.
+
+    Asserted both ways: the earlier form (``empty or all above``) passed on an
+    empty result, which is what a broken recall returns.
+    """
+    atom_id = mem.remember("the vault password rotates monthly", probability=0.3)
+    mem.db.execute("UPDATE atoms SET confidence = 0.2 WHERE id = ?", (atom_id,))
+
+    below = mem.recall("vault password rotation", min_confidence=0.9)
+    assert all(r.atom.id != atom_id for r in below)
+
+    above = mem.recall("vault password rotation", min_confidence=0.1)
+    assert any(r.atom.id == atom_id for r in above)
 
 
 # ── Salience boost for negative-valence atoms ────────────────────────────────

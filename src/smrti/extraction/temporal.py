@@ -120,19 +120,35 @@ def resolve_spans(
     return resolved
 
 
-def annotate(text: str, base: datetime | None = None, ner=None) -> str:
-    """Return *text* with each resolvable date span followed by its date.
+def resolve(
+    text: str, base: datetime | None = None, ner=None
+) -> tuple[str, list[dict]]:
+    """*text* with each resolvable date span annotated, and the resolutions.
+
+    The second value is the list recall renders from, in the same shape the
+    extraction model produces (``{"text": span, "resolved": ISO date}``), so
+    both tiers file into one place: the write-time resolution is authoritative
+    for the spans it handled, and the model only adds spans the parser could
+    not reach. Before this the two tiers wrote to two places and could carry
+    two different dates for one span.
 
     Idempotent: spans are detected against the text stripped of any
     annotations it already carries, and an occurrence that is already
     annotated is skipped rather than annotated twice.
     """
     if not text:
-        return text
+        return text, []
     try:
         probe = _ANNOTATION.sub("", text)
+        items: list[dict] = []
         for span, iso in resolve_spans(probe, base, ner):
             text = _append(text, span, f" [resolved: {iso}]")
-        return text
+            items.append({"text": span, "resolved": iso})
+        return text, items
     except Exception:
-        return text
+        return text, []
+
+
+def annotate(text: str, base: datetime | None = None, ner=None) -> str:
+    """Return *text* with each resolvable date span followed by its date."""
+    return resolve(text, base, ner)[0]

@@ -21,7 +21,30 @@ class AtomSpace:
         self._db = db
         self._embed = embed
 
-    def add_atom(self, atom: Atom) -> str:
+    def add_atom(
+        self,
+        atom: Atom,
+        embedding: list[float] | None = None,
+        *,
+        require_vector: bool = True,
+    ) -> str:
+        """Write an atom and its index rows.
+
+        Every atom the engine creates comes through here — the facade, the
+        entity resolver, healing, association discovery and bridging alike —
+        so the columns that need writing on every row are written on every
+        row. The intrinsic valence pair in particular: an atom inserted with
+        those columns NULL reads its judged tone from the drifting one, and
+        drifts with its neighbours' mood, which is the one thing the
+        intrinsic split exists to prevent.
+
+        ``embedding`` lets a caller that already embedded the text (the
+        resolver probes the vector index with it first) hand the vector over
+        instead of paying for the encoding twice. ``require_vector=False``
+        lets a background writer whose encoder just failed store the row
+        without one rather than lose the atom; the lexical index still
+        carries it, and a later text change re-embeds it.
+        """
         prior = self._db.fetchone(
             "SELECT label, content, tenant_id, space FROM atoms WHERE id = ?",
             (atom.id,),
@@ -114,11 +137,14 @@ class AtomSpace:
             content_changed = prior is not None and (
                 prior["label"] != atom.label or prior["content"] != atom.content
             )
-            if not existing_vec or content_changed:
-                text_to_embed = atom.label
-                if atom.content:
-                    text_to_embed = f"{atom.label} {atom.content}"
-                embedding = self._embed.embed(text_to_embed)
+            if (not existing_vec or content_changed) and (
+                embedding is not None or require_vector
+            ):
+                if embedding is None:
+                    text_to_embed = atom.label
+                    if atom.content:
+                        text_to_embed = f"{atom.label} {atom.content}"
+                    embedding = self._embed.embed(text_to_embed)
                 vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
                 if existing_vec:
                     statements.extend(vec_delete([atom.id]))
@@ -209,6 +235,7 @@ class AtomSpace:
         space: str,
         truth: Optional[TruthValue] = None,
         valence: float = 0.0,
+        metadata: Optional[dict] = None,
     ) -> str:
         # Idempotent: boost STI and return existing relation if already present
         existing = self._db.fetchone(
@@ -237,6 +264,7 @@ class AtomSpace:
             tenant_id=tenant_id,
             space=space,
             valence=ValenceModel(valence=max(-1.0, min(1.0, valence)), intensity=abs(valence)),
+            metadata=dict(metadata or {}),
         )
         return self.add_atom(link_atom)
 
@@ -347,8 +375,9 @@ class AtomSpace:
     def add_evidence(self, evidence: Evidence) -> None:
         self._db.execute(
             """
-            INSERT INTO evidence (id, atom_id, observed_probability, weight, source_episode_id, tenant_id, space)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO evidence (id, atom_id, observed_probability, weight,
+                                  source_episode_id, text, source, tenant_id, space)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 evidence.id,
@@ -356,9 +385,28 @@ class AtomSpace:
                 evidence.observed_probability,
                 evidence.weight,
                 evidence.source_episode_id,
+                evidence.text,
+                evidence.source,
                 evidence.tenant_id,
                 evidence.space,
             ),
+        )
+
+    @staticmethod
+    def _evidence_from_row(r) -> Evidence:
+        keys = r.keys()
+        return Evidence(
+            id=r["id"],
+            atom_id=r["atom_id"],
+            observed_probability=r["observed_probability"],
+            weight=r["weight"],
+            source_episode_id=r["source_episode_id"],
+            text=r["text"] if "text" in keys else None,
+            source=r["source"] if "source" in keys else None,
+            tenant_id=r["tenant_id"],
+            space=r["space"],
+            created_at=r["created_at"] if "created_at" in keys else None,
+            processed=bool(r["processed"]) if "processed" in keys else False,
         )
 
     def get_pending_evidence(self, tenant_id: str, space: str) -> list[Evidence]:
@@ -366,18 +414,20 @@ class AtomSpace:
             "SELECT * FROM evidence WHERE processed = 0 AND tenant_id = ? AND space = ? ORDER BY created_at ASC",
             (tenant_id, space),
         )
-        return [
-            Evidence(
-                id=r["id"],
-                atom_id=r["atom_id"],
-                observed_probability=r["observed_probability"],
-                weight=r["weight"],
-                source_episode_id=r["source_episode_id"],
-                tenant_id=r["tenant_id"],
-                space=r["space"],
-            )
-            for r in rows
-        ]
+        return [self._evidence_from_row(r) for r in rows]
+
+    def get_evidence(self, atom_id: str, tenant_id: str, space: str) -> list[Evidence]:
+        """Every observation filed against an atom, oldest first.
+
+        This is what makes the log a provenance record: a belief can list
+        why it is believed, not only how confident the engine has become.
+        """
+        rows = self._db.fetchall(
+            "SELECT * FROM evidence WHERE atom_id = ? AND tenant_id = ? AND space = ? "
+            "ORDER BY created_at ASC, rowid ASC",
+            (atom_id, tenant_id, space),
+        )
+        return [self._evidence_from_row(r) for r in rows]
 
     def mark_evidence_processed(self, evidence_id: str) -> None:
         self._db.execute(

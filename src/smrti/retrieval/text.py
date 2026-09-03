@@ -36,3 +36,18 @@ def containment(a: set[str], b: set[str]) -> float:
     if smaller < _MIN_COMPARABLE:
         return 0.0
     return len(a & b) / smaller
+
+
+def coverage(a: set[str], b: set[str]) -> float:
+    """Shared words as a fraction of the larger set.
+
+    The stricter measure, for a judgement that has to be sure: a text that
+    covers the whole of a short query is not thereby a copy of it. "the
+    deploy pipeline uses Jenkins" contains every word of "deploy pipeline
+    Jenkins" and is the answer, not an echo; measured against the larger
+    side it shares three words of five, and is told apart. Returns 0 for a
+    pair too short to judge.
+    """
+    if min(len(a), len(b)) < _MIN_COMPARABLE:
+        return 0.0
+    return len(a & b) / max(len(a), len(b))

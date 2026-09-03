@@ -36,6 +36,7 @@ from smrti_town.config import (
     COUNCIL_MEETING_INTERVAL_HOURS,
     COUNCIL_ROLES,
     IMMIGRATION_CHECK_INTERVAL_HOURS,
+    MEMORY_REFLECT_INTERVAL_TICKS,
     PHASE_GAMEPLAY,
     PHASE_GAME_OVER,
     PHASE_OPENING_CHOOSE_MAYOR,
@@ -191,6 +192,21 @@ async def _tick_loop() -> None:
                     loc = getattr(c, "location", None)
                     nearby = max(0, location_counts.get(loc, 1) - 1) if loc else 0
                     c.tick_state(delta, crime_rate=crime_rate, nearby_count=nearby)
+
+            # Phase 2.2: Consolidate memories. Each citizen's graph runs an
+            # epoch every MEMORY_REFLECT_INTERVAL_TICKS ticks, off the loop
+            # thread; a citizen whose graph saw nothing since its last epoch
+            # is skipped, the same rule the servers' reflect loop applies.
+            if tick % MEMORY_REFLECT_INTERVAL_TICKS == 0:
+                loop = asyncio.get_running_loop()
+                for c in alive_citizens:
+                    engine = getattr(c, "smrti", None)
+                    if engine is None or not getattr(engine, "ops_since_reflect", 1):
+                        continue
+                    try:
+                        await loop.run_in_executor(None, engine.reflect)
+                    except Exception:
+                        log.debug("reflect() failed for %s", c.name, exc_info=True)
 
             # Phase 2.5: Action resolution — execute decided actions
             # This is the core feedback loop: action → need satisfaction + economic effect.

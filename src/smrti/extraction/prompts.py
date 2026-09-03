@@ -2,11 +2,11 @@ EXTRACTION_PROMPT = """Extract knowledge from user text. Return ONLY valid JSON 
 
 FORMAT:
 {"entities":[{"name":string,"type":string,"aliases":[string]}],
- "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}],
+ "claims":[{"subject":string,"predicate":string,"object":string,"valence":number,"supersedes":string}],
  "temporal":[{"text":string,"resolved":"YYYY-MM-DD"}]}
 
 ENTITY TYPES (exactly these 16): person · organization · project · role · tool · technology · skill · preference · constraint · location · event · topic · media · health · concept · goal
-"valence" is optional; omit when neutral. Pets/animals → "concept".
+"valence" is optional; omit when neutral. "supersedes" is optional; see SUPERSESSION. Pets/animals → "concept".
 Use "role" for job titles and occupations ("software engineer", "CEO", "designer").
 Use "technology" for languages, frameworks, platforms ("Python", "React", "Kubernetes").
 Use "skill" for abilities and competencies in any domain ("public speaking", "cooking", "piano").
@@ -51,6 +51,14 @@ Never use pronouns, aliases, or paraphrases in claims.
 
 KNOWN ENTITIES — Surface a known entity only when the text directly references it (pronoun,
 demonstrative, noun phrase). Never surface it merely because it relates to something mentioned.
+
+SUPERSESSION — Known entities may list what is already recorded about them ("Alice (person):
+lives_in Amsterdam; works_for Acme"). When the text replaces one of those facts — a new city,
+a new employer, a changed preference, a corrected name — emit the new claim with the same
+predicate and set "supersedes" to the old object exactly as listed. Only when the new fact
+replaces the old one; two hobbies, two skills or two friends coexist and supersede nothing.
+  ✓ {"subject":"Alice","predicate":"lives_in","object":"Berlin","supersedes":"Amsterdam"}
+  ✗ {"subject":"Alice","predicate":"has_hobby","object":"chess","supersedes":"cycling"}
 
 VALENCE — negative (−0.5 to −1.0): errors, fears, avoidance, displeasure.
            positive (0.3 to 1.0): preferences, successes, enjoyment.
@@ -217,6 +225,23 @@ OUT:
 ],"claims":[
   {"subject":"Elara","predicate":"is","object":"systems strategist"},
   {"subject":"Elara","predicate":"focuses_on","object":"organizational design"}
+]}
+
+IN:
+[Known entities]
+- Alice (person): lives_in Amsterdam; works_for Acme
+- Amsterdam (location)
+- Acme (organization)
+[Text to extract]
+Quick update: I moved to Berlin last month, still at Acme though.
+OUT:
+{"entities":[
+  {"name":"Alice","type":"person","aliases":["I"]},
+  {"name":"Berlin","type":"location","aliases":[]},
+  {"name":"Acme","type":"organization","aliases":[]}
+],"claims":[
+  {"subject":"Alice","predicate":"lives_in","object":"Berlin","supersedes":"Amsterdam"},
+  {"subject":"Alice","predicate":"works_for","object":"Acme"}
 ]}"""
 
 ENTITY_TYPES = [
@@ -284,7 +309,7 @@ CLAIMS_ONLY_PROMPT = """Extract relationship claims between pre-extracted entiti
 
 FORMAT:
 {"entities":[{"name":string,"type":string}],
- "claims":[{"subject":string,"predicate":string,"object":string,"valence":number}],
+ "claims":[{"subject":string,"predicate":string,"object":string,"valence":number,"supersedes":string}],
  "temporal":[{"text":string,"resolved":"YYYY-MM-DD"}]}
 
 "entities" is OPTIONAL — include it ONLY to:
@@ -336,6 +361,11 @@ RULES:
   Not for transient desires ("I want a coffee", "I'd like to understand X").
 - GOAL CLAIMS — when a goal or project entity is already listed alongside a person, emit a
   `has_goal` claim from person→goal and/or a `works_on` claim from person→project.
+- SUPERSESSION — the known entities may list what is already recorded about them
+  ("Alice (person): lives_in Amsterdam"). When the text replaces one of those facts — a new
+  city, employer, preference, or a corrected value — emit the new claim with the same predicate
+  and "supersedes" set to the old object exactly as listed. Facts that coexist (two hobbies,
+  two skills) supersede nothing.
 
 EXAMPLES:
 
@@ -398,6 +428,14 @@ OUT:
   {"subject":"Priya","predicate":"is","object":"data scientist"},
   {"subject":"Priya","predicate":"works_for","object":"Meridian Labs"},
   {"subject":"Meridian Labs","predicate":"is_based_in","object":"Berlin"}
+]}
+
+Entities: Alice (person), Berlin (location)
+Known: Alice (person): lives_in Amsterdam; works_for Acme
+Text: "Quick update: I moved to Berlin last month."
+OUT:
+{"claims":[
+  {"subject":"Alice","predicate":"lives_in","object":"Berlin","supersedes":"Amsterdam"}
 ]}
 
 Entities: Carlos (person)

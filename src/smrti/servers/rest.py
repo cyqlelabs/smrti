@@ -121,6 +121,7 @@ class RememberRequest(BaseModel):
     type: str = "episode"
     probability: float = 0.8
     valence: Optional[float] = None
+    intensity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     source: str = "user"
     space: Optional[SpaceName] = None
 
@@ -135,7 +136,8 @@ class RememberRequest(BaseModel):
 class RecallRequest(BaseModel):
     query: str
     top_k: int = 10
-    min_confidence: float = 0.1
+    # None: the personality's min_confidence_to_surface decides.
+    min_confidence: Optional[float] = None
     space: Optional[SpaceName] = None
     read_spaces: Optional[list[SpaceName]] = Field(default=None, max_length=32)
 
@@ -151,6 +153,8 @@ class BelieveRequest(BaseModel):
     statement: str
     probability: float
     evidence: Optional[str] = None
+    valence: Optional[float] = None
+    intensity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
     space: Optional[SpaceName] = None
 
 

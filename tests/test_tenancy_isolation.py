@@ -287,28 +287,23 @@ def test_epoch_skips_a_contradiction_edge_with_a_missing_endpoint(atomspace, db,
     assert _row(db, src.id, "confidence")["confidence"] == pytest.approx(0.9)
 
 
-def test_a_bridge_space_does_not_initiate_further_bridging(atomspace, db, embed):
-    """Bridging out of a bridge space would build meta-bridges without end."""
-    from smrti.evolution.epoch import _discover_bridges
-
+def test_an_epoch_never_grows_a_bridge_space(atomspace, db, embed):
+    """Bridging is an explicit call. Two spaces with identical content sit
+    side by side through the tenth epoch — the one that used to compare every
+    space against every other and write ``a_x_b`` atoms nobody asked for —
+    and the tenant's space list is unchanged."""
     text = "Postgres is the database we run in production"
     atomspace.add_atom(_concept(text, "t", "a"))
-    atomspace.add_atom(_concept(text, "t", "a_x_b"))
+    atomspace.add_atom(_concept(text, "t", "b"))
+    _personality(db, "t", "a")
+    db.execute(
+        "UPDATE personality SET epoch_count = 9 WHERE tenant_id = 't' AND space = 'a'"
+    )
 
-    assert _discover_bridges("t", "a_x_b", db, embed) == 0
+    run_epoch("t", "a", db, embed)
 
-
-def test_bridge_discovery_skips_spaces_that_are_already_bridges(atomspace, db, embed):
-    """A parent space bridges its siblings, never their bridges."""
-    from smrti.evolution.epoch import _discover_bridges
-
-    text = "Postgres is the database we run in production"
-    atomspace.add_atom(_concept(text, "t", "a"))
-    atomspace.add_atom(_concept(text, "t", "a_x_b"))
-
-    assert _discover_bridges("t", "a", db, embed) == 0
     spaces = db.fetchall("SELECT DISTINCT space FROM atoms WHERE tenant_id = 't' ORDER BY space")
-    assert [r["space"] for r in spaces] == ["a", "a_x_b"]
+    assert [r["space"] for r in spaces] == ["a", "b"]
 
 
 def test_clear_space_leaves_other_tenants_intact(db_path, embed):

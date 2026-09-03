@@ -50,12 +50,14 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         # beliefs the agent-source discount at ranking and the faster decay
         # that goes with it.
         source = args.get("source", "user")
+        intensity = args.get("intensity")
         if atom_type == "belief":
             atom_id = mem.believe(
                 statement=content,
                 probability=args.get("probability", 0.8),
                 evidence=args.get("evidence"),
                 valence=valence,
+                intensity=intensity,
                 source=source,
             )
         else:
@@ -64,15 +66,19 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 type=atom_type,
                 probability=args.get("probability", 0.8),
                 valence=valence,
+                intensity=intensity,
                 metadata=_write_metadata(source, False) or None,
             )
         return {"status": "ok", "atom_id": atom_id, "space": mem.write_space}
 
     elif name == "smrti_recall":
+        # An absent floor is the personality's: min_confidence_to_surface is a
+        # promise the preset makes, and it is kept here rather than replaced
+        # by a literal the tool schema happened to carry.
         results = mem.recall(
             query=args["query"],
             top_k=args.get("top_k", 10),
-            min_confidence=args.get("min_confidence", 0.1),
+            min_confidence=args.get("min_confidence"),
             read_spaces=args.get("read_spaces") or None,
         )
         return {
@@ -121,6 +127,8 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             statement=args["statement"],
             probability=args["probability"],
             evidence=args.get("evidence"),
+            valence=args.get("valence"),
+            intensity=args.get("intensity"),
         )
         return {"status": "ok", "atom_id": atom_id, "space": mem.write_space}
 

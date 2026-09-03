@@ -96,7 +96,36 @@ def build_parser(prog: str, config_path: str, baseline_path: str) -> argparse.Ar
     parser.add_argument("--extract-url", default=None, help="LLM endpoint for entity/claim extraction")
     parser.add_argument("--extract-model", default=None)
     parser.add_argument("--extract-mode", default="hybrid", choices=("hybrid", "llm", "local"))
+    # Consolidation is what makes the engine more than a store, and the
+    # default run never exercises it: every history is ingested and read once,
+    # so attention is zero and confidence a constant for every atom. --epochs
+    # runs that many reflect() passes over each history before it is queried,
+    # which is the only way to measure whether decay, promotion and the
+    # association step help retrieval or evict the evidence.
+    parser.add_argument("--epochs", type=int, default=0, help="reflect() passes to run over each history before querying it")
+    parser.add_argument("--top-k", dest="top_k", type=int, default=None, help="override the locked top_k (the proxy injects 5, the MCP tool 10)")
     return parser
+
+
+def apply_run_modes(args, config: dict) -> None:
+    """Fold --epochs and --top-k into the config the fingerprint is taken from.
+
+    Only when set. The default run has to keep hashing to the recorded
+    baseline, and a run under either mode has to be refused comparison
+    against a baseline that was measured without it.
+    """
+    epochs = getattr(args, "epochs", 0) or 0
+    if epochs > 0:
+        config["epochs"] = epochs
+    top_k = getattr(args, "top_k", None)
+    if top_k:
+        config["top_k"] = top_k
+
+
+def consolidate(mem, epochs: int) -> None:
+    """Run the consolidation passes a benchmark mode asked for."""
+    for _ in range(max(0, epochs)):
+        mem.reflect()
 
 
 def resolve_answering(args, parser: argparse.ArgumentParser) -> dict | None:

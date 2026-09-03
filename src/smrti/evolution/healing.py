@@ -1,25 +1,33 @@
-"""Graph healing: detect and repair orphaned episodes during consolidation."""
+"""Graph healing: attribute orphaned episodes to the person they are about.
+
+An orphaned episode mentions concepts but no person, which happens when
+extraction ran without a model that could resolve the speaker, or when the
+name was written in a form the tagger missed. Healing files the episode under
+a person so that expansion from the person can reach it.
+
+It creates that one edge and nothing else. An earlier version also drew a
+low-confidence ``associated`` edge from the person to every concept the
+episode mentioned, "so LLM-extracted relations supersede"; those placeholder
+edges made the person a hub joined to everything in the space, and a hub is
+what expansion and ranking then found on every query.
+"""
 from __future__ import annotations
 
-import struct
-import uuid
-
-from smrti.core.db import stable_rowid
+from smrti.core.atomspace import AtomSpace
+from smrti.core.models import TruthValue
 
 
 def heal_orphaned_episodes(tenant_id: str, space: str, db) -> int:
     """Find episodes that mention concepts but no person, and link them to a person.
 
     When the space contains exactly one person atom, every orphaned episode is
-    attributed to it.  With multiple person atoms, each episode is attributed
-    to the person whose stored embedding is most similar to the episode's
-    stored embedding (cosine >= 0.3); episodes with no sufficiently similar
-    person are skipped rather than mis-attributed.
-
-    For each healed episode:
-      1. Create ``episode -> mentions -> person`` edge
-      2. For each concept the episode mentions, create ``person -> associated -> concept``
-         with low confidence (0.2) so LLM-extracted relations supersede
+    attributed to it — the sole person is the speaker, which is the same
+    assumption extraction makes. With several persons, an episode is
+    attributed to the one person whose label or alias appears in its text;
+    when none or more than one does, it is left alone rather than guessed.
+    (An earlier rule compared the episode's embedding against the person's
+    *name* embedding at cosine 0.3, which on a paraphrase model is close to
+    chance.)
 
     Returns the number of healed episodes.
     """
@@ -36,7 +44,7 @@ def heal_orphaned_episodes(tenant_id: str, space: str, db) -> int:
     # Find episodes that have at least one mentions edge to a non-person atom
     # but NO mentions edge to any person atom
     orphaned = db.fetchall(
-        """SELECT DISTINCT r.source_id AS episode_id
+        """SELECT DISTINCT r.source_id AS episode_id, ep.content AS content, ep.label AS label
            FROM atoms r
            JOIN atoms ep ON ep.id = r.source_id
            WHERE r.type = 'relation' AND r.relation = 'mentions'
@@ -52,105 +60,62 @@ def heal_orphaned_episodes(tenant_id: str, space: str, db) -> int:
              )""",
         (tenant_id, space, tenant_id, space),
     )
-
     if not orphaned:
         return 0
 
     single_person_id = person_rows[0]["id"] if len(person_rows) == 1 else None
-    person_vecs: list[tuple[str, tuple]] = []
+    names: list[tuple[str, list[str]]] = []
     if single_person_id is None:
-        for row in person_rows:
-            vec = _stored_embedding(db, row["id"])
-            if vec is not None:
-                person_vecs.append((row["id"], vec))
+        names = _person_names(person_rows, tenant_id, space, db)
 
+    atomspace = AtomSpace(db, None)
     healed = 0
     for row in orphaned:
-        episode_id = row["episode_id"]
-
         if single_person_id is not None:
             person_id = single_person_id
         else:
-            person_id = _best_person(_stored_embedding(db, episode_id), person_vecs)
+            person_id = _named_person(row["content"] or row["label"] or "", names)
             if person_id is None:
                 continue
-
-        # Link episode -> mentions -> person
-        _create_relation(db, episode_id, person_id, "mentions", tenant_id, space)
-
-        # Find concepts this episode mentions and create person -> associated -> concept
-        concept_edges = db.fetchall(
-            """SELECT target_id FROM atoms
-               WHERE type = 'relation' AND relation = 'mentions'
-                 AND source_id = ? AND tenant_id = ? AND space = ?""",
-            (episode_id, tenant_id, space),
+        atomspace.link_atoms(
+            row["episode_id"], person_id, "mentions", tenant_id, space,
+            truth=TruthValue(probability=0.5, confidence=0.5),
         )
-        for edge in concept_edges:
-            target_id = edge["target_id"]
-            if target_id != person_id:
-                _create_relation(
-                    db, person_id, target_id, "associated",
-                    tenant_id, space, confidence=0.2,
-                )
-
         healed += 1
 
     return healed
 
 
-def _stored_embedding(db, atom_id: str) -> tuple | None:
-    """Read an atom's stored embedding from vec_atoms as a float tuple."""
-    row = db.fetchone(
-        "SELECT embedding FROM vec_atoms WHERE rowid = ?", (stable_rowid(atom_id),)
+def _person_names(person_rows, tenant_id: str, space: str, db) -> list[tuple[str, list[str]]]:
+    """Each person's id with the names it can be recognised by in text.
+
+    Labels plus the aliases the resolver registered, minus pronouns: "I" and
+    "my" are aliases of whoever spoke first, and as substrings they would
+    match every episode in the space.
+    """
+    from smrti.extraction.ner import _PRONOUNS
+
+    ids = [r["id"] for r in person_rows]
+    ph = ",".join("?" * len(ids))
+    alias_rows = db.fetchall(
+        f"SELECT alias, atom_id FROM aliases WHERE tenant_id = ? AND space = ? AND atom_id IN ({ph})",
+        (tenant_id, space, *ids),
     )
-    if row is None:
-        return None
-    blob = row["embedding"]
-    return struct.unpack(f"{len(blob) // 4}f", blob)
+    aliases: dict[str, list[str]] = {}
+    for r in alias_rows:
+        alias = (r["alias"] or "").strip()
+        if alias and alias.casefold() not in _PRONOUNS:
+            aliases.setdefault(r["atom_id"], []).append(alias)
+    out: list[tuple[str, list[str]]] = []
+    for r in person_rows:
+        label = (r["label"] or "").strip()
+        candidates = [n for n in [label, *aliases.get(r["id"], [])] if n and n.casefold() not in _PRONOUNS]
+        out.append((r["id"], [n.casefold() for n in candidates]))
+    return out
 
 
-def _cosine(a: tuple, b: tuple) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a < 1e-9 or norm_b < 1e-9:
-        return 0.0
-    return dot / (norm_a * norm_b)
-
-
-def _best_person(
-    episode_vec: tuple | None,
-    person_vecs: list[tuple[str, tuple]],
-    min_sim: float = 0.3,
-) -> str | None:
-    """Pick the person most similar to the episode, requiring cosine >= min_sim."""
-    if episode_vec is None:
-        return None
-    best_id = None
-    best_sim = None
-    for person_id, vec in person_vecs:
-        sim = _cosine(episode_vec, vec)
-        if sim >= min_sim and (best_sim is None or sim > best_sim):
-            best_id, best_sim = person_id, sim
-    return best_id
-
-
-def _create_relation(
-    db, source_id: str, target_id: str, relation: str,
-    tenant_id: str, space: str, confidence: float = 0.5,
-) -> None:
-    """Create a relation atom if one does not already exist."""
-    existing = db.fetchone(
-        """SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
-           AND relation = ? AND tenant_id = ? AND space = ?""",
-        (source_id, target_id, relation, tenant_id, space),
-    )
-    if existing:
-        return
-    link_id = str(uuid.uuid4())
-    db.execute(
-        """INSERT OR IGNORE INTO atoms
-               (id, type, label, source_id, target_id, relation, tenant_id, space, probability, confidence)
-           VALUES (?, 'relation', ?, ?, ?, ?, ?, ?, 0.5, ?)""",
-        (link_id, relation, source_id, target_id, relation, tenant_id, space, confidence),
-    )
+def _named_person(text: str, names: list[tuple[str, list[str]]]) -> str | None:
+    """The one person named in the text, or None when none or several are."""
+    folded = text.casefold()
+    matched = [pid for pid, forms in names if any(form in folded for form in forms)]
+    return matched[0] if len(matched) == 1 else None

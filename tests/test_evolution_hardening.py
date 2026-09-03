@@ -355,7 +355,13 @@ def test_bridge_discovery_bidirectional_no_duplicates(mem):
 
 # ── healing multi-person attribution ──────────────────────────────────────────
 
-def test_healing_multi_person_attributes_by_embedding_similarity(mem):
+def test_healing_multi_person_attributes_by_the_name_in_the_text(mem):
+    """With several persons, the episode goes to the one it names.
+
+    Bob is the most salient, so attributing by standing would hand him every
+    orphan; comparing embeddings against a *name* was close to chance. The
+    episode says "Alice", so it is Alice's.
+    """
     alice = mem.atomspace.add_atom(Atom(
         type=AtomType.CONCEPT, label="Alice",
         content="Alice loves alpine hiking and mountain trails",
@@ -397,7 +403,7 @@ def test_healing_multi_person_attributes_by_embedding_similarity(mem):
     assert to_bob is None
 
 
-def test_healing_multi_person_skips_episode_without_embedding(mem):
+def test_healing_multi_person_skips_an_episode_that_names_nobody(mem):
     for name in ("Alice", "Bob"):
         mem.atomspace.add_atom(Atom(
             type=AtomType.CONCEPT, label=name, content=f"{name} profile",

@@ -2,7 +2,12 @@
 from __future__ import annotations
 
 from smrti.core.db import fts_delete, vec_delete
-from smrti.core.models import PERMANENT_PROBABILITY, EpochResult, TruthValue
+from smrti.core.models import (
+    PERMANENT_PROBABILITY,
+    SUPERSEDED_PROBABILITY,
+    EpochResult,
+    TruthValue,
+)
 from smrti.core.provenance import (
     ATOM_FORGOTTEN,
     ATOM_METADATA_JSON,
@@ -15,8 +20,6 @@ from smrti.evolution.connections import discover_connections
 from smrti.evolution.healing import heal_orphaned_episodes
 from smrti.evolution.truth import update_truth
 from smrti.evolution.valence import propagate_valence
-from smrti.spaces.set_ops import space_overlap
-from smrti.spaces.emergence import materialize_bridge
 
 # Atoms are pruned below an LTI of 0.05, so a floor above that line makes a
 # memory permanent. What the user stated keeps one; what the model volunteered
@@ -63,10 +66,17 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
       3. Propagate STI and valence to 1-hop neighbors of active atoms
       4. Heal orphaned episodes (link to most salient person)
       5. Promote high-STI atoms to LTI
-      6. Resolve contradictions by weakening the less confident belief
-      7. Discover cross-domain connections (every 10th epoch)
-      8. Materialize cross-space bridge atoms (every 10th epoch)
-      9. Prune dead atoms below confidence and LTI floors
+      6. Resolve contradictions: weaken the loser the edge names, else the
+         less confident endpoint
+      7. Discover associations between similar high-LTI atoms (every 10th
+         epoch)
+      8. Prune dead atoms below confidence and LTI floors
+
+    Bridge spaces are no longer grown here. An earlier version compared the
+    space against every other space in the tenant every tenth epoch and
+    materialised ``a_x_b`` atoms wherever the overlap cleared a threshold
+    nobody had set — a quadratic scan on a timer that wrote atoms into spaces
+    nobody had asked for. Bridging is an explicit call now: ``space_merge``.
     """
     db.execute(
         "UPDATE personality SET epoch_count = epoch_count + 1 WHERE tenant_id = ? AND space = ?",
@@ -203,11 +213,16 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # tells a forget from decay drowning, and a stamped atom is never lifted.
     # An unstamped atom below the surfacing floor predates stamping and is
     # left where it is — nothing tells a legacy forget from a decay victim.
+    #
+    # The stamp also releases the LTI floors. A forgotten memory is one the
+    # caller asked to be rid of; holding it at the testimony floor, or at the
+    # critical-error floor, would keep it out of the pruner's reach forever.
     min_conf = _param(p, "min_confidence_to_surface", 0.1)
     decay_sql = f"""UPDATE atoms SET
                sti        = sti        * (1.0 - ?),
                lti        = MAX(lti * (1.0 - ?),
-                                CASE WHEN {ATOM_OWN_VALENCE} < -0.7
+                                CASE WHEN {ATOM_FORGOTTEN} THEN 0.0
+                                     WHEN {ATOM_OWN_VALENCE} < -0.7
                                           AND {ATOM_OWN_INTENSITY} > 0.7 THEN ?
                                      WHEN lti >= ? THEN ?
                                      ELSE 0.0 END),
@@ -273,8 +288,18 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
 
     # 4. Resolve contradictions within this space — each edge is weakened once,
     # then marked resolved atomically so it is never re-penalized.
+    #
+    # Who loses: the endpoint the edge names in ``$.loser`` when it names one,
+    # else the less confident endpoint. The extractor names one when it
+    # records a supersession — the user moved, changed jobs, changed their
+    # mind — because there the older claim loses by definition, and it is
+    # usually the *more* confident of the two, having had time to be mentioned
+    # again; the confidence rule alone would weaken the update instead.
     contradictions = db.fetchall(
-        """SELECT id, source_id, target_id FROM atoms
+        """SELECT id, source_id, target_id,
+                  CASE WHEN json_valid(metadata)
+                       THEN json_extract(metadata, '$.loser') END AS loser
+           FROM atoms
            WHERE type = 'relation' AND relation = 'contradicts'
              AND tenant_id = ? AND space = ?
              AND (CASE WHEN json_valid(metadata)
@@ -296,17 +321,32 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             (c["target_id"], tenant_id, space),
         )
         if src and tgt:
-            loser_id = (
-                c["source_id"]
-                if src["confidence"] < tgt["confidence"]
-                else c["target_id"]
-            )
-            db.execute_batch([
-                (
+            # A named loser is a supersession: the fact stopped being true,
+            # so its probability is cut to the superseded line as well as
+            # its confidence. An unnamed contradiction only says the two
+            # disagree, and there confidence alone gives way.
+            named = c["loser"] in (c["source_id"], c["target_id"])
+            if named:
+                loser_id = c["loser"]
+                weaken = (
+                    "UPDATE atoms SET confidence = confidence * 0.8, "
+                    "probability = MIN(probability, ?) "
+                    "WHERE id = ? AND tenant_id = ? AND space = ?",
+                    (SUPERSEDED_PROBABILITY, loser_id, tenant_id, space),
+                )
+            else:
+                loser_id = (
+                    c["source_id"]
+                    if src["confidence"] < tgt["confidence"]
+                    else c["target_id"]
+                )
+                weaken = (
                     "UPDATE atoms SET confidence = confidence * 0.8 "
                     "WHERE id = ? AND tenant_id = ? AND space = ?",
                     (loser_id, tenant_id, space),
-                ),
+                )
+            db.execute_batch([
+                weaken,
                 (
                     f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.resolved', 1) WHERE id = ?",
                     (c["id"],),
@@ -314,27 +354,24 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             ])
             contradictions_resolved += 1
 
-    # 5. Cross-domain connection discovery (every 10th epoch)
+    # 5. Association discovery between similar high-LTI atoms (every 10th epoch)
     if epoch_count % 10 == 0:
         new_connections = discover_connections(tenant_id, space, db, embed_engine)
 
-    # 5b. Cross-space bridge emergence (every 10th epoch)
-    bridges_created = 0
-    if epoch_count % 10 == 0:
-        bridges_created = _discover_bridges(tenant_id, space, db, embed_engine)
-
     # 6. Prune atoms below both confidence and LTI floors.
-    # User-authored episodes and beliefs are exempt from direct pruning; their
-    # agent-authored counterparts are not, so a model turn the user never
-    # picked up can leave the graph once it has decayed. Relations are never
-    # pruned directly — they cascade with their endpoints (see loop below).
+    # User-authored episodes and beliefs are exempt from direct pruning unless
+    # the caller forgot them; their agent-authored counterparts are not, so a
+    # model turn the user never picked up can leave the graph once it has
+    # decayed. Relations are never pruned directly — they cascade with their
+    # endpoints (see loop below).
     dead_rows = db.fetchall(
         f"""SELECT id FROM atoms
            WHERE tenant_id = ? AND space = ?
              AND confidence < ? AND lti < 0.05
              AND type != 'relation'
              AND (type NOT IN ('episode', 'belief')
-                  OR {ATOM_SOURCE} = 'agent')""",
+                  OR {ATOM_SOURCE} = 'agent'
+                  OR {ATOM_FORGOTTEN})""",
         (tenant_id, space, min_conf),
     )
     atoms_pruned = len(dead_rows)
@@ -365,36 +402,4 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         new_connections=new_connections,
         contradictions_resolved=contradictions_resolved,
         orphans_healed=orphans_healed,
-        bridges_created=bridges_created,
     )
-
-
-def _discover_bridges(tenant_id: str, space: str, db, embed_engine) -> int:
-    """Find other spaces in this tenant and materialize bridges where overlap is significant."""
-    from smrti.core.atomspace import AtomSpace
-
-    # Bridge spaces must not initiate bridging (would recurse into meta-bridges)
-    if "_x_" in space:
-        return 0
-
-    all_spaces_rows = db.fetchall(
-        "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? AND space != ?",
-        (tenant_id, space),
-    )
-    if not all_spaces_rows:
-        return 0
-
-    atomspace = AtomSpace(db, embed_engine)
-    total = 0
-
-    for row in all_spaces_rows:
-        other = row["space"]
-        # Skip already-materialized bridge spaces to avoid recursion
-        if "_x_" in other:
-            continue
-        overlap = space_overlap(tenant_id, space, other, db, threshold=0.85, embed_engine=embed_engine)
-        total += materialize_bridge(
-            overlap, tenant_id, db, embed_engine, atomspace, min_jaccard=0.1,
-        )
-
-    return total

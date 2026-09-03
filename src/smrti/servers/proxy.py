@@ -66,7 +66,10 @@ def _spawn(coro) -> asyncio.Task:
 
 _UPSTREAM = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
 _RECALL_TOP_K = int(os.environ.get("SMRTI_RECALL_TOP_K", "5"))
-_RECALL_MIN_CONF = float(os.environ.get("SMRTI_RECALL_MIN_CONFIDENCE", "0.3"))
+# Unset means the personality's own surfacing floor (min_confidence_to_surface);
+# the variable overrides it rather than replacing it with a second default.
+_raw_min_conf = os.environ.get("SMRTI_RECALL_MIN_CONFIDENCE", "").strip()
+_RECALL_MIN_CONF: Optional[float] = float(_raw_min_conf) if _raw_min_conf else None
 _QUERY_MODE = os.environ.get("SMRTI_QUERY_MODE", "concat")
 _QUERY_CONTEXT_MSGS = int(os.environ.get("SMRTI_QUERY_CONTEXT_MSGS", "5"))
 _QUERY_MAX_CHARS = int(os.environ.get("SMRTI_QUERY_MAX_CHARS", "500"))
@@ -192,9 +195,14 @@ def _enrich_content(r: RecallResult, mem) -> str:
     if atom.type.value not in ("concept", "belief", "goal"):
         return atom.label
 
+    # Superseded claims are the entity's history, not its state: "lives_in
+    # Amsterdam, lives_in Berlin" is exactly the ambiguity the update was
+    # meant to remove.
     rows = mem.db.fetchall(
         "SELECT relation, target_id FROM atoms "
-        "WHERE source_id = ? AND type = 'relation' AND tenant_id = ? AND space = ?",
+        "WHERE source_id = ? AND type = 'relation' AND tenant_id = ? AND space = ? "
+        "AND (CASE WHEN json_valid(metadata) "
+        "THEN json_extract(metadata, '$.superseded_by') END) IS NULL",
         (atom.id, atom.tenant_id, atom.space),
     )
     target_ids = [row["target_id"] for row in rows if row["target_id"]]

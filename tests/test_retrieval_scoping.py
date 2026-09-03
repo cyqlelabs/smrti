@@ -79,8 +79,10 @@ def test_person_injection_is_capped(atomspace, db, embed):
 def test_salience_weight_shift_conserves_mass():
     # Raw boost (|v| * intensity * valence_weight = 1.0) far exceeds w_sti:
     # the shift must cap at w_sti, not mint new weight for w_valence.
+    # Similarity 1.0 so the relevance gate is the identity and the standing
+    # arithmetic is what the number reads.
     score = compute_salience(
-        similarity=0.0,
+        similarity=1.0,
         sti=2.0,
         confidence=0.0,
         lti=0.0,
@@ -93,7 +95,23 @@ def test_salience_weight_shift_conserves_mass():
         w_valence=0.10,
         valence_weight=1.0,
     )
-    assert score == pytest.approx(0.15)  # (0.10 + 0.05) * |v| * intensity
+    assert score == pytest.approx(0.50)  # 0.35 + (0.10 + 0.05) * |v| * intensity
+
+
+def test_standing_cannot_outrank_relevance():
+    """An atom at similarity zero scores zero however important it is.
+
+    Standing used to be added to relevance, so a saturated person concept with
+    nothing to do with the query outscored every relevant episode.
+    """
+    hub = compute_salience(
+        similarity=0.0, sti=3.0, confidence=0.9, lti=0.8, valence=0.0, intensity=0.0
+    )
+    relevant = compute_salience(
+        similarity=0.6, sti=0.0, confidence=0.1, lti=0.1, valence=0.0, intensity=0.0
+    )
+    assert hub == 0.0
+    assert relevant > hub
 
 
 def test_null_personality_column_falls_back_to_default(atomspace, db, embed):

@@ -5,10 +5,14 @@ import struct
 
 from smrti.core.models import AtomType, RecallResult, atom_from_row
 from smrti.core.db import stable_rowid
-from smrti.core.provenance import ATOM_OWN_INTENSITY, ATOM_OWN_VALENCE
+from smrti.core.provenance import (
+    ATOM_FORGOTTEN,
+    ATOM_OWN_INTENSITY,
+    ATOM_OWN_VALENCE,
+)
 from smrti.retrieval.diversify import diversify
 from smrti.retrieval.salience import compute_salience
-from smrti.retrieval.text import containment, word_set, words
+from smrti.retrieval.text import coverage, word_set, words
 
 # The KNN entry pool scales with the graph. A fixed pool lets conversational
 # froth crowd the gate long before the graph is large: a fact ranked just past
@@ -23,14 +27,20 @@ _KNN_POOL_MAX = 256
 # than any fact about the family, so pure similarity ranks the asking above
 # the knowing. Embedding distance cannot tell an echo from an answer that
 # shares the query's vocabulary — both sit high — but an echo is a
-# near-duplicate of the query as *text*, so token containment separates
-# them cleanly where cosine cannot. An echo carries zero information the
-# asker does not already hold, so its similarity term is zeroed — it stays
-# findable on attention, confidence, and valence, just never on being the
-# question. Beliefs and concepts are exempt: searching for a fact by
-# stating it must return the fact first. The similarity gate below just
-# skips the token work where zeroing could not change the ranking anyway.
-_ECHO_OVERLAP = 0.7
+# near-duplicate of the query as *text*, so word overlap separates them
+# where cosine cannot. An echo carries zero information the asker does not
+# already hold, so its similarity term is zeroed — and since relevance gates
+# standing, an echo scores nothing at all: the question is never the answer.
+#
+# Because the verdict is now final, the overlap is measured against the
+# larger of the two word sets (``coverage``), not the smaller, and the bar is
+# high: an answer that contains every word of a three-word query is not a
+# copy of it, and neither is one that adds two words to a seven-word
+# question, while a stored question that gained a "please" still clears it.
+# Beliefs and concepts are exempt: searching for a fact by stating it must
+# return the fact first. The similarity gate below just skips the token work
+# where zeroing could not change the ranking anyway.
+_ECHO_OVERLAP = 0.8
 _ECHO_MIN_SIMILARITY = 0.5
 
 # 1-hop expansion budget per direction. Ordered by the standing of the atom
@@ -59,6 +69,9 @@ _FTS_MAX_TERMS = 32
 # retrieval hit rate and a ten-candidate head cost none, while the
 # cross-language recall the index exists for lives entirely in the head.
 _FTS_POOL = 10
+
+# The surfacing floor when neither the caller nor the personality names one.
+_DEFAULT_MIN_CONFIDENCE = 0.1
 
 
 def _blob_to_vec(blob) -> list[float]:
@@ -108,12 +121,13 @@ def _rrf_fuse(ranked_lists: list[list[str]], limit: int) -> list[str]:
 def _is_echo(query_tokens: set[str], text: str) -> bool:
     """True when the text is substantially the query restated.
 
-    Containment coefficient over word sets: an echo may add a word
-    ("please") or drop one, so the overlap is measured against the smaller
-    side. Very short texts are never echoes — two words in common prove
-    nothing, which ``containment`` reports as zero overlap.
+    Word overlap against the larger side: an echo may add a word ("please")
+    or drop one and still cover most of both texts, while an answer that
+    merely contains the query's words is much longer than the query and does
+    not. Very short texts are never echoes — two words in common prove
+    nothing, which ``coverage`` reports as zero overlap.
     """
-    return containment(query_tokens, word_set(text)) >= _ECHO_OVERLAP
+    return coverage(query_tokens, word_set(text)) >= _ECHO_OVERLAP
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -164,7 +178,8 @@ def retrieve(
     embed_engine,
     write_space: str,
     top_k: int = 10,
-    min_confidence: float = 0.1,
+    min_confidence: float | None = None,
+    boost: bool = True,
 ) -> list[RecallResult]:
     """
     Full retrieval pipeline:
@@ -180,6 +195,20 @@ def retrieve(
          and agent-authored atoms are discounted by source trust
       5. Cap near-duplicate episodes and reserve slots for beliefs, then
          return top_k sorted by descending salience
+
+    ``min_confidence`` is the surfacing floor. When the caller passes none,
+    the write space's personality decides (``min_confidence_to_surface``),
+    which is what that parameter is for: a preset that promises a 0.3 floor
+    has to deliver it to a caller who did not repeat the number.
+
+    ``boost`` is whether being recalled raises the STI of what came back.
+    Reading a memory is attention, so it does by default; a caller that
+    retrieves in order to forget passes ``False``, because forgetting a
+    memory must not make it more prominent.
+
+    Atoms stamped ``$.forgotten`` are never candidates. ``forget()`` sinks
+    them below the floor as well, but the stamp is the guarantee: a memory
+    the caller asked to forget stops surfacing at every floor.
     """
     # One KNN probe is issued per read space, so a repeated name is repeated
     # work — and read_spaces can arrive straight from a request header.
@@ -211,6 +240,8 @@ def retrieve(
     valence_weight = _pget("valence_weight", 0.2)
     sti_boost = _pget("sti_boost_on_access", 0.5)
     agent_trust = _pget("agent_source_trust", 0.5)
+    if min_confidence is None:
+        min_confidence = _pget("min_confidence_to_surface", _DEFAULT_MIN_CONFIDENCE)
 
     # Step 1: entry points — the vector and lexical searches run side by side
     # and their ranked lists are fused. One probe per read_space (the space
@@ -255,6 +286,14 @@ def retrieve(
     # pull an unbounded neighborhood into the scoring set. The budget goes to
     # the highest-standing endpoints first: an unordered LIMIT hands it to
     # whatever the scan meets, which in a chatty graph is froth.
+    #
+    # Nothing else enters. An earlier version also added the three
+    # highest-standing person atoms to every candidate set "to anchor the
+    # graph"; scored on their true similarity they carried none for most
+    # queries, and their standing alone put them above every relevant
+    # episode — a person concept at similarity zero was the first result for
+    # a question about Kubernetes. Candidacy comes from the query or from an
+    # edge out of something the query found.
     id_ph = ",".join("?" * len(entry_ids))
     expanded_ids: set[str] = set(entry_ids)
 
@@ -277,21 +316,13 @@ def retrieve(
     expanded_ids.update(r["source_id"] for r in backward if r["source_id"])
     expanded_ids.discard(None)
 
-    # Include the most salient person atoms — they anchor the knowledge graph
-    # ("who are these memories about?") regardless of query similarity. Capped
-    # so person-heavy spaces (e.g. simulations) cannot flood the candidate set.
-    person_rows = db.fetchall(
-        f"""SELECT id FROM atoms WHERE entity_type = 'person' AND tenant_id = ? AND space IN ({spaces_ph})
-            AND type IN ('concept', 'belief', 'goal')
-            ORDER BY (sti + lti) DESC LIMIT 3""",
-        (tenant_id, *read_spaces),
-    )
-    expanded_ids.update(r["id"] for r in person_rows)
-
     if not expanded_ids:
         return []
 
-    # Step 3: Fetch candidate atoms — space-filtered here (overlay boundary)
+    # Step 3: Fetch candidate atoms — space-filtered here (overlay boundary).
+    # The confidence floor is bypassed for an atom whose own tone is severely
+    # negative: a decayed warning is still a warning. A forgotten atom never
+    # passes, whatever its tone.
     exp_list = list(expanded_ids)
     exp_ph = ",".join("?" * len(exp_list))
     atoms_rows = db.fetchall(
@@ -300,6 +331,7 @@ def retrieve(
               AND tenant_id = ?
               AND space IN ({spaces_ph})
               AND type IN ('concept', 'belief', 'episode', 'goal')
+              AND NOT {ATOM_FORGOTTEN}
               AND (confidence >= ?
                    OR ({ATOM_OWN_VALENCE} < -0.5 AND {ATOM_OWN_INTENSITY} > 0.5))""",
         (*exp_list, tenant_id, *read_spaces, min_confidence),
@@ -330,6 +362,22 @@ def retrieve(
             and _is_echo(query_tokens, atom.content or atom.label)
         ):
             similarity = 0.0
+        # The engine already trusts agent-authored content less at decay and
+        # prune time; ranking is where that asymmetry reaches the reader. An
+        # agent's stored reply competes with the user testimony it was
+        # derived from — and when the reply was wrong, ranking it first
+        # re-serves the mistake as memory.
+        #
+        # The discount reaches the standing terms only. Attention, confidence
+        # and valence say how much the graph has come to trust the atom, and
+        # an agent's say in that is what the discount exists to shrink;
+        # similarity says how much the atom is *about the question*, which is
+        # a property of the query. Discounting it too buried the one memory
+        # that held the answer whenever that memory was the agent's own reply
+        # — "what did you recommend?" has no user-authored answer, and
+        # measured on LongMemEval the whole single-session-assistant category
+        # scored zero. On equal relevance the user's version still wins.
+        standing_scale = agent_trust if atom.metadata.get("source") == "agent" else 1.0
         salience = compute_salience(
             similarity=similarity,
             sti=atom.attention.sti,
@@ -343,26 +391,14 @@ def retrieve(
             w_lti=w_lti,
             w_valence=w_valence,
             valence_weight=valence_weight,
+            standing_scale=standing_scale,
         )
-        # The engine already trusts agent-authored content less at decay and
-        # prune time; ranking is where that asymmetry reaches the reader. An
-        # agent's stored reply competes with the user testimony it was
-        # derived from — and when the reply was wrong, ranking it first
-        # re-serves the mistake as memory.
-        #
-        # The discount spares the similarity term. Attention, confidence and
-        # valence say how much the graph has come to trust the atom, and an
-        # agent's say in that is what the discount exists to shrink;
-        # similarity says how much the atom is *about the question*, which is
-        # a property of the query. Discounting it too buried the one memory
-        # that held the answer whenever that memory was the agent's own reply
-        # — "what did you recommend?" has no user-authored answer, and
-        # measured on LongMemEval the whole single-session-assistant category
-        # scored zero. On equal relevance the user's version still wins,
-        # because only the agent's standing terms are shrunk.
-        if atom.metadata.get("source") == "agent":
-            standing = salience - w_similarity * similarity
-            salience = w_similarity * similarity + agent_trust * standing
+        # An atom with no relevance has no salience, and a result with no
+        # salience is not a result: the KNN probe always returns its nearest
+        # neighbours however far they are, and on a small graph that is
+        # every atom in it.
+        if salience <= 0.0:
+            continue
         results.append(RecallResult(atom=atom, salience=salience, similarity=similarity))
 
     results.sort(key=lambda r: r.salience, reverse=True)
@@ -374,7 +410,7 @@ def retrieve(
 
     # Boost STI on accessed atoms within write_space only — reading from a
     # foreign space must not mutate that space's attention weights.
-    if sti_boost > 0 and top_results:
+    if boost and sti_boost > 0 and top_results:
         db.execute_many(
             "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ? AND tenant_id = ? AND space = ?",
             [(sti_boost, r.atom.id, tenant_id, write_space) for r in top_results],

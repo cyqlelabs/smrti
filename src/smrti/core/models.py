@@ -43,6 +43,33 @@ class EntityType(str, Enum):
 # claim, born unsure and earning confidence through evidence.
 PERMANENT_PROBABILITY = 0.95
 
+# The confidence each kind of atom is born with. One value per kind, whatever
+# path created it, so no kind outranks another on the confidence term merely
+# by construction: an extracted concept used to start at 0.6 while the belief
+# the user stated started at 0.3, and confidence is a fifth or more of the
+# salience score on every preset.
+#
+# An episode or concept holds no proposition, so for those two "confidence" is
+# retention strength — how firmly the graph still holds the memory — and it
+# gates surfacing rather than truth. A belief is born unsure and earns its
+# confidence through evidence; one asserted at PERMANENT_PROBABILITY is born
+# certain instead (see Smrti.believe). A relation is the extractor's reading
+# of one sentence and starts at the same footing as an episode.
+INITIAL_CONFIDENCE = {
+    "episode": 0.5,
+    "concept": 0.5,
+    "goal": 0.5,
+    "belief": 0.3,
+    "relation": 0.5,
+}
+
+# What a claim that has been replaced by a later one is held at. Not zero —
+# it was true when it was stated — but under the antipattern line, so recall
+# reads a superseded preference or constraint as something to avoid rather
+# than as the current state. Both the negative evidence a supersession files
+# and the contradiction step's cut land here.
+SUPERSEDED_PROBABILITY = 0.1
+
 
 class TruthValue(BaseModel):
     probability: float = Field(0.5, ge=0.0, le=1.0)
@@ -123,13 +150,26 @@ class Atom(BaseModel):
 
 
 class Evidence(BaseModel):
+    """One observation about an atom's truth.
+
+    ``text`` is what was observed — the reason a caller gave ``believe``, or
+    what a later claim replaced — and ``source`` is who reported it (``user``
+    or ``agent``). The log is only an observation log if it records the
+    observation; before these fields it recorded that something was seen and
+    never what.
+    """
+
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     atom_id: str
     observed_probability: float
     weight: float = 1.0
     source_episode_id: Optional[str] = None
+    text: Optional[str] = None
+    source: Optional[str] = None
     tenant_id: str = "default"
     space: str = "default"
+    created_at: Optional[str] = None
+    processed: bool = False
 
 
 class RecallResult(BaseModel):
@@ -146,7 +186,6 @@ class EpochResult(BaseModel):
     new_connections: int
     contradictions_resolved: int
     orphans_healed: int = 0
-    bridges_created: int = 0
 
 
 class AtomPair(BaseModel):

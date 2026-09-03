@@ -20,7 +20,8 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
                 "type": {"type": "string", "enum": ["belief", "episode", "goal"], "default": "episode"},
                 "probability": {"type": "number", "description": "How true is this (0-1)", "default": 0.8},
                 "valence": {"type": "number", "description": "Emotional tone (-1 to 1); omit to auto-estimate from content"},
-                "evidence": {"type": "string", "description": "Why you believe this (only used when type=belief)"},
+                "intensity": {"type": "number", "description": "How strongly the tone is felt (0 to 1), independent of its sign; omit for |valence|"},
+                "evidence": {"type": "string", "description": "Why you believe this (only used when type=belief); recorded on the evidence log"},
                 "source": {
                     "type": "string",
                     "enum": ["user", "agent"],
@@ -39,7 +40,7 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
             "properties": {
                 "query": {"type": "string", "description": "What to recall"},
                 "top_k": {"type": "integer", "default": 10},
-                "min_confidence": {"type": "number", "default": 0.1},
+                "min_confidence": {"type": "number", "description": "Confidence floor for results; omit for the personality's min_confidence_to_surface"},
                 "read_spaces": {
                     "type": "array",
                     "items": {"type": "string"},
@@ -56,7 +57,7 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
     },
     {
         "name": "smrti_forget",
-        "description": "Lower confidence on a memory or belief. Does not hard-delete — the consolidation epoch handles pruning.",
+        "description": "Stop the memories matching a query from surfacing: their confidence is sunk below the surfacing floor and they are excluded from recall. Not an immediate hard-delete — the next consolidation epoch may prune them.",
         "inputSchema": {
             "type": "object",
             "properties": {

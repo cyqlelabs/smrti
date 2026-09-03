@@ -164,14 +164,8 @@ def test_expansion_budget_prefers_high_standing_endpoints(mem):
     edge to a high-standing fact must be among the ones that survive.
     """
     hub = mem.remember("the roadmap planning hub", type="concept")
-    fact = str(uuid.uuid4())
-    mem.db.execute(
-        """INSERT INTO atoms (id, type, label, content, tenant_id, space,
-                              probability, confidence, sti, lti, valence, intensity)
-           VALUES (?, 'belief', 'the roadmap deadline is in March',
-                   'the roadmap deadline is in March', ?, ?, 0.9, 0.9, 0.5, 0.5, 0.0, 0.0)""",
-        (fact, mem.tenant_id, mem.write_space),
-    )
+    fact = mem.believe("the roadmap deadline is in March", probability=0.9)
+    _set(mem, fact, confidence=0.9, sti=0.5, lti=0.5)
     mem.atomspace.link_atoms(hub, fact, "mentions", mem.tenant_id, mem.write_space)
     for i in range(120):
         junk = str(uuid.uuid4())

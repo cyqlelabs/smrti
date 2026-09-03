@@ -611,6 +611,12 @@ COUNCIL_ROLES = {
 
 COUNCIL_MEETING_INTERVAL_HOURS = 24  # 1 sim-day
 
+# Every this many ticks each citizen's memory graph runs a consolidation
+# epoch: decay, promotion, mood propagation, pruning. Without it a citizen's
+# memories never age and never settle — the engine's evolution machinery was
+# not running in the demo built to show it.
+MEMORY_REFLECT_INTERVAL_TICKS = 12
+
 # ── Economy ──────────────────────────────────────────────────────────
 STARTING_TREASURY = 50000
 STARTING_WALLET = 100

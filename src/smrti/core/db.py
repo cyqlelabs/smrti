@@ -197,6 +197,8 @@ CREATE TABLE IF NOT EXISTS evidence (
     observed_probability REAL NOT NULL,
     weight               REAL DEFAULT 1.0,
     source_episode_id    TEXT,
+    text                 TEXT,
+    source               TEXT,
     tenant_id            TEXT NOT NULL,
     space                TEXT NOT NULL,
     created_at           TEXT DEFAULT (datetime('now')),
@@ -291,7 +293,33 @@ class Database:
                 if stmt:
                     self._write_conn.execute(stmt)
             self._write_conn.commit()
+            self._migrate_evidence_columns()
             self._init_atoms_fts()
+
+    _EVIDENCE_COLUMNS = ("text", "source")
+
+    def _migrate_evidence_columns(self) -> None:
+        """Add the columns that record what an observation was and who made it.
+
+        Runs after the schema, since ``CREATE TABLE IF NOT EXISTS`` never
+        revises an existing table. Rows written before the columns existed
+        read as NULL: they recorded that something was observed, never what.
+        """
+        conn = self._write_conn
+        existing = {r["name"] for r in conn.execute("PRAGMA table_info(evidence)")}
+        missing = [c for c in self._EVIDENCE_COLUMNS if c not in existing]
+        if not missing:
+            return
+        self._backup_before_migration()
+        try:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            for column in missing:
+                conn.execute(f"ALTER TABLE evidence ADD COLUMN {column} TEXT")
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _init_atoms_fts(self) -> None:
         """Create the lexical index, backfilling a graph written before it existed.

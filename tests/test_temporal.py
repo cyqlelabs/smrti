@@ -195,13 +195,19 @@ def test_the_facade_stores_text_verbatim_by_default(db_path):
     assert atom.content == "The session is tomorrow"
 
 
-def test_the_resolution_lands_in_the_stored_text_before_it_is_embedded(db_path, monkeypatch):
+def _stub_resolve(monkeypatch):
+    """Point the facade's write-time tier at the stub tagger."""
     import smrti.extraction.temporal as temporal_mod
 
+    real = temporal_mod.resolve
     monkeypatch.setattr(
-        temporal_mod, "annotate",
-        lambda text, base=None, ner=None: annotate(text, BASE, StubNER([("tomorrow", "date")])),
+        temporal_mod, "resolve",
+        lambda text, base=None, ner=None: real(text, BASE, StubNER([("tomorrow", "date")])),
     )
+
+
+def test_the_resolution_lands_in_the_stored_text_before_it_is_embedded(db_path, monkeypatch):
+    _stub_resolve(monkeypatch)
     mem = Smrti(db_path=db_path, tenant_id="test", write_space="default", temporal=True)
     atom_id = mem.remember("The session is tomorrow")
 
@@ -210,20 +216,19 @@ def test_the_resolution_lands_in_the_stored_text_before_it_is_embedded(db_path, 
     # Embedded and lexically indexed as stored, so the date is searchable.
     row = mem.db.fetchone("SELECT content FROM atoms_fts WHERE atom_id = ?", (atom_id,))
     assert row["content"] == atom.content
+    # And filed where recall renders dates from, so the model's later pass
+    # adds to this list instead of keeping a second one.
+    assert atom.metadata["temporal"] == [{"text": "tomorrow", "resolved": "2026-08-27"}]
 
 
 def test_beliefs_get_their_deixis_resolved_too(db_path, monkeypatch):
-    import smrti.extraction.temporal as temporal_mod
-
-    monkeypatch.setattr(
-        temporal_mod, "annotate",
-        lambda text, base=None, ner=None: annotate(text, BASE, StubNER([("tomorrow", "date")])),
-    )
+    _stub_resolve(monkeypatch)
     mem = Smrti(db_path=db_path, tenant_id="test", write_space="default", temporal=True)
     atom_id = mem.believe("The release ships tomorrow", probability=0.9)
 
     atom = mem.atomspace.get_atom(atom_id, "test", "default")
     assert atom.content == "The release ships tomorrow [resolved: 2026-08-27]"
+    assert atom.metadata["temporal"] == [{"text": "tomorrow", "resolved": "2026-08-27"}]
 
 
 def test_a_failing_tagger_does_not_fail_the_write(db_path, monkeypatch):

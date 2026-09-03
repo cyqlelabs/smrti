@@ -79,7 +79,10 @@ def test_forget_still_lowers_a_permanent_belief(mem):
     lowered = _truth(mem, atom_id)[1]
     assert lowered < PERMANENT_PROBABILITY
     mem.reflect()
-    assert _truth(mem, atom_id)[1] == pytest.approx(lowered)
+    # A forgotten atom is prunable, so the epoch may have removed it; what it
+    # may not do is lift it back.
+    row = mem.db.fetchone("SELECT confidence FROM atoms WHERE id = ?", (atom_id,))
+    assert row is None or row["confidence"] == pytest.approx(lowered)
 
 
 def test_forget_stamps_the_atom_as_deliberately_sunk(mem):
@@ -140,11 +143,13 @@ def _restart(db_path):
 
 
 def _confidence(db_path, atom_id):
+    """The atom's confidence, or None once the pruner has removed it."""
     conn = sqlite3.connect(db_path)
     try:
-        return conn.execute(
+        row = conn.execute(
             "SELECT confidence FROM atoms WHERE id = ?", (atom_id,)
-        ).fetchone()[0]
+        ).fetchone()
+        return None if row is None else row[0]
     finally:
         conn.close()
 
@@ -217,4 +222,6 @@ def test_a_forget_stands_across_restarts_and_epochs(db_path):
     engine = _restart(db_path)
     for _ in range(3):
         engine.reflect()
-    assert _confidence(db_path, atom_id) == pytest.approx(forgotten)
+    # Forgotten atoms are prunable; gone or unchanged, never lifted.
+    after = _confidence(db_path, atom_id)
+    assert after is None or after == pytest.approx(forgotten)

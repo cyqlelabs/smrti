@@ -94,9 +94,11 @@ def test_user_source_is_never_damped_even_with_low_trust(db_path):
     """agent_trust must not leak into user-authored extraction."""
     db = Database(db_path)
     db.initialize()
+    from smrti.core.models import INITIAL_CONFIDENCE
+
     res = EntityResolver(db, embed_engine=EmbeddingProvider(), source="user", agent_trust=0.1)
     atom_id = res.resolve("Kubernetes", "technology", "t1", "s1", ["s1"])
-    assert _atom(db, atom_id)["confidence"] == pytest.approx(0.6)
+    assert _atom(db, atom_id)["confidence"] == pytest.approx(INITIAL_CONFIDENCE["concept"])
     db.close()
 
 

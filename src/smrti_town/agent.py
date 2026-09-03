@@ -281,11 +281,16 @@ class Citizen:
                 top_k=5,
                 min_confidence=0.1,
             )
+            # A RecallResult wraps the atom; the memory's text, tone and
+            # truth live on r.atom. (These used to read r.content and
+            # r.valence, attributes the result never had, and the except
+            # below swallowed the error — so memories were always empty and
+            # no citizen ever decided on one.)
             memories = [
                 {
-                    "content": r.content,
-                    "valence": r.valence,
-                    "probability": r.probability,
+                    "content": r.atom.content or r.atom.label,
+                    "valence": r.atom.valence.valence,
+                    "probability": r.atom.truth.probability,
                 }
                 for r in results
             ]
@@ -651,24 +656,43 @@ class Citizen:
         return self._weighted_choice(candidates)
 
     def _place_valence(self, place_name: str) -> float:
-        """Return average valence of memories about a place.  0.0 if none."""
-        try:
-            results = self.smrti.recall(place_name, top_k=3, min_confidence=0.1)
-            if not results:
-                return 0.0
-            return sum(r.valence for r in results) / len(results)
-        except Exception:
-            return 0.0
+        """Return the average mood of memories about a place.  0.0 if none.
+
+        This reads the *absorbed* mood (``valence.valence``), not the tone
+        each memory was written with. The engine's own judgements — severity,
+        ranking, pruning — read the intrinsic tone so that a concept cannot
+        become a "mistake" by keeping bad company; a citizen deciding where
+        to go wants the opposite: the tavern concept should carry the mood of
+        every evening spent there. This is the consumer of the engine's mood
+        propagation, and its ``mood_inertia`` is why an empathetic citizen's
+        map of the town changes faster than an analytical one's.
+        """
+        return self._memory_mood(place_name)
 
     def _person_valence(self, person_name: str) -> float:
-        """Return average valence of memories about a person.  0.0 if none."""
+        """Return the average mood of memories about a person.  0.0 if none."""
+        return self._memory_mood(person_name)
+
+    def _memory_mood(self, name: str) -> float:
+        """Average mood of the memories that actually mention *name*.
+
+        Recall returns the nearest memories whatever they are about, and a
+        bad evening at the tavern must not colour the library, so only the
+        memories that name the place or person count.
+        """
         try:
-            results = self.smrti.recall(person_name, top_k=3, min_confidence=0.1)
-            if not results:
-                return 0.0
-            return sum(r.valence for r in results) / len(results)
+            results = self.smrti.recall(name, top_k=5, min_confidence=0.1, boost=False)
         except Exception:
             return 0.0
+        needle = name.casefold()
+        moods = [
+            r.atom.valence.valence
+            for r in results
+            if needle in (r.atom.content or r.atom.label or "").casefold()
+        ]
+        if not moods:
+            return 0.0
+        return sum(moods) / len(moods)
 
     @staticmethod
     def _weighted_choice(items: list[tuple[str, float]]) -> str:

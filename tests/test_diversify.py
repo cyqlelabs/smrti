@@ -292,8 +292,13 @@ def mem(tmp_path):
     )
 
 
-def test_the_family_recall_mixes_facts_with_the_asking(mem):
-    """Replay of the reported case, end to end."""
+def test_the_family_recall_returns_the_facts_and_none_of_the_asking(mem):
+    """Replay of the reported case, end to end.
+
+    Five stored copies of the question used to fill the answer. The diversity
+    cap first limited them to two; now an echo of the query scores nothing
+    at all, so the facts are the whole answer.
+    """
     for _ in range(5):
         mem.remember(RESTATEMENT)
     mem.believe("Esmeralda es la hija de Nicolás", probability=0.95)
@@ -303,7 +308,7 @@ def test_the_family_recall_mixes_facts_with_the_asking(mem):
 
     types = [r.atom.type for r in results]
     assert types.count(AtomType.BELIEF) == 2
-    assert types.count(AtomType.EPISODE) == 2
+    assert AtomType.EPISODE not in types
 
 
 def test_a_session_of_distinct_turns_survives_recall_intact(mem):

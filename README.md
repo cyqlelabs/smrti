@@ -57,6 +57,16 @@ docker run -d -p 8421:8421 -v smrti-data:/data \
 - **Storage** — `/data` holds the database and the NER weights that download on first extraction; mount a volume or both die with the container.
 - **User** — runs as non-root `smrti`.
 
+### Upgrading
+
+An existing database is brought up to date the first time the new version opens it, with a `.pre-migration.bak` snapshot written beside it first (restore that file to downgrade). Schema additions run as migrations; three data repairs run as well, each idempotent, so they also mend rows an older process writes later:
+
+- Extracted entities written before every creation path set the intrinsic tone get it rebuilt from their claim edges, so they stop being judged on the mood they absorb from their neighbours.
+- The placeholder `associated` edges the old healing step drew out of every person atom are removed.
+- Atoms forgotten by the old `forget()`, which left them at the surfacing floor, are sunk below it so the pruner can take them.
+
+Bridge spaces the old consolidation epoch materialised on its own (`a_x_b`) are left in place; clear one with `DELETE /spaces/current?space=a_x_b` if nothing reads it.
+
 ## Quick Start
 
 ### Python API

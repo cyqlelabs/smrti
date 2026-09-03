@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Optional
 
 import httpx
 
-from smrti.core.models import SUPERSEDED_PROBABILITY, Evidence
+from smrti.core.models import STRUCTURAL_RELATIONS, SUPERSEDED_PROBABILITY, Evidence
 from smrti.core.provenance import ATOM_METADATA_JSON, SOURCE_AGENT
 
 from .prompts import AGENT_EXTRACTION_PROMPT, CLAIMS_ONLY_PROMPT, ENTITY_TYPES, EXTRACTION_PROMPT
@@ -343,9 +343,8 @@ def _get_sole_person(mem: "Smrti") -> tuple[str, str] | None:
     return (rows[0]["label"], rows[0]["id"])
 
 
-# Relations that describe the graph's own bookkeeping rather than a fact
-# about the entity, and so have no place in the model's view of it.
-_STRUCTURAL_RELATIONS = ("mentions", "associated", "bridge", "contradicts")
+# Bookkeeping relations have no place in the model's view of an entity.
+_STRUCTURAL_RELATIONS = STRUCTURAL_RELATIONS
 
 # How many recorded facts each known entity carries into the prompt.
 _CONTEXT_CLAIMS_PER_ENTITY = 6

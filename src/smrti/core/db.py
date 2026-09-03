@@ -10,6 +10,9 @@ from typing import Any
 
 import sqlite_vec
 
+from smrti.core.models import STRUCTURAL_RELATIONS
+from smrti.core.provenance import ATOM_FORGOTTEN
+
 _registry: dict[str, "Database"] = {}
 _registry_lock = threading.Lock()
 
@@ -295,8 +298,116 @@ class Database:
             self._write_conn.commit()
             self._migrate_evidence_columns()
             self._init_atoms_fts()
+            self._repair_legacy_rows()
 
     _EVIDENCE_COLUMNS = ("text", "source")
+
+    # The surfacing floor of the row's own space, for a repair that has to
+    # know it without a Smrti instance in hand.
+    _FLOOR_SQL = (
+        "COALESCE((SELECT p.min_confidence_to_surface FROM personality p "
+        "WHERE p.tenant_id = atoms.tenant_id AND p.space = atoms.space), 0.1)"
+    )
+
+    # The strongest negative claim an entity is the object of, which is the
+    # tone the extractor would give it today.
+    _CLAIM_TONE_SQL = (
+        "(SELECT MIN(r.valence) FROM atoms r WHERE r.type = 'relation' "
+        "AND r.target_id = atoms.id AND r.tenant_id = atoms.tenant_id "
+        "AND r.valence < -0.3 AND r.relation NOT IN ({placeholders}))"
+    )
+
+    # Healing used to draw person -> associated -> concept placeholders at
+    # confidence 0.2; association discovery's own edges start at 0.1. Both
+    # are below this line, and discovery redraws its own on the next tenth
+    # epoch if they are still warranted.
+    _HUB_EDGE_MAX_CONFIDENCE = 0.2
+
+    def _repair_legacy_rows(self) -> None:
+        """Bring rows written by earlier releases in line with the current code.
+
+        Three repairs. Each touches only rows that still carry the legacy
+        shape, so it is idempotent: safe on every open, and it also mends
+        whatever a process running older code writes in the meantime.
+
+        * Extracted entities written before every creation path set the
+          intrinsic valence pair (resolver-made, so no ``content``) have it
+          NULL and are judged on the mood they absorb from their neighbours.
+          Their original tone is knowable: the resolver creates them neutral,
+          and the only thing that ever lowered it was a negative claim, whose
+          valence the claim edge still carries. So it is rebuilt from the
+          incoming claim edges — the lowest claim valence under -0.3, else 0
+          — which is exactly what ``_lower_tone`` writes today. Episodes
+          written before the split are left alone: nothing records the tone
+          they were stored with.
+        * The placeholder ``associated`` edges the old healing step drew out
+          of every person atom are removed. They made the person a hub joined
+          to everything in the space.
+        * Atoms forgotten by the old ``forget()``, which left them at the
+          surfacing floor rather than under it, are sunk below it so the
+          pruner can take them, as the current ``forget()`` does.
+
+        The file is snapshotted first, like a schema migration, whenever any
+        row is going to change.
+        """
+        conn = self._write_conn
+        if (
+            conn.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'atoms'"
+            ).fetchone()
+            is None
+        ):
+            return
+        placeholders = ",".join("?" * len(STRUCTURAL_RELATIONS))
+        claim_tone = self._CLAIM_TONE_SQL.format(placeholders=placeholders)
+
+        legacy_entities = (
+            "intrinsic_valence IS NULL AND content IS NULL AND type != 'relation'"
+        )
+        hub_edges = (
+            "SELECT r.id FROM atoms r JOIN atoms p ON p.id = r.source_id "
+            "WHERE r.type = 'relation' AND r.relation = 'associated' "
+            "AND r.confidence <= ? AND p.entity_type = 'person'"
+        )
+        legacy_forgotten = f"{ATOM_FORGOTTEN} AND confidence >= {self._FLOOR_SQL}"
+
+        entity_count = conn.execute(
+            f"SELECT COUNT(*) FROM atoms WHERE {legacy_entities}"
+        ).fetchone()[0]
+        hub_ids = [r[0] for r in conn.execute(hub_edges, (self._HUB_EDGE_MAX_CONFIDENCE,))]
+        forgotten_count = conn.execute(
+            f"SELECT COUNT(*) FROM atoms WHERE {legacy_forgotten}"
+        ).fetchone()[0]
+        if not (entity_count or hub_ids or forgotten_count):
+            return
+
+        self._backup_before_migration()
+        try:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            if entity_count:
+                conn.execute(
+                    f"""UPDATE atoms SET
+                            intrinsic_valence = COALESCE({claim_tone}, 0.0),
+                            intrinsic_intensity = ABS(COALESCE({claim_tone}, 0.0))
+                        WHERE {legacy_entities}""",
+                    (*STRUCTURAL_RELATIONS, *STRUCTURAL_RELATIONS),
+                )
+            for start in range(0, len(hub_ids), 400):
+                chunk = hub_ids[start : start + 400]
+                ph = ",".join("?" * len(chunk))
+                conn.execute(f"DELETE FROM evidence WHERE atom_id IN ({ph})", chunk)
+                conn.execute(f"DELETE FROM aliases WHERE atom_id IN ({ph})", chunk)
+                conn.execute(f"DELETE FROM atoms WHERE id IN ({ph})", chunk)
+            if forgotten_count:
+                conn.execute(
+                    f"""UPDATE atoms SET confidence = MIN(confidence, 0.5 * {self._FLOOR_SQL})
+                        WHERE {legacy_forgotten}"""
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def _migrate_evidence_columns(self) -> None:
         """Add the columns that record what an observation was and who made it.

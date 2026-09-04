@@ -24,7 +24,7 @@ smrti serve mcp        # MCP stdio server
 smrti serve rest       # FastAPI on :8420
 smrti serve viz        # FastAPI on :8420 + opens visualizer in browser
 smrti serve proxy      # OpenAI-compatible proxy on :8421
-smrti serve town       # smrti-town simulation on :8430 (repo checkout only)
+smrti serve town       # smrti-town simulation on :8430
 smrti stop             # stop servers started by `smrti serve` (SIGTERM, then SIGKILL after --timeout); optional mode arg + --port to narrow
 
 # Benchmark harnesses (need the datasets and an answering model; not CI gates)
@@ -62,14 +62,14 @@ Smrti is an AtomSpace-inspired memory engine for AI agents. It stores beliefs as
 
 ## smrti-town
 
-City-builder simulation built on the Smrti memory engine: the player founds a town (places the Town Hall, picks a mayor, gets a 4-advisor council), then citizens with private Smrti memory graphs immigrate, work, and petition while an LLM council debates what to build. Lives in `src/smrti_town/` alongside `src/smrti/` but is **not** included in the `pyproject.toml` wheel — import it by running from the repo root with `pip install -e .` and ensuring `src/` is on `PYTHONPATH`.
+City-builder simulation built on the Smrti memory engine: the player founds a town (places the Town Hall, picks a mayor, gets a 4-advisor council), then citizens with private Smrti memory graphs immigrate, work, and petition while an LLM council debates what to build. Lives in `src/smrti_town/` alongside `src/smrti/` and ships in the same wheel, so `pip install smrti` installs the simulation and its frontend.
 
 ```bash
 # Start the town simulation server (port 8430)
 smrti serve town
 
 # Or directly
-PYTHONPATH=src python -m uvicorn smrti_town.server:app --port 8430
+python -m uvicorn smrti_town.server:app --port 8430
 ```
 
 `src/smrti_town/README.md` is the canonical description of how the town behaves — env vars, tick phases, REST routes, WebSocket messages. What follows is the code-level map that file does not carry; when the two disagree, the README is the one to fix.

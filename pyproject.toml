@@ -33,6 +33,7 @@ dependencies = [
     "mcp>=1.0.0",
     "fastapi>=0.115.0",
     "uvicorn>=0.30.0",
+    "websockets>=12",
     "httpx>=0.27.0",
     "chonkie-core",
     "gliner2-onnx>=0.1.1",
@@ -62,7 +63,7 @@ local_scheme = "no-local-version"
 version-file = "src/smrti/_version.py"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/smrti"]
+packages = ["src/smrti", "src/smrti_town"]
 
 [tool.hatch.build.targets.sdist]
-include = ["src/smrti", "LICENSE", "README.md", "pyproject.toml"]
+include = ["src/smrti", "src/smrti_town", "LICENSE", "README.md", "pyproject.toml"]

@@ -106,7 +106,7 @@ smrti serve mcp     # MCP stdio server (Claude, etc.)
 smrti serve rest    # REST API on :8420
 smrti serve viz     # REST API + memory visualizer in the browser
 smrti serve proxy   # OpenAI-compatible proxy on :8421
-smrti serve town    # city-builder simulation demo on :8430 (needs a repo checkout)
+smrti serve town    # city-builder simulation demo on :8430
 
 smrti stop          # gracefully stop all servers started by `smrti serve`
 smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow further
@@ -507,8 +507,6 @@ A living demo: [smrti-town](src/smrti_town/README.md) is a city-builder where ev
 ```bash
 smrti serve town   # simulation + frontend on :8430
 ```
-
-The published package ships `smrti` only, so this one command needs the repo: clone it and `pip install -e .`.
 
 ## Testing
 

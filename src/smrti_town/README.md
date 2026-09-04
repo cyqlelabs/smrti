@@ -11,14 +11,14 @@ Point it at a local LLM and it generates the people. Watch it run in an isometri
 ## Quick start
 
 ```bash
-# Install from repo root
-pip install -e .
+# Install
+pip install smrti
 
 # Start the simulation server (port 8430)
 smrti serve town
 
 # Or directly
-PYTHONPATH=src python -m uvicorn smrti_town.server:app --port 8430
+python -m uvicorn smrti_town.server:app --port 8430
 ```
 
 Open `http://localhost:8430`. The game begins with the founding sequence:
@@ -167,6 +167,6 @@ Every citizen reads from their own space plus `World_Space` and `Space_Culture`,
 
 ## Relationship to Smrti
 
-`smrti-town` is not packaged separately — it lives in `src/smrti_town/` alongside `src/smrti/` and imports the `Smrti` class directly. Every citizen owns a `Smrti` instance.
+`smrti-town` ships inside the `smrti` wheel — it lives in `src/smrti_town/` alongside `src/smrti/` and imports the `Smrti` class directly. Every citizen owns a `Smrti` instance.
 
 See the [Smrti README](../../README.md) for the full memory engine documentation.

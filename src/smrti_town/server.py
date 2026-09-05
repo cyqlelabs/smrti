@@ -285,6 +285,23 @@ def _practice(citizen: Any, place_name: str, topology: Any, delta: float) -> Non
         citizen.skills.learn(category, delta, building_type=building_key)
 
 
+def _immigration_pull(
+    pop_manager: Any, citizens: list[Any], economy: Any, topology: Any,
+) -> tuple[dict[str, float], list[str]]:
+    """What draws a newcomer: the pull factors over the town's places, and
+    the housing kinds with a bed free. The tick used to compute this inline
+    and called the pull-factor computation without the places, from the day
+    it was written, so every immigration check raised and nobody arrived."""
+    places = list(topology.places.values())
+    pull = pop_manager.compute_pull_factors(citizens, places, economy)
+    housing: set[str] = set()
+    for p in places:
+        bdef = BUILDING_CATALOG.get(p.building_key or "")
+        if bdef and bdef.provides_housing and len(p._home_of) < bdef.capacity:
+            housing.add(p.building_key)
+    return pull, sorted(housing)
+
+
 def _fill_open_jobs(citizens: list[Any], topology: Any) -> None:
     """Put idle adults into the staff slots buildings still have open, as a
     new building does on placement — otherwise an immigrant who arrived
@@ -954,13 +971,7 @@ async def _tick_loop() -> None:
                     for name in pop_manager.check_departure(alive_citizens, scores):
                         experiences += await _depart(by_name[name], alive_citizens)
                         alive_citizens = [c for c in alive_citizens if c.name != name]
-                    available_housing = list({
-                        getattr(p, "building_key", None)
-                        for p in topology.places.values()
-                        if getattr(p, "building_key", None)
-                        and getattr(BUILDING_CATALOG.get(getattr(p, "building_key", None)), "provides_housing", False)
-                    })
-                    pull_factors = pop_manager.compute_pull_factors(alive_citizens, economy, topology)
+                    pull_factors, available_housing = _immigration_pull(pop_manager, alive_citizens, economy, topology)
                     spec = pop_manager.check_immigration(pull_factors, available_housing)
                     if spec:
                         housing_type = spec["housing_type"]

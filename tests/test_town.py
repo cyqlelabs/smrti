@@ -354,6 +354,24 @@ class TestTownLoops:
         assert alice.workplace is not None and bob.workplace is not None
         assert {alice.workplace, bob.workplace} <= {"Tavern", "Bakery", "Farm"}
 
+    def test_immigration_reads_the_town_it_is_drawn_to(self, citizen_pair, town):
+        from smrti_town.economy import EconomyManager
+        from smrti_town.population import PopulationManager
+        from smrti_town.server import _immigration_pull
+
+        alice, bob = citizen_pair
+        town.add_place(Place(name="Cottage", place_type="home", building_key="cottage"))
+        economy = EconomyManager()
+        for c in (alice, bob):
+            economy.register_citizen(c.name)
+        pull, housing = _immigration_pull(PopulationManager(), [alice, bob], economy, town)
+        assert set(pull) == {"housing_available", "employment_available", "services_quality", "reputation"}
+        assert housing == ["cottage"]
+        # a cottage holds two; full, it draws nobody
+        town.assign_home("Alice", "Cottage")
+        town.assign_home("Bob", "Cottage")
+        assert _immigration_pull(PopulationManager(), [alice, bob], economy, town)[1] == []
+
     def test_a_skilled_saver_petitions_for_a_business(self, citizen_pair, tmp_db, town):
         from smrti_town.economy import EconomyManager
         from smrti_town.petition import PetitionManager

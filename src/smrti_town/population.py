@@ -93,7 +93,6 @@ class PopulationManager:
         citizens: list,
         buildings: list,
         economy,
-        topology,
     ) -> dict[str, float]:
         """Compute attractiveness scores for potential immigrants.
 

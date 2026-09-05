@@ -5,7 +5,11 @@ from __future__ import annotations
 import math
 import random
 
+from typing import Any
+
 from smrti_town.config import (
+    BIRTH_PROBABILITY,
+    BUILDING_CATALOG,
     DEATH_LOW_ENERGY_MULT,
     ELDER_DEATH_PROB_PER_TICK,
     HOURS_PER_YEAR,
@@ -203,8 +207,8 @@ def create_child(
 # ── Relationship progression ───────────────────────────────────────────
 
 # Ordered relationship tiers for progression/regression.
-_REL_TIERS = ["acquaintance", "friend", "close_friend", "romantic", "married"]
-_REL_INDEX = {r: i for i, r in enumerate(_REL_TIERS)}
+RELATIONSHIP_TIERS = ["acquaintance", "friend", "close_friend", "romantic", "married"]
+_TIER_INDEX = {r: i for i, r in enumerate(RELATIONSHIP_TIERS)}
 
 
 def check_relationship_progression(
@@ -212,71 +216,45 @@ def check_relationship_progression(
     citizen_b,
     interaction_count: int,
     shared_valence: float,
+    lti: float = 0.0,
+    shared_episodes: int = 0,
+    years_together: float = 0.0,
 ) -> str | None:
     """Check RELATIONSHIP_GATES to see if a pair should progress.
 
     *interaction_count* — total interactions between the pair.
-    *shared_valence* — average valence of shared memories (-1 to 1).
+    *shared_valence* — the lower of the two moods the pair hold of each other.
+    *lti* — the long-term importance the memory graph gives their memories
+    of each other; *shared_episodes* how many such memories each holds.
+    *years_together* — sim years since the current tier was reached.
 
     Returns the new relationship type if progression is warranted, else None.
     """
-    name_a = getattr(citizen_a, "name", "")
     name_b = getattr(citizen_b, "name", "")
     rels_a = getattr(citizen_a, "relationships", {})
     current_rel = rels_a.get(name_b, "acquaintance")
-    current_idx = _REL_INDEX.get(current_rel, 0)
+    current_idx = _TIER_INDEX.get(current_rel, 0)
 
-    if current_idx >= len(_REL_TIERS) - 1:
+    if current_idx >= len(RELATIONSHIP_TIERS) - 1:
         return None  # Already at max tier.
 
-    next_tier = _REL_TIERS[current_idx + 1]
+    next_tier = RELATIONSHIP_TIERS[current_idx + 1]
     gate = RELATIONSHIP_GATES.get(next_tier, {})
 
-    # Check interaction count.
-    if "interaction_count" in gate:
-        if interaction_count < gate["interaction_count"]:
-            return None
-
-    # Check valence thresholds.
-    if "valence" in gate:
-        if shared_valence < gate["valence"]:
-            return None
-    if "mutual_valence" in gate:
-        if shared_valence < gate["mutual_valence"]:
-            return None
-
-    # Friendship LTI checks — we approximate LTI as a function of
-    # interaction count and valence, since the actual LTI is in the
-    # Smrti memory graph. Gate values are thresholds on 0-1 scale.
-    if "friend_lti" in gate:
-        approx_lti = min(1.0, interaction_count / 20.0 * max(0, shared_valence))
-        if approx_lti < gate["friend_lti"]:
-            return None
-    if "close_friend_lti" in gate:
-        approx_lti = min(1.0, interaction_count / 30.0 * max(0, shared_valence))
-        if approx_lti < gate["close_friend_lti"]:
-            return None
-    if "romantic_lti" in gate:
-        approx_lti = min(1.0, interaction_count / 40.0 * max(0, shared_valence))
-        if approx_lti < gate["romantic_lti"]:
-            return None
-
-    # Shared episodes check.
-    if "shared_episodes" in gate:
-        # Approximate: each positive interaction is roughly a shared episode.
-        est_shared = int(interaction_count * max(0, shared_valence))
-        if est_shared < gate["shared_episodes"]:
-            return None
-
-    # Cohabitation check — requires both living in the same home.
+    if interaction_count < gate.get("interaction_count", 0):
+        return None
+    if shared_valence < max(gate.get("valence", -1.0), gate.get("mutual_valence", -1.0)):
+        return None
+    if lti < max(gate.get(k, 0.0) for k in ("friend_lti", "close_friend_lti", "romantic_lti")):
+        return None
+    if shared_episodes < gate.get("shared_episodes", 0):
+        return None
     if "cohabitation_years" in gate:
         home_a = getattr(citizen_a, "home", None)
-        home_b = getattr(citizen_b, "home", None)
-        if not home_a or home_a != home_b:
+        if not home_a or home_a != getattr(citizen_b, "home", None):
             return None
-        # Approximate cohabitation time from interaction count
-        # (assumes ~1 interaction per tick period).
-        # This is a rough heuristic; the engine should track actual cohabitation.
+        if years_together < gate["cohabitation_years"]:
+            return None
 
     return next_tier
 
@@ -300,7 +278,7 @@ def check_relationship_regression(
     name_b = getattr(citizen_b, "name", "")
     rels_a = getattr(citizen_a, "relationships", {})
     current_rel = rels_a.get(name_b, "acquaintance")
-    current_idx = _REL_INDEX.get(current_rel, 0)
+    current_idx = _TIER_INDEX.get(current_rel, 0)
 
     if current_idx <= 0:
         return None  # Already at lowest tier.
@@ -314,6 +292,89 @@ def check_relationship_regression(
 
     threshold = regression_thresholds.get(current_rel, 5)
     if negative_episodes >= threshold:
-        return _REL_TIERS[current_idx - 1]
+        return RELATIONSHIP_TIERS[current_idx - 1]
 
     return None
+
+
+# ── The town's turn ─────────────────────────────────────────────────────
+
+def _mood(atoms: list[Any]) -> float:
+    return sum(a.valence.valence for a in atoms) / len(atoms)
+
+
+def update_relationships(citizens: list[Any], hours: float) -> list[tuple[Any, Any, str, str]]:
+    """Move every acquainted pair up or down the tiers from what each
+    remembers of the other. Returns ``(a, b, old_tier, new_tier)`` per change.
+
+    The graph is read directly: the tier gates take the lower of the two
+    moods, the long-term importance the epoch has given their memories of
+    each other, and how many such memories each holds. Quarrels that
+    outnumber the good times by the regression threshold pull a pair down.
+    """
+    by_name = {c.name: c for c in citizens}
+    seen: set[frozenset[str]] = set()
+    changes = []
+    for a in citizens:
+        for other in list(a.interaction_counts):
+            b = by_name.get(other)
+            key = frozenset((a.name, other))
+            if b is None or key in seen:
+                continue
+            seen.add(key)
+            about_b = a.memories_about(b.name, top_k=20, boost=True)
+            about_a = b.memories_about(a.name, top_k=20, boost=True)
+            if not about_b or not about_a:
+                continue
+            both = about_a + about_b
+            negatives = sum(1 for m in both if m.valence.own < -0.5)
+            positives = sum(1 for m in both if m.valence.own > 0)
+            interactions = max(a.interaction_counts.get(b.name, 0), b.interaction_counts.get(a.name, 0))
+            current = a.relationships.get(b.name, "acquaintance")
+            since = a.relationship_since.get(b.name, hours)
+            new = check_relationship_regression(a, b, max(0, negatives - positives)) or check_relationship_progression(
+                a, b, interactions,
+                shared_valence=min(_mood(about_a), _mood(about_b)),
+                lti=min(max(m.attention.lti for m in about_b), max(m.attention.lti for m in about_a)),
+                shared_episodes=min(len(about_a), len(about_b)),
+                years_together=(hours - since) / HOURS_PER_YEAR,
+            )
+            if new and new != current:
+                for x, y in ((a, b), (b, a)):
+                    x.relationships[y.name] = new
+                    x.relationship_since[y.name] = hours
+                changes.append((a, b, current, new))
+    return changes
+
+
+def check_births(citizens: list[Any], pop_manager: Any, topology: Any, hours: float) -> list[dict]:
+    """Child specs for the couples that may have one this check: eligible by
+    the growth gate, together for the gate's years, with room at home, and
+    lucky this time."""
+    by_name = {c.name: c for c in citizens}
+    names = set(by_name)
+    min_hours = REPRODUCTION_GATE.get("min_relationship_years", 1) * HOURS_PER_YEAR
+    specs = []
+    for name_a, name_b in pop_manager.check_natural_growth(citizens):
+        a, b = by_name[name_a], by_name[name_b]
+        since = a.relationship_since.get(b.name)
+        if since is None or hours - since < min_hours:
+            continue
+        if not a.home or a.home != b.home:
+            continue
+        home = topology.places.get(a.home)
+        bdef = BUILDING_CATALOG.get(home.building_key) if home and home.building_key else None
+        if bdef and len(home._home_of) >= bdef.capacity:
+            continue
+        if random.random() > BIRTH_PROBABILITY:
+            continue
+        spec = create_child(a, b, names)
+        names.add(spec["name"])
+        specs.append(spec)
+    return specs
+
+
+def satisfaction(citizen: Any) -> float:
+    """1.0 when every need of the citizen's life stage is met, 0.0 when all are at their worst."""
+    needs = LIFE_STAGES.get(citizen.life_stage, LIFE_STAGES["adult"])["needs"]
+    return 1.0 - sum(citizen.needs.need_urgency(n) for n in needs) / len(needs)

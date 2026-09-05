@@ -35,15 +35,26 @@ from smrti_town.config import (
     CELL_SIZE,
     COUNCIL_MEETING_INTERVAL_HOURS,
     COUNCIL_ROLES,
+    CRISIS_DURATION_HOURS,
+    CRISIS_EVENTS,
+    CULTURE_INTERVAL_TICKS,
+    ENTREPRENEURSHIP_SAVINGS_THRESHOLD,
+    EXPERIENCE_VALENCE,
     IMMIGRATION_CHECK_INTERVAL_HOURS,
     MEMORY_REFLECT_INTERVAL_TICKS,
+    PETITION_CHECK_INTERVAL_HOURS,
     PHASE_GAMEPLAY,
     PHASE_GAME_OVER,
     PHASE_OPENING_CHOOSE_MAYOR,
     PHASE_OPENING_COUNCIL,
     PHASE_OPENING_PLACE_HALL,
+    SKILL_CATEGORIES,
     STARTING_TREASURY,
+    TICK_ROUTINE,
 )
+from smrti_town import persistence
+from smrti_town.culture import run_culture_pass
+from smrti_town.lifecycle import RELATIONSHIP_TIERS, check_births, satisfaction, update_relationships
 from smrti_town.llm import LLMClient, LLMSettings
 from smrti_town.spatial import Place
 from smrti_town.worldgen import generate_opening
@@ -86,8 +97,10 @@ _game: dict[str, Any] = {
     "citizens": [],
     "last_meeting_tick": 0,
     "last_immigration_check": 0,
+    "last_petition_check": 0.0,
     "pending_meeting": None,
     "dialogue_last_tick": {},  # speaker -> tick when last dialogue was submitted
+    "culture_task": None,  # the running culture pass, if one is
 }
 
 _llm_settings = LLMSettings()
@@ -111,6 +124,485 @@ async def broadcast(message: dict) -> None:
             dead.append(ws)
     for ws in dead:
         _connected_clients.discard(ws)
+
+
+def _memory_dict(result: Any) -> dict:
+    """One recalled memory as the REST routes report it.
+
+    The text, truth and tone live on ``result.atom``. Read off the result
+    itself, as these routes did, every memory came back as an empty string
+    and a zero.
+    """
+    atom = result.atom
+    return {
+        "content": atom.content or "",
+        "label": atom.label,
+        "type": atom.type.value,
+        "probability": atom.truth.probability,
+        "confidence": atom.truth.confidence,
+        "valence": atom.valence.valence,
+    }
+
+
+def _write_experiences(experiences: list[tuple[Any, str, float]]) -> None:
+    """Write one tick's resolved actions into the citizens who lived them."""
+    for citizen, text, valence in experiences:
+        try:
+            citizen.experience(text, valence)
+        except Exception:
+            log.debug("experience() failed for %s", citizen.name, exc_info=True)
+
+
+def _resolve_actions(
+    actions: list[dict], alive_citizens: list[Any], economy: Any, topology: Any, delta: float
+) -> list[tuple[Any, str, float]]:
+    """Apply each decided action — need satisfaction and economic effect —
+    and return the episode each citizen will remember it by.
+
+    This is the core feedback loop: what a citizen lived through, with the
+    tone the outcome had, is what perceive/decide read next tick.
+    """
+    if not economy:
+        return []
+    experiences: list[tuple[Any, str, float]] = []
+    citizen_map = {c.name: c for c in alive_citizens}
+    for entry in actions:
+        cname = entry["citizen"]
+        act = entry["action"]
+        atype = act.get("type") if isinstance(act, dict) else getattr(act, "type", None)
+        target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)
+        c = citizen_map.get(cname)
+        if c is None:
+            continue
+        needs = getattr(c, "needs", None)
+        if needs is None:
+            continue
+        # Ensure citizen has a wallet
+        economy.register_citizen(c.name)
+
+        if atype == ACTION_MOVE:
+            if target and topology and target in topology.places:
+                c.location = target
+                c.world_pos = _world_pos_for_place(topology.places[target])
+            continue
+
+        if atype == ACTION_EAT:
+            place = topology.places.get(target) if topology and target else None
+            bkey = place.building_key if place else None
+            bdef = BUILDING_CATALOG.get(bkey) if bkey else None
+            if bdef and bdef.provides_food:
+                if economy.citizen_buy(c.name, "food", building=target):
+                    experiences.append(
+                        (c, f"{c.name} had a meal at {target}", EXPERIENCE_VALENCE["meal"])
+                    )
+                else:
+                    experiences.append((
+                        c,
+                        f"{c.name} could not afford a meal at {target}",
+                        EXPERIENCE_VALENCE["unaffordable"],
+                    ))
+                needs.satisfy("hunger")
+            else:
+                needs.satisfy("hunger", 50.0)
+
+        elif atype == ACTION_WORK:
+            skill_level = 0.0
+            if hasattr(c, "skills") and hasattr(c.skills, "skills"):
+                s = c.skills.skills
+                skill_level = max(s.get("labour", 0.0), s.get("farming", 0.0),
+                                  s.get("commerce", 0.0), s.get("crafting", 0.0))
+            economy.citizen_earn(c.name, delta, employed=c.workplace is not None,
+                                 skill_level=skill_level)
+            needs.satisfy("purpose", delta * 8.0)
+            if target:
+                _practice(c, target, topology, delta)
+                experiences.append(
+                    (c, f"{c.name} worked at {target}", EXPERIENCE_VALENCE["work"])
+                )
+
+        elif atype == ACTION_SLEEP:
+            # has_home handled by tick() via citizen.home; homeless sleeping
+            # at an emergency shelter gets partial relief here.
+            if c.home is None:
+                needs.satisfy("shelter", delta * 2.0)
+
+        elif atype == ACTION_STUDY:
+            needs.satisfy("education")
+            if target:
+                _practice(c, target, topology, delta)
+                experiences.append(
+                    (c, f"{c.name} studied at {target}", EXPERIENCE_VALENCE["study"])
+                )
+
+        elif atype == ACTION_INTERACT:
+            reason = (act.get("metadata", {}) or {}).get("reason", "") if isinstance(act, dict) else ""
+            if reason == "health":
+                needs.satisfy("health", delta * 15.0)
+                if target:
+                    experiences.append(
+                        (c, f"{c.name} was treated at {target}", EXPERIENCE_VALENCE["treatment"])
+                    )
+
+        elif atype in (ACTION_PLAY, ACTION_PRAY):
+            needs.satisfy("culture")
+            if target:
+                experiences.append(
+                    (c, f"{c.name} spent time at {target}", EXPERIENCE_VALENCE["leisure"])
+                )
+
+        elif atype == ACTION_TALK:
+            needs.satisfy("social", 15.0)
+            other = citizen_map.get(target) if target else None
+            if other is not None:
+                tone = c.talk_tone(other)
+                verb = "quarrelled" if tone < 0 else "talked"
+                c.record_interaction(other.name)
+                other.record_interaction(c.name)
+                experiences.append((c, f"{c.name} {verb} with {other.name} at {c.location}", tone))
+                experiences.append((other, f"{other.name} {verb} with {c.name} at {c.location}", tone))
+
+        elif atype == ACTION_SHOP:
+            if economy.citizen_buy(c.name, "goods", building=target):
+                needs.satisfy("social", 10.0)
+                if target:
+                    experiences.append(
+                        (c, f"{c.name} bought goods at {target}", EXPERIENCE_VALENCE["purchase"])
+                    )
+            elif target:
+                experiences.append((
+                    c,
+                    f"{c.name} could not afford goods at {target}",
+                    EXPERIENCE_VALENCE["unaffordable"],
+                ))
+    return experiences
+
+
+def _practice(citizen: Any, place_name: str, topology: Any, delta: float) -> None:
+    """Skills grow with the hours spent at a building that teaches them."""
+    place = topology.places.get(place_name) if topology else None
+    building_key = place.building_key if place else None
+    for category in SKILL_CATEGORIES:
+        citizen.skills.learn(category, delta, building_type=building_key)
+
+
+def _fill_open_jobs(citizens: list[Any], topology: Any) -> None:
+    """Put idle adults into the staff slots buildings still have open, as a
+    new building does on placement — otherwise an immigrant who arrived
+    after the last building stayed unemployed for good."""
+    workers: dict[str, int] = {}
+    for c in citizens:
+        if c.workplace:
+            workers[c.workplace] = workers.get(c.workplace, 0) + 1
+    idle = [c for c in citizens if c.workplace is None and c.can_work and c.life_stage == "adult"]
+    for place in topology.places.values():
+        bdef = BUILDING_CATALOG.get(place.building_key or "")
+        if not bdef or bdef.revenue_per_hour <= 0:
+            continue
+        while idle and workers.get(place.name, 0) < bdef.staff_required:
+            c = idle.pop()
+            c.workplace = place.name
+            topology.assign_workplace(c.name, place.name)
+            workers[place.name] = workers.get(place.name, 0) + 1
+
+
+def _business_petitions(pm: Any, citizens: list[Any], economy: Any, topology: Any, hours: float) -> list:
+    """A citizen with the savings and the commerce skill to open a business
+    petitions for the first commercial building the town can host. Approval
+    hands the player the building to place; placement makes them its owner."""
+    built = {p.building_key for p in topology.places.values() if p.building_key}
+    population = len(citizens)
+    petitioners = {p.source for p in pm.petitions if p.status == "active"}
+    new = []
+    for c in citizens:
+        if c.name in petitioners or c.life_stage != "adult":
+            continue
+        if not economy.check_entrepreneurship(c.name, c.skills.skills):
+            continue
+        for bkey, bdef in BUILDING_CATALOG.items():
+            if (bdef.category != "commercial" or bkey in built
+                    or bdef.unlock_population > population
+                    or any(need not in built for need in bdef.unlock_buildings)):
+                continue
+            new.append(pm.add_petition(
+                text=f"{c.name} has the savings and the trade to open a {bkey.replace('_', ' ')}.",
+                source=c.name,
+                category="commerce",
+                building_suggestion=bkey,
+                urgency=0.4,
+                current_hours=hours,
+            ))
+            break
+    return new
+
+
+def _petitions_payload(pm: Any) -> list[dict]:
+    """Petitions as the panel renders them. List position is the index the
+    approve and dismiss routes take, so every petition is listed whatever
+    its status and the panel hides the ones no longer pending."""
+    return [
+        {
+            "index": i,
+            "building_type": p.building_suggestion or p.category,
+            "description": p.text,
+            "source": p.source,
+            "signatures": len(p.signatures),
+            "urgency": round(p.urgency, 2),
+            "status": "pending" if p.status == "active" else p.status,
+        }
+        for i, p in enumerate(pm.petitions)
+    ]
+
+
+def _demolish(place_name: str) -> None:
+    """Take a building off the grid, the topology and the ledger. Whoever
+    lived or worked there loses it, and anyone standing there is moved to
+    the town hall."""
+    topology, gridmap, economy = _game.get("topology"), _game.get("gridmap"), _game.get("economy")
+    place = topology.places.get(place_name) if topology else None
+    if place is None:
+        return
+    if gridmap:
+        gridmap.demolish(place.grid_x, place.grid_y)
+    topology.remove_place(place_name)
+    if economy:
+        economy.remove_building(place_name)
+    refuge = "Town Hall" if "Town Hall" in topology.places else next(iter(topology.places), None)
+    for c in _game.get("citizens", []):
+        if getattr(c, "home", None) == place_name:
+            c.home = None
+        if getattr(c, "workplace", None) == place_name:
+            c.workplace = None
+        if getattr(c, "location", None) == place_name and refuge:
+            c.location = refuge
+            c.world_pos = _world_pos_for_place(topology.places[refuge])
+
+
+async def _roll_events(
+    manager: Any, citizens: list[Any], topology: Any, economy: Any, calendar: Any, delta: float, tick: int
+) -> list[tuple[Any, str, float]]:
+    """Resolve expired crises, then roll the tick's happenings: small events
+    where citizens are, and a crisis when none is active. One roll per
+    routine tick's worth of sim time, so the director's pacing does not
+    change how eventful a day is. Returns what the affected remember."""
+    by_name = {c.name: c for c in citizens}
+    experiences: list[tuple[Any, str, float]] = []
+    for crisis in list(manager.active_crises):
+        if calendar.total_hours < crisis.expires_hours:
+            continue
+        crisis_id = crisis.event_type.removeprefix("crisis_")
+        mitigator = next((d.get("mitigated_by") for d in CRISIS_EVENTS if d["id"] == crisis_id), None)
+        manager.resolve_crisis(crisis, bool(mitigator and topology.places_by_building(mitigator)))
+        await broadcast({
+            "type": "event",
+            "event_type": f"{crisis.event_type}_over",
+            "description": f"The {crisis_id.replace('_', ' ')} is over.",
+        })
+    if _random.random() > min(1.0, delta / TICK_ROUTINE):
+        return experiences
+    by_place: dict[str, list[str]] = {}
+    for c in citizens:
+        if c.location:
+            by_place.setdefault(c.location, []).append(c.name)
+    for event in manager.roll_sporadic(by_place, tick):
+        experiences += manager.apply_effects(event, by_name, economy)
+        await broadcast({
+            "type": "event",
+            "event_type": event.event_type,
+            "description": event.description,
+            "citizens": event.affected_citizens,
+        })
+    if not manager.active_crises:
+        built = [p.building_key for p in topology.places.values() if p.building_key]
+        crisis = manager.roll_crisis({
+            "existing_buildings": built,
+            "population": len(citizens),
+            "treasury": economy.treasury if economy else 0,
+            "citizens": citizens,
+            "building_places": [
+                p.name for p in topology.places.values() if p.building_key and p.building_key != "town_hall"
+            ],
+        }, tick)
+        if crisis is not None:
+            crisis.expires_hours = calendar.total_hours + CRISIS_DURATION_HOURS
+            for place_name in crisis.affected_buildings:
+                _demolish(place_name)
+                await broadcast({"type": "building_demolished", "place_name": place_name})
+            experiences += manager.apply_effects(crisis, by_name, economy)
+            await broadcast({
+                "type": "crisis",
+                "crisis_type": crisis.event_type,
+                "description": crisis.description,
+                "citizens": crisis.affected_citizens,
+                "buildings": crisis.affected_buildings,
+            })
+    return experiences
+
+
+def _unassign(citizen: Any) -> None:
+    """Free a citizen's home, workplace and wallet."""
+    topology, economy = _game.get("topology"), _game.get("economy")
+    if topology:
+        topology.unassign_home(citizen.name)
+        topology.unassign_workplace(citizen.name)
+    if economy:
+        economy.remove_citizen(citizen.name)
+
+
+def _close_to(citizen: Any, citizens: list[Any]) -> list[Any]:
+    """Everyone who counts *citizen* as more than an acquaintance."""
+    return [
+        c for c in citizens
+        if c is not citizen and c.relationships.get(citizen.name, "acquaintance") != "acquaintance"
+    ]
+
+
+async def _bury(citizen: Any, citizens: list[Any]) -> list[tuple[Any, str, float]]:
+    """A death frees what the citizen held; those close to them remember it."""
+    _unassign(citizen)
+    await broadcast({
+        "type": "event",
+        "event_type": "death",
+        "description": f"{citizen.name} has died at {int(citizen.age_years)}.",
+        "citizens": [citizen.name],
+    })
+    return [(c, f"{citizen.name} died", EXPERIENCE_VALENCE["death"]) for c in _close_to(citizen, citizens)]
+
+
+async def _depart(citizen: Any, citizens: list[Any]) -> list[tuple[Any, str, float]]:
+    """A citizen leaves town for good; their memory graph stays in the file."""
+    _unassign(citizen)
+    _game["citizens"].remove(citizen)
+    await broadcast({
+        "type": "event",
+        "event_type": "departure",
+        "description": f"{citizen.name} has left town.",
+        "citizens": [citizen.name],
+    })
+    return [(c, f"{citizen.name} left town", EXPERIENCE_VALENCE["departure"]) for c in _close_to(citizen, citizens)]
+
+
+def _born(spec: dict, parent_a: Any, parent_b: Any) -> Any:
+    """Bring a child into the town on its parents' blended personality."""
+    from smrti_town.agent import Citizen
+
+    child = Citizen(
+        name=spec["name"],
+        age_years=0.0,
+        personality=spec["personality"],
+        location=parent_a.home or parent_a.location,
+        db_path=_game.get("_db_path", os.path.expanduser("~/.smrti/town.db")),
+        tenant_id=_game.get("_tenant_id", "millbrook"),
+        parents=(parent_a.name, parent_b.name),
+        traits=spec["traits"],
+        home=parent_a.home,
+    )
+    child.inherit(spec["personality_params"])
+    topology, economy = _game.get("topology"), _game.get("economy")
+    if topology and child.home in topology.places:
+        topology.assign_home(child.name, child.home)
+        child.world_pos = _world_pos_for_place(topology.places[child.home])
+    if economy:
+        economy.register_citizen(child.name, starting_wallet=0)
+    _game["citizens"].append(child)
+    return child
+
+
+def _save_game() -> None:
+    """Snapshot the town into its own database, so a restart resumes it."""
+    world = _game.get("world_smrti")
+    if world is None or _game["phase"] != PHASE_GAMEPLAY:
+        return
+    persistence.save(world.db, _game.get("_tenant_id", "millbrook"), persistence.snapshot(_game))
+
+
+def _start_dialogue_queue() -> None:
+    from smrti_town.dialogue_queue import DialogueQueue
+
+    dq = DialogueQueue(
+        llm_client=_llm_client,
+        broadcast_fn=broadcast,
+        queue_size=_llm_settings.dialogue_queue_size,
+        batch_size=_llm_settings.dialogue_batch_size,
+        stale_ticks=_llm_settings.dialogue_stale_ticks,
+    )
+    dq.start()
+    _game["dialogue_queue"] = dq
+
+
+async def _resume_saved_game() -> None:
+    """Pick the town up where the last process left it, if it saved one."""
+    from smrti_town.worldgen import _create_culture_smrti, _create_world_smrti
+
+    db_path = os.path.expanduser(os.environ.get("SMRTI_TOWN_DB", "~/.smrti/town.db"))
+    tenant_id = os.environ.get("SMRTI_TOWN_TENANT", "millbrook")
+    if not os.path.exists(db_path):
+        return
+    world = _create_world_smrti(db_path, tenant_id)
+    data = persistence.load(world.db, tenant_id)
+    if not data:
+        return
+    persistence.restore(_game, data, db_path, tenant_id)
+    _game["world_smrti"] = world
+    _game["culture_smrti"] = _create_culture_smrti(db_path, tenant_id)
+    _game["_db_path"] = db_path
+    _game["_tenant_id"] = tenant_id
+    _start_dialogue_queue()
+    _start_engine()
+    log.info("Resumed the saved town: %d citizens at tick %d", len(_game["citizens"]), _game["tick_count"])
+
+
+async def _consolidate(alive_citizens: list[Any], calendar: Any, tick: int) -> list[tuple[Any, str, float]]:
+    """Every MEMORY_REFLECT_INTERVAL_TICKS ticks: each citizen's graph runs an
+    epoch (skipping graphs that saw nothing, the rule the servers' reflect
+    loop applies), relationships move on what each remembers of the other,
+    the culture pass runs every CULTURE_INTERVAL_TICKS, and the town is
+    saved. Returns what the relationship changes are remembered by."""
+    loop = asyncio.get_running_loop()
+    experiences: list[tuple[Any, str, float]] = []
+    for c in alive_citizens:
+        engine = getattr(c, "smrti", None)
+        if engine is None or not getattr(engine, "ops_since_reflect", 1):
+            continue
+        try:
+            await loop.run_in_executor(None, engine.reflect)
+        except Exception:
+            log.debug("reflect() failed for %s", c.name, exc_info=True)
+    # Relationships move on the same cadence, from what each
+    # citizen remembers of the other.
+    for a, b, old, new in await loop.run_in_executor(
+        None, update_relationships, alive_citizens, calendar.total_hours
+    ):
+        closer = RELATIONSHIP_TIERS.index(new) > RELATIONSHIP_TIERS.index(old)
+        text = f"{a.name} and {b.name} are now {new.replace('_', ' ')}"
+        tone = EXPERIENCE_VALENCE["closer" if closer else "apart"]
+        experiences += [(a, text, tone), (b, text, tone)]
+        await broadcast({
+            "type": "event", "event_type": "relationship",
+            "description": f"{text}.", "citizens": [a.name, b.name],
+        })
+    # The town's culture, less often, and not awaited: bridging two
+    # graphs is seconds of pure-Python cosines.
+    culture_task = _game.get("culture_task")
+    if tick % CULTURE_INTERVAL_TICKS == 0 and (culture_task is None or culture_task.done()):
+        _game["culture_task"] = loop.run_in_executor(
+            None, run_culture_pass, list(alive_citizens), _game.get("culture_smrti")
+        )
+    _save_game()
+    return experiences
+
+
+async def _draft_petitions(pm: Any, alive_citizens: list[Any], topology: Any, economy: Any, calendar: Any) -> None:
+    """Once a sim-day: fill open staff slots, expire old petitions, draft the
+    needs the town shares and the businesses its savers could open, merge
+    duplicates, and tell the panel when anything is new."""
+    _game["last_petition_check"] = calendar.total_hours
+    _fill_open_jobs(alive_citizens, topology)
+    pm.expire_old(calendar.total_hours)
+    new_petitions = pm.check_citizen_needs(alive_citizens, topology, economy, calendar.total_hours)
+    new_petitions += _business_petitions(pm, alive_citizens, economy, topology, calendar.total_hours)
+    pm.merge_similar()
+    if new_petitions:
+        await broadcast({"type": "petition_update", "status": "new", "petitions": _petitions_payload(pm)})
 
 
 def _world_pos_for_place(place: "Place") -> tuple[float, float]:
@@ -151,8 +643,14 @@ async def _tick_loop() -> None:
             tick = _game["tick_count"]
 
             alive_citizens = [c for c in citizens if getattr(c, "alive", True)]
+            # What the tick's citizens will remember it by; written once at the end.
+            experiences: list[tuple[Any, str, float]] = []
 
-            crime_rate = 0.0
+            event_manager = _game.get("event_manager")
+            crime_rate = (
+                event_manager.crime_rate(alive_citizens, topology)
+                if event_manager is not None and topology else 0.0
+            )
 
             # Phase 2: Perceive + Decide
             # Needs are ticked AFTER decide so tick_state uses the current
@@ -193,90 +691,27 @@ async def _tick_loop() -> None:
                     nearby = max(0, location_counts.get(loc, 1) - 1) if loc else 0
                     c.tick_state(delta, crime_rate=crime_rate, nearby_count=nearby)
 
-            # Phase 2.2: Consolidate memories. Each citizen's graph runs an
-            # epoch every MEMORY_REFLECT_INTERVAL_TICKS ticks, off the loop
-            # thread; a citizen whose graph saw nothing since its last epoch
-            # is skipped, the same rule the servers' reflect loop applies.
+            # Phase 2.15: The dead free their home and work; those close to
+            # them remember it.
+            for c in alive_citizens:
+                if not c.alive:
+                    experiences += await _bury(c, alive_citizens)
+            alive_citizens = [c for c in alive_citizens if c.alive]
+
+            # Phase 2.2: Consolidate memories, relationships, culture; save.
             if tick % MEMORY_REFLECT_INTERVAL_TICKS == 0:
-                loop = asyncio.get_running_loop()
-                for c in alive_citizens:
-                    engine = getattr(c, "smrti", None)
-                    if engine is None or not getattr(engine, "ops_since_reflect", 1):
-                        continue
-                    try:
-                        await loop.run_in_executor(None, engine.reflect)
-                    except Exception:
-                        log.debug("reflect() failed for %s", c.name, exc_info=True)
+                experiences += await _consolidate(alive_citizens, calendar, tick)
 
-            # Phase 2.5: Action resolution — execute decided actions
-            # This is the core feedback loop: action → need satisfaction + economic effect.
-            if economy:
-                citizen_map = {c.name: c for c in alive_citizens}
-                for entry in actions:
-                    cname = entry["citizen"]
-                    act = entry["action"]
-                    atype = act.get("type") if isinstance(act, dict) else getattr(act, "type", None)
-                    c = citizen_map.get(cname)
-                    if c is None:
-                        continue
-                    needs = getattr(c, "needs", None)
-                    if needs is None:
-                        continue
-                    # Ensure citizen has a wallet
-                    economy.register_citizen(c.name)
+            # Phase 2.5: Action resolution — need satisfaction, economic
+            # effect, and the episode the citizen remembers it by.
+            experiences += _resolve_actions(actions, alive_citizens, economy, topology, delta)
 
-                    if atype == ACTION_MOVE:
-                        target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)
-                        if target and topology and target in topology.places:
-                            c.location = target
-                            c.world_pos = _world_pos_for_place(topology.places[target])
-                        continue
-
-                    if atype == ACTION_EAT:
-                        target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)
-                        place = topology.places.get(target) if topology and target else None
-                        bkey = place.building_key if place else None
-                        bdef = BUILDING_CATALOG.get(bkey) if bkey else None
-                        if bdef and bdef.provides_food:
-                            economy.citizen_buy(c.name, "food", building=target)
-                            needs.satisfy("hunger")
-                        else:
-                            needs.satisfy("hunger", 50.0)
-
-                    elif atype == ACTION_WORK:
-                        skill_level = 0.0
-                        if hasattr(c, "skills") and hasattr(c.skills, "skills"):
-                            s = c.skills.skills
-                            skill_level = max(s.get("labour", 0.0), s.get("farming", 0.0),
-                                              s.get("commerce", 0.0), s.get("crafting", 0.0))
-                        economy.citizen_earn(c.name, delta, employed=c.workplace is not None,
-                                             skill_level=skill_level)
-                        needs.satisfy("purpose", delta * 8.0)
-
-                    elif atype == ACTION_SLEEP:
-                        # has_home handled by tick() via citizen.home; homeless sleeping
-                        # at an emergency shelter gets partial relief here.
-                        if c.home is None:
-                            needs.satisfy("shelter", delta * 2.0)
-
-                    elif atype == ACTION_STUDY:
-                        needs.satisfy("education")
-
-                    elif atype == ACTION_INTERACT:
-                        reason = (act.get("metadata", {}) or {}).get("reason", "") if isinstance(act, dict) else ""
-                        if reason == "health":
-                            needs.satisfy("health", delta * 15.0)
-
-                    elif atype in (ACTION_PLAY, ACTION_PRAY):
-                        needs.satisfy("culture")
-
-                    elif atype == ACTION_TALK:
-                        needs.satisfy("social", 15.0)
-
-                    elif atype == ACTION_SHOP:
-                        shop_target = act.get("target") if isinstance(act, dict) else getattr(act, "target", None)
-                        if economy.citizen_buy(c.name, "goods", building=shop_target):
-                            needs.satisfy("social", 10.0)
+            # Phase 2.55: Events — small happenings where citizens are, and now
+            # and then a crisis; every citizen an event touches remembers it.
+            if event_manager is not None and topology:
+                experiences += await _roll_events(
+                    event_manager, alive_citizens, topology, economy, calendar, delta, tick
+                )
 
             # Phase 3: Economy tick
             if economy and topology:
@@ -375,7 +810,7 @@ async def _tick_loop() -> None:
                     if smrti_inst:
                         try:
                             results = smrti_inst.recall(f"at {loc}", top_k=3)
-                            memories = [{"content": getattr(r, "content", "")} for r in results]
+                            memories = [{"content": r.atom.content or r.atom.label} for r in results]
                         except Exception:
                             pass
 
@@ -402,6 +837,13 @@ async def _tick_loop() -> None:
                     ))
                     if submitted:
                         dialogue_last[c.name] = tick
+
+            # Phase 6.5: Petitions, once a sim-day
+            pm = _game.get("petition_manager")
+            if pm is not None and topology and economy and (
+                calendar.total_hours - (_game.get("last_petition_check") or 0.0) >= PETITION_CHECK_INTERVAL_HOURS
+            ):
+                await _draft_petitions(pm, alive_citizens, topology, economy, calendar)
 
             # Phase 7: Council meeting check
             council = _game.get("council")
@@ -438,7 +880,7 @@ async def _tick_loop() -> None:
                         "built_keys": built_keys,
                         "unmet_needs": unmet_needs,
                         "needs_summary": needs_summary,
-                        "petitions": [],
+                        "petitions": [p for p in pm.to_dict()["petitions"] if p["status"] == "active"] if pm else [],
                         "tick_number": int(calendar.total_hours),
                         "council": [
                             {"name": m.name, "role": m.role, "personality": m.personality}
@@ -492,12 +934,26 @@ async def _tick_loop() -> None:
                     )
                     await broadcast({"type": "council_meeting", "meeting": meeting_dict})
 
-            # Phase 8: Immigration check
+            # Phase 8: Births, departures and immigration, on one cadence
             pop_manager = _game.get("population_manager")
             if pop_manager and topology and economy:
                 last_imm = _game.get("last_immigration_check", 0)
                 if calendar.total_hours - last_imm >= IMMIGRATION_CHECK_INTERVAL_HOURS:
                     _game["last_immigration_check"] = calendar.total_hours
+                    by_name = {c.name: c for c in alive_citizens}
+                    for spec in check_births(alive_citizens, pop_manager, topology, calendar.total_hours):
+                        a, b = (by_name[n] for n in spec["parents"])
+                        child = _born(spec, a, b)
+                        text = f"{a.name} and {b.name} had a child, {child.name}"
+                        experiences += [(a, text, EXPERIENCE_VALENCE["birth"]), (b, text, EXPERIENCE_VALENCE["birth"])]
+                        await broadcast({
+                            "type": "event", "event_type": "birth",
+                            "description": f"{text}.", "citizens": [a.name, b.name, child.name],
+                        })
+                    scores = {c.name: satisfaction(c) for c in alive_citizens}
+                    for name in pop_manager.check_departure(alive_citizens, scores):
+                        experiences += await _depart(by_name[name], alive_citizens)
+                        alive_citizens = [c for c in alive_citizens if c.name != name]
                     available_housing = list({
                         getattr(p, "building_key", None)
                         for p in topology.places.values()
@@ -573,6 +1029,13 @@ async def _tick_loop() -> None:
             for evt in milestone_events:
                 await broadcast({"type": "event", **evt})
 
+            # Phase 9: Write the tick's experiences. Each is an embedding and
+            # a write, so the batch runs off the loop thread the way the
+            # consolidation does.
+            if experiences:
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, _write_experiences, experiences)
+
             # Build gridmap payload with live per-building stats.
             gridmap_dict = gridmap.to_dict() if gridmap and hasattr(gridmap, "to_dict") else None
             if gridmap_dict and alive_citizens:
@@ -609,6 +1072,7 @@ async def _tick_loop() -> None:
                 "gridmap": gridmap_dict,
                 "actions": actions,
                 "milestone_events": milestone_events,
+                "petitions": _petitions_payload(pm) if pm else [],
             }
             await broadcast(tick_result)
 
@@ -643,9 +1107,14 @@ def _stop_engine() -> None:
 @asynccontextmanager
 async def _lifespan(app: FastAPI):
     log.info("smrti-town server starting")
+    try:
+        await _resume_saved_game()
+    except Exception:
+        log.exception("Could not resume the saved town; starting at the opening")
     yield
     log.info("smrti-town server shutting down")
     _stop_engine()
+    _save_game()
     dq = _game.get("dialogue_queue")
     if dq:
         await dq.stop()
@@ -901,24 +1370,20 @@ async def opening_begin() -> JSONResponse:
         from smrti_town.population import PopulationManager
         _game["population_manager"] = PopulationManager()
         _game["last_immigration_check"] = 0
+        from smrti_town.petition import PetitionManager
+        _game["petition_manager"] = PetitionManager()
+        from smrti_town.events import EventManager
+        _game["event_manager"] = EventManager()
+        _game["last_petition_check"] = 0.0
         _game["dialogue_last_tick"] = {}
 
-        # Initialize dialogue queue
-        from smrti_town.dialogue_queue import DialogueQueue
-        dq = DialogueQueue(
-            llm_client=_llm_client,
-            broadcast_fn=broadcast,
-            queue_size=_llm_settings.dialogue_queue_size,
-            batch_size=_llm_settings.dialogue_batch_size,
-            stale_ticks=_llm_settings.dialogue_stale_ticks,
-        )
-        dq.start()
-        _game["dialogue_queue"] = dq
+        _start_dialogue_queue()
 
         # Start simulation
         from smrti_town.calendar import SimCalendar
         _game["calendar"] = SimCalendar()
         _game["phase"] = PHASE_GAMEPLAY
+        _save_game()
         _start_engine()
 
         await broadcast({
@@ -1086,17 +1551,7 @@ async def get_agent_memories(name: str) -> JSONResponse:
 
     try:
         results = smrti.recall(f"about {name}", top_k=20)
-        memories = []
-        for r in results:
-            memories.append({
-                "content": getattr(r, "content", ""),
-                "label": getattr(r, "label", ""),
-                "type": str(getattr(r, "type", "")),
-                "probability": getattr(getattr(r, "truth", None), "probability", 0),
-                "confidence": getattr(getattr(r, "truth", None), "confidence", 0),
-                "valence": getattr(getattr(r, "valence", None), "valence", 0),
-            })
-        return JSONResponse(memories)
+        return JSONResponse([_memory_dict(r) for r in results])
     except Exception:
         log.debug("Failed to recall memories for %s", name, exc_info=True)
         return JSONResponse([])
@@ -1132,7 +1587,14 @@ async def approve_petition(idx: int) -> JSONResponse:
     petition = petitions[idx]
     petition.status = "approved"
     await broadcast({"type": "petition_update", "index": idx, "status": "approved"})
-    return JSONResponse({"index": idx, "status": "approved"})
+    if petition.building_suggestion:
+        await broadcast({
+            "type": "council_result",
+            "approved": True,
+            "building_key": petition.building_suggestion,
+            "awaiting_placement": True,
+        })
+    return JSONResponse({"index": idx, "status": "approved", "building_key": petition.building_suggestion})
 
 
 @app.post("/petitions/{idx}/dismiss")
@@ -1249,6 +1711,24 @@ async def place_building(body: dict) -> JSONResponse:
                     economy.register_citizen(c.name)
                     assigned_workers += 1
 
+        # A citizen who petitioned for this business puts up a stake and runs it.
+        pm = _game.get("petition_manager")
+        for pet in (pm.petitions if pm else []):
+            if pet.status != "approved" or pet.building_suggestion != bkey or pet.source in ("citizens", "council"):
+                continue
+            owner = next((c for c in citizens if c.name == pet.source and getattr(c, "alive", True)), None)
+            if owner is not None:
+                stake = min(ENTREPRENEURSHIP_SAVINGS_THRESHOLD, economy.wallets.get(owner.name, 0))
+                economy.wallets[owner.name] = economy.wallets.get(owner.name, 0) - stake
+                economy.treasury += stake
+                if owner.workplace:
+                    topology.unassign_workplace(owner.name)
+                owner.workplace = pname
+                topology.assign_workplace(owner.name, pname)
+                owner.experience(f"{owner.name} opened {pname}", EXPERIENCE_VALENCE["business"])
+            pet.status = "fulfilled"
+            break
+
         # Seed world space
         world_smrti = _game.get("world_smrti")
         if world_smrti:
@@ -1315,6 +1795,9 @@ async def regenerate() -> JSONResponse:
         dq = _game.get("dialogue_queue")
         if dq:
             await dq.stop()
+        world = _game.get("world_smrti")
+        if world is not None:
+            persistence.clear(world.db, _game.get("_tenant_id", "millbrook"))
 
         # Reset game state
         for key in list(_game.keys()):
@@ -1343,17 +1826,7 @@ async def get_culture() -> JSONResponse:
 
     try:
         results = culture.recall("shared beliefs values culture", top_k=50)
-        atoms = []
-        for r in results:
-            atoms.append({
-                "content": getattr(r, "content", ""),
-                "label": getattr(r, "label", ""),
-                "type": str(getattr(r, "type", "")),
-                "probability": getattr(getattr(r, "truth", None), "probability", 0),
-                "confidence": getattr(getattr(r, "truth", None), "confidence", 0),
-                "valence": getattr(getattr(r, "valence", None), "valence", 0),
-            })
-        return JSONResponse(atoms)
+        return JSONResponse([_memory_dict(r) for r in results])
     except Exception:
         log.debug("Failed to query culture space", exc_info=True)
         return JSONResponse([])

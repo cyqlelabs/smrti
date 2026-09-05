@@ -5,12 +5,12 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass, field
 
+from typing import Any
+
 from smrti_town.config import (
-    BUILDING_CATALOG,
     CRISIS_EVENTS,
-    LIFE_STAGES,
-    MILESTONES,
-    RELATIONSHIP_GATES,
+    EVENT_VALENCE,
+    NEED_MAX,
     SPORADIC_EVENTS,
 )
 
@@ -23,6 +23,7 @@ class GameEvent:
     affected_buildings: list[str] = field(default_factory=list)
     effects: dict = field(default_factory=dict)  # e.g. {"treasury": -1000, "health": -0.2}
     tick_number: int = 0
+    expires_hours: float = 0.0  # crises only: sim time at which the crisis is over
 
 
 class EventManager:
@@ -31,80 +32,6 @@ class EventManager:
     def __init__(self) -> None:
         self.active_crises: list[GameEvent] = []
         self.event_history: list[GameEvent] = []
-
-    # ── organic events ──────────────────────────────────────────────────
-
-    def check_organic_events(
-        self,
-        citizens: list,
-        topology,
-        calendar,
-        tick_number: int,
-    ) -> list[GameEvent]:
-        """Check for milestone and life events: wedding, birth, death,
-        graduation, business_opening.
-
-        *calendar* — SimCalendar (used for birthday/milestone checks).
-        Returns list of GameEvents generated this tick.
-        """
-        events: list[GameEvent] = []
-
-        for c in citizens:
-            if not getattr(c, "alive", True):
-                continue
-            name = getattr(c, "name", "")
-            age = getattr(c, "age_years", 0.0)
-            stage = getattr(c, "life_stage", "adult")
-            age_int = int(age)
-
-            # Milestone events.
-            if age_int in MILESTONES:
-                milestone = MILESTONES[age_int]
-                # Only fire once: check fractional age to see if we just crossed.
-                frac = age - age_int
-                if frac < 0.5:  # recently crossed this age
-                    if milestone == "graduation":
-                        events.append(GameEvent(
-                            event_type="graduation",
-                            description=f"{name} has graduated!",
-                            affected_citizens=[name],
-                            tick_number=tick_number,
-                        ))
-                    elif milestone == "school_enrollment":
-                        events.append(GameEvent(
-                            event_type="school_enrollment",
-                            description=f"{name} is old enough for school.",
-                            affected_citizens=[name],
-                            tick_number=tick_number,
-                        ))
-                    elif milestone == "retirement":
-                        events.append(GameEvent(
-                            event_type="retirement",
-                            description=f"{name} has retired after a lifetime of work.",
-                            affected_citizens=[name],
-                            tick_number=tick_number,
-                        ))
-
-        # Wedding detection: check for newly married couples.
-        checked_pairs: set[frozenset[str]] = set()
-        for c in citizens:
-            if not getattr(c, "alive", True):
-                continue
-            name_a = getattr(c, "name", "")
-            relationships = getattr(c, "relationships", {})
-            for partner, rel in relationships.items():
-                if rel != "married":
-                    continue
-                pair = frozenset([name_a, partner])
-                if pair in checked_pairs:
-                    continue
-                checked_pairs.add(pair)
-                # Check if this is a new marriage by looking at interaction count.
-                # This is a heuristic — the engine should set a flag for new marriages,
-                # but for fallback we emit based on relationship existing.
-                # The caller (engine) should deduplicate events it has already emitted.
-
-        return events
 
     # ── crisis ──────────────────────────────────────────────────────────
 
@@ -286,6 +213,52 @@ class EventManager:
 
         return events
 
+    # ── effects ─────────────────────────────────────────────────────────
+
+    @staticmethod
+    def apply_effects(event: GameEvent, citizens_by_name: dict[str, Any], economy: Any) -> list[tuple[Any, str, float]]:
+        """Apply an event to the town and return the episode every citizen it
+        touched remembers it by.
+
+        Effects are fractions of a need: ``health``, ``safety`` and ``social``
+        name the good quantity (negative is harm), ``hunger`` names the
+        deprivation itself, so a food shortage's ``hunger: 0.3`` raises it.
+        """
+        fx = event.effects
+        if economy is not None and fx.get("treasury"):
+            economy.treasury = max(0, economy.treasury + int(fx["treasury"]))
+        tone = EVENT_VALENCE.get(event.event_type, 0.0)
+        text = event.description
+        if event.affected_buildings:
+            text = f"{text} {', '.join(event.affected_buildings)} burned down."
+        experiences: list[tuple[Any, str, float]] = []
+        for name in event.affected_citizens:
+            c = citizens_by_name.get(name)
+            if c is None or not c.alive:
+                continue
+            for need, sign in (("health", -1), ("safety", -1), ("social", -1), ("hunger", 1)):
+                if need in fx:
+                    deprived = getattr(c.needs, need) + sign * fx[need] * NEED_MAX
+                    setattr(c.needs, need, max(0.0, min(NEED_MAX, deprived)))
+            if economy is not None and fx.get("wallet") and name in economy.wallets:
+                economy.wallets[name] += int(fx["wallet"])
+            if tone:
+                experiences.append((c, text, tone))
+        return experiences
+
+    def crime_rate(self, citizens: list[Any], topology: Any) -> float:
+        """How unsafe the town is: adults with nothing to do, and a crime
+        wave while one is active, halved by a constabulary. The safety need
+        rises with it."""
+        adults = [c for c in citizens if c.life_stage == "adult"]
+        idle = sum(1 for c in adults if c.workplace is None and c.council_role is None)
+        rate = 0.3 * idle / len(adults) if adults else 0.0
+        if any(e.event_type == "crisis_crime_wave" for e in self.active_crises):
+            rate += 0.5
+        if topology.places_by_building("constabulary"):
+            rate *= 0.5
+        return min(1.0, rate)
+
     # ── crisis resolution ───────────────────────────────────────────────
 
     def resolve_crisis(self, crisis: GameEvent, has_mitigation: bool) -> dict:
@@ -321,6 +294,7 @@ class EventManager:
                 "affected_buildings": e.affected_buildings,
                 "effects": e.effects,
                 "tick_number": e.tick_number,
+                "expires_hours": e.expires_hours,
             }
 
         return {

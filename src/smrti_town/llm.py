@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import random
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -27,8 +28,15 @@ log = logging.getLogger(__name__)
 
 @dataclass
 class LLMSettings:
-    base_url: str = "http://0.0.0.0:8421/v1"
-    model: str = "Qwen3.5-9B-Q8_0.gguf"
+    # The endpoint and model come from the environment at startup and can be
+    # changed at runtime through /settings; without the variables the town
+    # talks to the smrti proxy.
+    base_url: str = field(
+        default_factory=lambda: os.environ.get("SMRTI_TOWN_LLM_URL", "http://0.0.0.0:8421/v1")
+    )
+    model: str = field(
+        default_factory=lambda: os.environ.get("SMRTI_TOWN_LLM_MODEL", "Qwen3.5-9B-Q8_0.gguf")
+    )
     temperature: float = 0.8
     top_p: float = 0.95
     max_tokens: int = 1024

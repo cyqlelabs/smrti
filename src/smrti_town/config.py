@@ -241,7 +241,7 @@ SKILL_CATEGORIES = {
         "xp_per_hour": 0.005,
     },
     "commerce": {
-        "learned_at": ["market", "store", "bakery", "butcher", "tavern", "inn"],
+        "learned_at": ["market", "general_store", "bakery", "butcher", "tavern", "inn"],
         "enables": ["merchant", "business_owner"],
         "xp_per_hour": 0.008,
     },
@@ -325,13 +325,13 @@ _register(BuildingDef(
 _register(BuildingDef(
     key="apartment", category="residential", cost=8000, maintenance=400, capacity=8,
     staff_required=0, staff_skill="", staff_min_level=0, unlock_population=15,
-    sprite_key="apartment_1", variants=2, provides_housing=True,
+    sprite_key="apartment_1", variants=3, provides_housing=True,
     description="Multi-family dwelling for singles, couples, and small families.",
 ))
 _register(BuildingDef(
     key="manor", category="residential", cost=15000, maintenance=750, capacity=2,
     staff_required=0, staff_skill="", staff_min_level=0, unlock_population=30,
-    sprite_key="manor", provides_housing=True,
+    sprite_key="manor_1", variants=3, provides_housing=True,
     effects={"tax_bonus": 0.2},
     description="Luxury residence that attracts wealthy individuals.",
 ))
@@ -540,7 +540,7 @@ _register(BuildingDef(
 _register(BuildingDef(
     key="farm", category="industrial", cost=5000, maintenance=250, capacity=0,
     staff_required=2, staff_skill="agriculture", staff_min_level=0.1, unlock_population=0,
-    sprite_key="farm_1", provides_food=True, revenue_per_hour=4,
+    sprite_key="farm_1", variants=2, provides_food=True, revenue_per_hour=4,
     description="Large-scale food production.",
 ))
 _register(BuildingDef(
@@ -617,6 +617,62 @@ COUNCIL_MEETING_INTERVAL_HOURS = 24  # 1 sim-day
 # not running in the demo built to show it.
 MEMORY_REFLECT_INTERVAL_TICKS = 12
 
+# The tone a citizen remembers a resolved action with. Stated rather than
+# estimated from the words: the simulation knows how the action went, and
+# only a stated tone counts at recall as a report of what happened.
+# A quarrel sits below -0.7 on purpose: that is the line past which the
+# engine gives a memory a long-term floor, so quarrels outlive routine.
+EXPERIENCE_VALENCE = {
+    "meal": 0.5,
+    "unaffordable": -0.5,
+    "work": 0.2,
+    "study": 0.3,
+    "leisure": 0.4,
+    "treatment": 0.3,
+    "purchase": 0.3,
+    "talk": 0.4,
+    "quarrel": -0.8,
+    "business": 0.7,
+    "closer": 0.5,
+    "apart": -0.4,
+    "birth": 0.9,
+    "death": -0.8,
+    "departure": -0.4,
+}
+
+# The tone an event leaves in the memory of every citizen it touches.
+EVENT_VALENCE = {
+    "crisis_fire": -0.8,
+    "crisis_epidemic": -0.8,
+    "crisis_drought": -0.6,
+    "crisis_crime_wave": -0.8,
+    "crisis_economic_downturn": -0.5,
+    "accident_trip": -0.4,
+    "illness_mild": -0.4,
+    "found_item": 0.5,
+    "surprise_visitor": 0.4,
+    "gossip": 0.2,
+    "animal_encounter": 0.4,
+    "weather_rain": -0.2,
+    "weather_sunny": 0.3,
+    "weather_wind": -0.1,
+}
+
+# A couple that may have a child does, per growth check, with this probability.
+BIRTH_PROBABILITY = 0.2
+
+# Every this many ticks the town's culture is refreshed: bridges between
+# citizens who share a place, and promotion of what they share.
+CULTURE_INTERVAL_TICKS = 120
+
+# A crisis stays active this long in sim-hours before it is resolved.
+CRISIS_DURATION_HOURS = 48
+
+# A conversation turns into a quarrel with this probability, plus the
+# weight below at a mean stubbornness of 1.0 across the pair.
+QUARREL_PROBABILITY = 0.05
+QUARREL_STUBBORNNESS_WEIGHT = 0.2
+
 # ── Economy ──────────────────────────────────────────────────────────
 STARTING_TREASURY = 50000
 STARTING_WALLET = 100
@@ -674,6 +730,7 @@ CULTURE_CONFIDENCE_MIN = 0.5
 PETITION_SIMILARITY_THRESHOLD = 0.6
 PETITION_CONFIDENCE_THRESHOLD = 0.4
 PETITION_MAX_AGE_HOURS = 720
+PETITION_CHECK_INTERVAL_HOURS = 24  # petitions are drafted once a sim-day
 
 # ── Game state phases ────────────────────────────────────────────────
 PHASE_OPENING_PLACE_HALL = "opening_place_hall"

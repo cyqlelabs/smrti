@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from smrti import Smrti
+from smrti.core.provenance import SOURCE_AGENT
+from smrti.personality.params import PersonalityProfile
 
 from smrti_town.config import (
     ACTION_EAT,
@@ -29,11 +31,15 @@ from smrti_town.config import (
     ELDER_DEATH_PROB_PER_TICK,
     ENTREPRENEURSHIP_COMMERCE_SKILL,
     ENTREPRENEURSHIP_SAVINGS_THRESHOLD,
+    EXPERIENCE_VALENCE,
     HOURS_PER_YEAR,
     LIFE_STAGES,
     NEED_MAX,
     PERSONALITY_ACTION_BIAS,
+    PERSONALITY_PARAMS,
     PRESET_TRAITS,
+    QUARREL_PROBABILITY,
+    QUARREL_STUBBORNNESS_WEIGHT,
     STARVATION_HOURS,
     STARTING_WALLET,
     TRAIT_NAMES,
@@ -63,7 +69,6 @@ class PerceptionContext:
     season: str
     nearby_agents: list[str] = field(default_factory=list)
     urgent_need: str | None = None
-    memories: list[dict] = field(default_factory=list)
     schedule_obligation: str | None = None
     personality_preset: str = "balanced"
     current_hour: float = 12.0
@@ -166,6 +171,7 @@ class Citizen:
 
         # Social
         self.relationships: dict[str, str] = {}  # name -> relationship_type
+        self.relationship_since: dict[str, float] = {}  # name -> sim hours the tier was reached
         self.interaction_counts: dict[str, int] = {}
 
         # Health tracking
@@ -175,6 +181,19 @@ class Citizen:
         self.current_action: Action | None = None
 
     # ── properties ────────────────────────────────────────────────────
+
+    @property
+    def personality_params(self) -> dict[str, float]:
+        """The engine hyperparameters this citizen's memory runs on — the
+        genome ``lifecycle.create_child`` blends for a child."""
+        row = self.smrti.status()["personality"]
+        return {k: float(row[k]) for k in PERSONALITY_PARAMS if k in row}
+
+    def inherit(self, params: dict[str, float]) -> None:
+        """Run this citizen's memory on an inherited parameter set."""
+        self.smrti.set_personality_profile(
+            PersonalityProfile(**params, preset_name="inherited"), "inherited"
+        )
 
     @property
     def age_years(self) -> float:
@@ -270,32 +289,12 @@ class Citizen:
         place: Place | None = None,
         crime_rate: float = 0.0,
     ) -> PerceptionContext:
-        """Build a PerceptionContext from the current environment."""
-        # Recall relevant memories for decision-making.
+        """Build a PerceptionContext from the current environment.
+
+        Memory enters a decision by name — ``_memory_mood`` on each place or
+        person the citizen weighs — so nothing is recalled here.
+        """
         location_name = place.name if place else self.location
-        memories: list[dict] = []
-        try:
-            results = self.smrti.recall(
-                f"at {location_name} with {', '.join(nearby_agents[:3])}" if nearby_agents
-                else f"at {location_name}",
-                top_k=5,
-                min_confidence=0.1,
-            )
-            # A RecallResult wraps the atom; the memory's text, tone and
-            # truth live on r.atom. (These used to read r.content and
-            # r.valence, attributes the result never had, and the except
-            # below swallowed the error — so memories were always empty and
-            # no citizen ever decided on one.)
-            memories = [
-                {
-                    "content": r.atom.content or r.atom.label,
-                    "valence": r.atom.valence.valence,
-                    "probability": r.atom.truth.probability,
-                }
-                for r in results
-            ]
-        except Exception:
-            pass
 
         # Schedule obligation
         schedule_obligation: str | None = None
@@ -315,7 +314,6 @@ class Citizen:
             season=calendar.season,
             nearby_agents=nearby_agents,
             urgent_need=self.needs.highest_unmet_need(self.life_stage),
-            memories=memories,
             schedule_obligation=schedule_obligation,
             personality_preset=self.personality_preset,
             current_hour=calendar.hour,
@@ -462,7 +460,7 @@ class Citizen:
 
         # Move to a social venue.
         if topo:
-            venue = self._find_social_venue(topo, ctx)
+            venue = self._find_social_venue(topo)
             if venue and ctx.location != venue:
                 return Action(type=ACTION_MOVE, target=venue, metadata={"reason": "social"})
             if venue and ctx.nearby_agents:
@@ -548,7 +546,7 @@ class Citizen:
         if category == "social" and ctx.nearby_agents and self.can_talk:
             return Action(type=ACTION_TALK, target=self._pick_social_target(ctx))
         elif category == "social" and topo:
-            venue = self._find_social_venue(topo, ctx)
+            venue = self._find_social_venue(topo)
             if venue and ctx.location != venue:
                 return Action(type=ACTION_MOVE, target=venue, metadata={"reason": "social_idle"})
         elif category == "education" and topo:
@@ -579,53 +577,97 @@ class Citizen:
             return Action(type=ACTION_WANDER)
         return Action(type=ACTION_WAIT)
 
+    # ── experience ────────────────────────────────────────────────────
+
+    def experience(self, text: str, valence: float) -> None:
+        """Remember what just happened, with the tone it had.
+
+        This is the write half of the loop. ``_memory_mood`` reads the mood
+        of the memories that name a place or a person, and until action
+        resolution called this, nothing after the bio at creation wrote
+        one — so every place carried the same mood and no citizen ever
+        avoided the tavern after a quarrel there. The tone is stated rather
+        than estimated because the simulation knows how the action went.
+
+        The episode is agent-authored: the simulation reported it, not the
+        citizen. The engine lets such memories fade and prunes them once
+        they have, which is what bounds a graph fed every tick, while a
+        stated tone below -0.7 keeps its long-term floor whoever wrote it —
+        the routine of meals and shifts is forgotten, the quarrel is not.
+        """
+        self.smrti.remember(
+            text, type="episode", valence=valence, metadata={"source": SOURCE_AGENT}
+        )
+
+    def talk_tone(self, other: Citizen) -> float:
+        """The tone a conversation with *other* leaves in both memories.
+
+        Mostly pleasant; a quarrel now and then, more often between
+        stubborn people. Without a source of bad evenings, memory could
+        only ever make a place better liked.
+        """
+        stubbornness = (
+            self.traits.get("stubbornness", 0.3) + other.traits.get("stubbornness", 0.3)
+        ) / 2
+        if random.random() < QUARREL_PROBABILITY + QUARREL_STUBBORNNESS_WEIGHT * stubbornness:
+            return EXPERIENCE_VALENCE["quarrel"]
+        return EXPERIENCE_VALENCE["talk"]
+
     # ── helpers ───────────────────────────────────────────────────────
 
     def _find_building(self, building_key: str, topo: TownTopology) -> str | None:
-        """Find the nearest place with the given building_key, avoiding places
-        with negative memory valence."""
-        places = topo.places_by_building(building_key)
-        if not places:
-            return None
-        if len(places) == 1:
-            return places[0].name
-
-        # Score by distance (prefer closer) and memory valence (avoid negative).
-        best_name: str | None = None
-        best_score = float("-inf")
-        for p in places:
-            dist = topo.path_distance(self.location, p.name) if self.location else 99
-            if dist < 0:
-                dist = 99
-            # Check memory valence for this place.
-            valence_bias = self._place_valence(p.name)
-            score = -dist + valence_bias * 3.0
-            if score > best_score:
-                best_score = score
-                best_name = p.name
-        return best_name
+        """The nearest place with *building_key*, less the ones memory has
+        soured on."""
+        return self._nearest_liked(
+            [p.name for p in topo.places_by_building(building_key)], topo
+        )
 
     def _find_food_source(self, topo: TownTopology) -> str | None:
-        """Find a place that provides food."""
-        food_places: list[str] = []
-        for p in topo.places.values():
-            if p.building_key and self._building_provides_food(p.building_key):
-                food_places.append(p.name)
-        if not food_places:
-            return None
-        if len(food_places) == 1:
-            return food_places[0]
-        # Prefer closest.
-        food_places.sort(key=lambda n: topo.path_distance(self.location, n) if self.location else 99)
-        return food_places[0]
+        """The nearest place that provides food, weighed the same way: a
+        citizen who remembers a good meal at the tavern heads back there."""
+        return self._nearest_liked(
+            [
+                p.name
+                for p in topo.places.values()
+                if p.building_key and self._building_provides_food(p.building_key)
+            ],
+            topo,
+        )
 
-    def _find_social_venue(self, topo: TownTopology, ctx: PerceptionContext) -> str | None:
-        """Find a social venue (tavern, park, church, festival_grounds)."""
-        for bkey in ("tavern", "park", "church", "festival_grounds"):
-            place = self._find_building(bkey, topo)
-            if place:
-                return place
-        return None
+    def _find_social_venue(self, topo: TownTopology) -> str | None:
+        """The nearest social venue, every kind competing on distance and
+        mood, so a quarrel at the tavern sends a citizen to the park rather
+        than back to the tavern because taverns are tried first."""
+        return self._nearest_liked(
+            [
+                p.name
+                for bkey in ("tavern", "park", "church", "festival_grounds")
+                for p in topo.places_by_building(bkey)
+            ],
+            topo,
+        )
+
+    def _nearest_liked(self, names: list[str], topo: TownTopology) -> str | None:
+        """The closest of *names*, less the places memory has soured on.
+
+        A lone candidate is taken as it is: mood decides between places,
+        and a citizen with nowhere else to eat still eats.
+        """
+        if not names:
+            return None
+        if len(names) == 1:
+            return names[0]
+        best_name: str | None = None
+        best_score = float("-inf")
+        for name in names:
+            dist = topo.path_distance(self.location, name) if self.location else 99
+            if dist < 0:
+                dist = 99
+            score = -dist + self._place_valence(name) * 3.0
+            if score > best_score:
+                best_score = score
+                best_name = name
+        return best_name
 
     @staticmethod
     def _building_provides_food(building_key: str) -> bool:
@@ -673,26 +715,32 @@ class Citizen:
         """Return the average mood of memories about a person.  0.0 if none."""
         return self._memory_mood(person_name)
 
-    def _memory_mood(self, name: str) -> float:
-        """Average mood of the memories that actually mention *name*.
+    def memories_about(self, name: str, top_k: int = 5, boost: bool = False) -> list:
+        """The atoms that actually mention *name*, most salient first.
 
         Recall returns the nearest memories whatever they are about, and a
         bad evening at the tavern must not colour the library, so only the
-        memories that name the place or person count.
+        memories that name the place or person count. ``boost`` is whether
+        the reading counts as thinking about them: a relationship check
+        does, and what a citizen keeps thinking about is what the epoch
+        promotes to long-term importance.
         """
         try:
-            results = self.smrti.recall(name, top_k=5, min_confidence=0.1, boost=False)
+            results = self.smrti.recall(name, top_k=top_k, min_confidence=0.1, boost=boost)
         except Exception:
-            return 0.0
+            return []
         needle = name.casefold()
-        moods = [
-            r.atom.valence.valence
-            for r in results
-            if needle in (r.atom.content or r.atom.label or "").casefold()
-        ]
-        if not moods:
+        return [r.atom for r in results if needle in (r.atom.content or r.atom.label or "").casefold()]
+
+    def _memory_mood(self, name: str) -> float:
+        """Average mood of the memories that mention *name*; 0.0 with none."""
+        used = self.memories_about(name)
+        if not used:
             return 0.0
-        return sum(moods) / len(moods)
+        # Deciding on a memory is evidence it matters: what a citizen keeps
+        # acting on stays firm while the rest of its routine fades.
+        self.smrti.reinforce([atom.id for atom in used])
+        return sum(atom.valence.valence for atom in used) / len(used)
 
     @staticmethod
     def _weighted_choice(items: list[tuple[str, float]]) -> str:
@@ -714,26 +762,6 @@ class Citizen:
 
     def record_interaction(self, other_name: str) -> None:
         self.interaction_counts[other_name] = self.interaction_counts.get(other_name, 0) + 1
-
-    def persist_interactions(self, db) -> None:
-        """Save pairwise interaction counts to the DB."""
-        rows = [
-            (self.name, other, count)
-            for other, count in self.interaction_counts.items()
-        ]
-        if rows:
-            db.execute_many(
-                "INSERT OR REPLACE INTO citizen_interactions (citizen, other, count) VALUES (?, ?, ?)",
-                rows,
-            )
-
-    def restore_interactions(self, db) -> None:
-        """Reload pairwise interaction counts from the DB."""
-        rows = db.fetchall(
-            "SELECT other, count FROM citizen_interactions WHERE citizen = ?",
-            (self.name,),
-        )
-        self.interaction_counts = {r["other"]: r["count"] for r in rows} if rows else {}
 
     # ── serialization ─────────────────────────────────────────────────
 
@@ -757,8 +785,42 @@ class Citizen:
             "workplace": self.workplace,
             "council_role": self.council_role,
             "relationships": self.relationships,
+            "relationship_since": self.relationship_since,
+            "interaction_counts": self.interaction_counts,
+            "parents": list(self.parents) if self.parents else None,
+            "age_hours": self.age_hours,
+            "starvation_hours": self.starvation_hours,
             "current_action": {
                 "type": self.current_action.type,
                 "target": self.current_action.target,
             } if self.current_action else None,
         }
+
+    @classmethod
+    def from_dict(cls, data: dict, db_path: str, tenant_id: str) -> Citizen:
+        """A citizen as a snapshot saved them, reopening the same memory graph."""
+        c = cls(
+            name=data["name"],
+            personality=data.get("personality", "balanced"),
+            location=data.get("location") or "",
+            age_years=data.get("age_years", 25.0),
+            db_path=db_path,
+            tenant_id=tenant_id,
+            parents=tuple(data["parents"]) if data.get("parents") else None,
+            traits=data.get("traits"),
+            home=data.get("home"),
+            workplace=data.get("workplace"),
+            council_role=data.get("council_role"),
+            initial_skills=data.get("skills"),
+            visual_dna=data.get("visual_dna"),
+        )
+        c.age_hours = data.get("age_hours", c.age_hours)
+        c.needs = CitizenNeeds.from_dict(data.get("needs", {}))
+        c.wallet = data.get("wallet", c.wallet)
+        c.alive = data.get("alive", True)
+        c.world_pos = tuple(data.get("world_pos", c.world_pos))
+        c.relationships = dict(data.get("relationships", {}))
+        c.relationship_since = dict(data.get("relationship_since", {}))
+        c.interaction_counts = dict(data.get("interaction_counts", {}))
+        c.starvation_hours = data.get("starvation_hours", 0.0)
+        return c

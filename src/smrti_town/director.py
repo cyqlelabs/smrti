@@ -90,6 +90,13 @@ class Director:
             "skip_requested": self._skip_requested,
         }
 
+    @classmethod
+    def from_dict(cls, data: dict) -> Director:
+        director = cls()
+        director.mode = data.get("mode", "routine")
+        director._skip_requested = data.get("skip_requested", False)
+        return director
+
 
 class Chronos:
     """Milestone and birthday event tracker.
@@ -152,6 +159,19 @@ class Chronos:
                     })
 
         return events
+
+    def to_dict(self) -> dict:
+        return {
+            "fired_milestones": sorted(list(pair) for pair in self.fired_milestones),
+            "last_age": dict(self._last_age),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> Chronos:
+        chronos = cls()
+        chronos.fired_milestones = {(name, age) for name, age in data.get("fired_milestones", [])}
+        chronos._last_age = dict(data.get("last_age", {}))
+        return chronos
 
     @staticmethod
     def _milestone_description(name: str, age: int, event_type: str, life_stage: str) -> str:

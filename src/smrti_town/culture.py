@@ -1,8 +1,10 @@
 """Bridge discovery and culture promotion for smrti-town.
 
-Periodically discovers shared knowledge between agent memory spaces via
-smrti's bridge-space machinery, then promotes high-confidence bridge atoms
-up to ``Space_Culture`` where they become shared town beliefs.
+What two citizens remember alike — an evening both were at, a storm both
+stood in — is materialised as a bridge space, and what a bridge holds
+firmly is copied up to ``Space_Culture``, which every citizen reads. That
+is how a shared experience becomes the town's memory, and how a place the
+town has soured on stays soured for a newcomer who was never there.
 """
 
 from __future__ import annotations
@@ -10,170 +12,78 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from smrti.core.models import atom_from_row
+
 log = logging.getLogger(__name__)
 
 
-async def run_bridge_discovery(
-    agents: list[Any],
-    topology: Any,
-    bridge_threshold: float = 0.3,
-) -> int:
-    """Run bridge space discovery between all pairs of agent smrti instances.
+def run_bridge_discovery(agents: list[Any], bridge_threshold: float = 0.3) -> int:
+    """Materialise a bridge space for every pair of citizens sharing a place
+    whose memories overlap by at least *bridge_threshold* (Jaccard).
 
-    For each pair of agents that share a location (or have interacted recently),
-    compute the overlap between their write spaces using smrti's space_overlap.
-    If Jaccard >= *bridge_threshold*, materialize the bridge space.
-
-    Parameters
-    ----------
-    agents:
-        Agent objects with ``.name`` (str), ``.smrti`` (Smrti), ``.location`` (str|None).
-    topology:
-        TownTopology with ``.places`` dict for occupant checks.
-    bridge_threshold:
-        Minimum Jaccard index to create a bridge space.
-
-    Returns
-    -------
-    int
-        Number of bridge spaces created or updated.
+    Returns the number of bridge atoms written. Pairs are limited to
+    citizens in the same place because the overlap is an all-pairs cosine
+    in pure Python — seconds per pair on a few hundred atoms.
     """
-    bridges_created = 0
-    alive = [a for a in agents if getattr(a, "alive", True) and getattr(a, "smrti", None)]
-
-    if len(alive) < 2:
-        return 0
-
-    # Group agents by location for proximity-based bridge discovery.
     by_location: dict[str, list[Any]] = {}
-    for a in alive:
-        loc = getattr(a, "location", None)
-        if loc:
-            by_location.setdefault(loc, []).append(a)
-
-    # Also consider agents with place-based smrti spaces.
-    checked_pairs: set[tuple[str, str]] = set()
-
-    for loc, group in by_location.items():
-        for i, a1 in enumerate(group):
-            for a2 in group[i + 1:]:
-                pair_key = tuple(sorted([a1.name, a2.name]))
-                if pair_key in checked_pairs:
-                    continue
-                checked_pairs.add(pair_key)
-
-                try:
-                    result = a1.smrti.space_overlap(
-                        other_space=a2.smrti.write_space,
-                        tenant_id=a1.smrti.tenant_id,
-                    )
-                    if result and result.get("jaccard", 0) >= bridge_threshold:
-                        bridge_result = a1.smrti.materialize_bridge(
-                            other_space=a2.smrti.write_space,
-                            tenant_id=a1.smrti.tenant_id,
-                        )
-                        if bridge_result:
-                            bridges_created += 1
-                            log.debug(
-                                "Bridge created between %s and %s (jaccard=%.2f)",
-                                a1.name, a2.name, result.get("jaccard", 0),
-                            )
-                except Exception:
-                    log.debug(
-                        "Bridge discovery failed for %s <-> %s",
-                        a1.name, a2.name,
-                        exc_info=True,
-                    )
-
-    return bridges_created
-
-
-async def promote_bridges_to_culture(
-    agents: list[Any],
-    culture_smrti: Any,
-    confidence_min: float = 0.5,
-) -> int:
-    """Promote high-confidence atoms from bridge spaces to Space_Culture.
-
-    Scans all bridge spaces (named ``{a}_x_{b}``) in the database and copies
-    atoms with confidence >= *confidence_min* into the culture space as shared
-    beliefs.
-
-    Parameters
-    ----------
-    agents:
-        Agent objects with ``.smrti`` (Smrti).
-    culture_smrti:
-        The Smrti instance for ``Space_Culture``.
-    confidence_min:
-        Minimum confidence threshold for promotion.
-
-    Returns
-    -------
-    int
-        Number of atoms promoted.
-    """
-    promoted = 0
-
-    if not agents or culture_smrti is None:
-        return 0
-
-    # Use the first agent's smrti to query for bridge spaces.
-    sample_smrti = None
     for a in agents:
-        s = getattr(a, "smrti", None)
-        if s:
-            sample_smrti = s
-            break
+        if getattr(a, "alive", True) and getattr(a, "smrti", None) and getattr(a, "location", None):
+            by_location.setdefault(a.location, []).append(a)
+    written = 0
+    for group in by_location.values():
+        for i, a in enumerate(group):
+            for b in group[i + 1:]:
+                try:
+                    written += a.smrti.materialize_bridge(b.smrti.write_space, min_jaccard=bridge_threshold)
+                except Exception:
+                    log.debug("Bridge discovery failed for %s <-> %s", a.name, b.name, exc_info=True)
+    return written
 
-    if sample_smrti is None:
+
+def promote_bridges_to_culture(agents: list[Any], culture_smrti: Any, confidence_min: float = 0.5) -> int:
+    """Copy every bridge atom held at *confidence_min* or above into
+    ``Space_Culture``, once per distinct text. Returns the number promoted.
+
+    A bridge atom merges two citizens' truth values, so one shared memory
+    already clears 0.5; the culture space is what every citizen reads, so
+    the copy carries the tone the memory was written with.
+    """
+    sample = next((a.smrti for a in agents if getattr(a, "smrti", None)), None)
+    if sample is None or culture_smrti is None:
         return 0
-
-    try:
-        spaces = sample_smrti.list_spaces()
-    except Exception:
-        log.debug("Failed to list spaces for bridge promotion", exc_info=True)
-        return 0
-
-    bridge_spaces = [s for s in spaces if "_x_" in s]
-
-    for space_name in bridge_spaces:
-        try:
-            # Recall high-confidence atoms from the bridge space.
-            results = sample_smrti.recall(
-                query="shared knowledge beliefs values",
-                top_k=20,
-                min_confidence=confidence_min,
-                read_spaces=[space_name],
+    promoted = 0
+    for space in sample.list_spaces():
+        if "_x_" not in space:
+            continue
+        rows = sample.db.fetchall(
+            "SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation' AND confidence >= ?",
+            (sample.tenant_id, space, confidence_min),
+        )
+        for row in rows:
+            atom = atom_from_row(row)
+            content = atom.content or atom.label
+            if not content:
+                continue
+            known = culture_smrti.db.fetchone(
+                "SELECT 1 FROM atoms WHERE tenant_id = ? AND space = ? AND content = ?",
+                (culture_smrti.tenant_id, culture_smrti.write_space, content),
             )
-
-            for r in results:
-                content = getattr(r, "content", "") or getattr(r, "label", "")
-                if not content:
-                    continue
-
-                truth = getattr(r, "truth", None)
-                conf = getattr(truth, "confidence", 0) if truth else 0
-                if conf < confidence_min:
-                    continue
-
-                valence_obj = getattr(r, "valence", None)
-                val = getattr(valence_obj, "valence", 0.0) if valence_obj else 0.0
-                prob = getattr(truth, "probability", 0.8) if truth else 0.8
-
-                culture_smrti.remember(
-                    content,
-                    type="belief",
-                    probability=prob,
-                    valence=val,
-                    metadata={"source_bridge": space_name},
-                )
-                promoted += 1
-
-        except Exception:
-            log.debug("Failed to promote from bridge space %s", space_name, exc_info=True)
-
+            if known:
+                continue
+            culture_smrti.remember(
+                content,
+                type=atom.type.value,
+                probability=atom.truth.probability,
+                valence=atom.valence.own,
+                metadata={"source_bridge": space, "source_atom": atom.id},
+            )
+            promoted += 1
     if promoted:
-        log.info("Promoted %d atoms to Space_Culture from %d bridge spaces", promoted, len(bridge_spaces))
-
+        log.info("Promoted %d shared memories to Space_Culture", promoted)
     return promoted
+
+
+def run_culture_pass(agents: list[Any], culture_smrti: Any) -> tuple[int, int]:
+    """One pass of the town's culture: bridges between citizens who share a
+    place, then promotion of what the bridges hold. Returns both counts."""
+    return run_bridge_discovery(agents), promote_bridges_to_culture(agents, culture_smrti)

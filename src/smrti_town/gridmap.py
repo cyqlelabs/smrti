@@ -137,3 +137,10 @@ class GridMap:
             "height": self.height,
             "buildings": [b.to_dict() for b in self.buildings],
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> GridMap:
+        grid = cls(data.get("width", GRID_WIDTH), data.get("height", GRID_HEIGHT))
+        for b in data.get("buildings", []):
+            grid.place(b["building_key"], b["grid_x"], b["grid_y"], b.get("place_name", ""), b.get("sprite_variant", 0))
+        return grid

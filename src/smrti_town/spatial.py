@@ -180,3 +180,19 @@ class TownTopology:
             "places": {name: p.to_dict() for name, p in self.places.items()},
             "connections": self.all_connections(),
         }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> TownTopology:
+        topo = cls()
+        for name, p in data.get("places", {}).items():
+            topo.add_place(Place(
+                name=name,
+                place_type=p.get("place_type", "public"),
+                building_key=p.get("building_key"),
+                is_outdoor=p.get("is_outdoor", False),
+                grid_x=p.get("grid_x", 0),
+                grid_y=p.get("grid_y", 0),
+            ))
+        for a, b in data.get("connections", []):
+            topo.connect(a, b)
+        return topo

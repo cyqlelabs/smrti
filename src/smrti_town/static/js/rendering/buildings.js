@@ -56,20 +56,34 @@ var BuildingRenderer = {
   /**
    * Add a single building sprite.
    */
+  /**
+   * Atlas frame for a building: the server's sprite_key with the variant
+   * suffix it rolled (cottage_1 + variant 2 → cottage_3), then the key
+   * itself, then the local catalog's default. sprite_variant is a number,
+   * so it was being used as the frame name and every varied building
+   * fell back to the town hall.
+   */
+  _frameFor: function(spriteKey, variant, bKey) {
+    var atlas = this.scene.textures.get('sprites');
+    var candidates = [];
+    if (spriteKey) {
+      if (variant > 0) candidates.push(spriteKey.replace(/_1$/, '_' + (variant + 1)));
+      candidates.push(spriteKey);
+    }
+    if (BUILDINGS[bKey]) candidates.push(BUILDINGS[bKey].sprite);
+    candidates.push(bKey);
+    for (var i = 0; i < candidates.length; i++) {
+      if (candidates[i] && atlas.has(candidates[i])) return candidates[i];
+    }
+    return 'town_hall';
+  },
+
   _addBuilding: function(buildingData) {
     var scene = this.scene;
     var gx = buildingData.grid_x;
     var gy = buildingData.grid_y;
     var bKey = buildingData.building_key || buildingData.type;
-    var spriteVariant = buildingData.sprite_variant;
-
-    // Resolve sprite frame: use sprite_variant if provided, else look up catalog, else use key
-    var frame = spriteVariant || (BUILDINGS[bKey] && BUILDINGS[bKey].sprite) || bKey;
-
-    // Check if frame exists in atlas, fall back to town_hall
-    if (!scene.textures.get('sprites').has(frame)) {
-      frame = 'town_hall';
-    }
+    var frame = this._frameFor(buildingData.sprite_key, buildingData.sprite_variant || 0, bKey);
 
     var pos = Iso.toScreen(gx, gy);
     var sprite = scene.add.image(pos.x, pos.y, 'sprites', frame);
@@ -114,10 +128,7 @@ var BuildingRenderer = {
     var def = BUILDINGS[buildingKey];
     if (!def) return;
 
-    var frame = def.sprite;
-    if (!scene.textures.get('sprites').has(frame)) {
-      frame = 'town_hall';
-    }
+    var frame = this._frameFor(def.sprite, 0, buildingKey);
 
     var pos = Iso.toScreen(gx, gy);
 

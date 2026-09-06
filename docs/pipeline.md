@@ -44,10 +44,12 @@ flowchart TD
     end
 
     subgraph EVOLVE ["  ④ Consolidate (background)  "]
+        REVISE["📜 Revise\nPending evidence moves\ntruth values (PLN)"]
         DECAY["📉 Decay\nFade less-used memories\nover time"]
         PROPAGATE["🌊 Propagate\nSpread importance &\nemotion through the graph"]
         HEAL["🩹 Heal\nReconnect orphaned\nepisodes to known entities"]
         PROMOTE["⬆️ Promote\nElevate high-importance\nnodes to long-term memory"]
+        CONTRADICT["⚔️ Resolve\nA superseded claim\nloses its probability"]
         PRUNE["✂️ Prune\nRemove irrelevant,\ncontradicted, or stale nodes"]
     end
 
@@ -57,7 +59,7 @@ flowchart TD
         FUSE["⚖️ Rank Fusion\nReciprocal Rank Fusion\npicks the candidate pool"]
         EXPAND["🌐 Graph Expansion\nFollow relation edges\nto related concepts"]
         SALIENCE["🏆 Salience Ranking\nSimilarity · Attention\nConfidence · Valence"]
-        DIVERSE["🎛️ Diversity Cap\nOne moment cannot fill\nthe answer twice over"]
+        DIVERSE["🎛️ Diversity Cap\nOne moment cannot fill\nmore than a sixth of the answer"]
     end
 
     subgraph CLASSIFY ["  ⑥ Classify  "]
@@ -79,8 +81,8 @@ flowchart TD
     CLAIMS --> ATOMS
     ATOMS --> TV & AV & VAL & EDGES
 
-    ATOMS <-.->|"continuous\nbackground cycle"| DECAY
-    DECAY --> PROPAGATE --> HEAL --> PROMOTE --> PRUNE
+    ATOMS <-.->|"one epoch each time\nthe space is used"| REVISE
+    REVISE --> DECAY --> PROPAGATE --> HEAL --> PROMOTE --> CONTRADICT --> PRUNE
 
     ATOMS -->|"on recall"| KNN & BM25
     KNN & BM25 --> FUSE
@@ -103,7 +105,7 @@ flowchart TD
     class GATE,SENTIMENT,WHEN receiveNode
     class NER,RESOLVE,PRONOUNS,CLAIMS,CONTEXT understandNode
     class ATOMS,TV,AV,VAL,EDGES storeNode
-    class DECAY,PROPAGATE,HEAL,PROMOTE,PRUNE evolveNode
+    class REVISE,DECAY,PROPAGATE,HEAL,PROMOTE,CONTRADICT,PRUNE evolveNode
     class KNN,BM25,FUSE,EXPAND,SALIENCE,DIVERSE retrieveNode
     class CRITICAL criticalNode
     class ANTIPATTERN warnNode

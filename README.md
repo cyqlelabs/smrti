@@ -22,6 +22,7 @@ Inspired by [AtomSpace](https://github.com/opencog/atomspace): memories are grap
 - [Architecture](#architecture)
 - [Data Model](#data-model)
 - [smrti-town](#smrti-town)
+- [Testing](#testing)
 - [Benchmarks](#benchmarks)
 - [Upgrading](#upgrading)
 
@@ -183,7 +184,7 @@ claude mcp add smrti -- smrti serve mcp
 | Tool                  | Description                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------- |
 | `smrti_remember`      | Store an episode, goal, or belief (use `type=belief` + `evidence` to assert a probabilistic fact) |
-| `smrti_recall`        | Semantic search with salience scoring and severity classification                                 |
+| `smrti_recall`        | Vector and BM25 search fused, ranked by salience, each result classified by severity              |
 | `smrti_reflect`       | Run a consolidation epoch                                                                         |
 | `smrti_forget`        | Stop memories matching a query from surfacing; the next epoch may prune them                      |
 | `smrti_status`        | Memory statistics and the tenant's spaces                                                         |

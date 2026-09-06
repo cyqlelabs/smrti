@@ -39,7 +39,7 @@ If no LLM is reachable, a hardcoded five-member founding council steps in and ev
 |-------|-------------|
 | 1 | Director picks the time delta (scene / routine / montage / skip) |
 | 2 | Each citizen perceives their surroundings and decides — rule-based, no LLM, weighted by recalled memories |
-| 3 | Needs drift according to what the citizen is actually doing (9-level Maslow hierarchy); safety rises with the crime rate |
+| 3 | Needs drift according to what the citizen is actually doing (9-level Maslow hierarchy); the safety need rises with the crime rate |
 | 4 | The dead free their home and job; those close to them remember it |
 | 5 | Every 12 ticks: memories consolidate, relationships move on what each citizen remembers of the other, the town is saved; every 120, culture refreshes |
 | 6 | Actions resolve: movement, eating, working, socializing — each with economic effects, each written to the memory of the citizen who lived it with the tone it had; skills grow with hours at the right building |
@@ -144,7 +144,7 @@ curl -X POST http://localhost:8430/settings \
 | `SMRTI_TOWN_TENANT` | `millbrook` | Tenant ID for all Smrti spaces |
 | `SMRTI_TOWN_LLM_URL` | `http://0.0.0.0:8421/v1` | OpenAI-compatible endpoint the town calls |
 | `SMRTI_TOWN_LLM_MODEL` | `Qwen3.5-9B-Q8_0.gguf` | Model name sent with each call |
-| `SMRTI_TOWN_STATIC` | `src/smrti_town/static` | Override the frontend directory |
+| `SMRTI_TOWN_STATIC` | the package's `static/` directory | Override the frontend directory |
 
 ---
 
@@ -179,7 +179,7 @@ GET  /settings                    Current LLM settings
 POST /settings                    Update LLM settings
 ```
 
-WebSocket at `/ws` — streams `tick`, `state`, `phase`, `council_meeting`, `council_result`, `council_counter`, `petition_update`, `building_placed`, `immigration`, `event`, `game_over`, `dialogue_patch`, `paused`, `resumed`, `reset`, and `pong` messages.
+WebSocket at `/ws` — streams `tick`, `state`, `phase`, `council_meeting`, `council_result`, `council_counter`, `petition_update`, `building_placed`, `building_demolished`, `immigration`, `event`, `crisis`, `game_over`, `dialogue_patch`, `paused`, `resumed`, `reset`, and `pong` messages.
 
 ---
 

@@ -248,7 +248,7 @@ Citizens generate petitions based on unmet needs:
 
 ### 6.3 Petition Resolution
 
-Petitions accumulate signatures (more citizens with the same need = higher priority). The council reviews them during meetings. The player sees petitions ranked by urgency and can approve, defer, or dismiss them. Deferred petitions grow in urgency over time.
+Petitions accumulate signatures (more citizens with the same need = higher priority). The council reviews them during meetings. The player sees petitions ranked by urgency and can approve, defer, or dismiss them. Deferred petitions grow in urgency over time. *Deferral is unwired: the routes are approve and dismiss.*
 
 ---
 
@@ -310,6 +310,8 @@ There's no hard win state — it's a sandbox. But there are milestones and failu
 - Population drops below 5 — town is abandoned.
 - Satisfaction stays below 20% for extended time — mass exodus.
 
+*Wired in part: the game ends when the last citizen dies, an empty treasury raises a warning, and unsatisfied citizens leave one at a time; no population floor ends the game.*
+
 ---
 
 ## 10. Sprite Requirements
@@ -349,7 +351,7 @@ The LLM is called at these moments (never in the hot tick path):
 2. **Council meetings** — Given town state, generate debate and proposal. *Wired.*
 3. **New resident generation** — Given housing type, generate person/family. *Wired.*
 4. **Citizen petitions** — Given unmet needs, generate petition text. *Planned — petitions read from templates today.*
-5. **Event narration** — Describe weddings, crises, festivals in character. *Planned — `events.py` has no callers.*
+5. **Event narration** — Describe weddings, crises, festivals in character. *Planned for the narration: events roll and land on the citizens who were there (`events.py`), but their text comes from templates.*
 6. **Dialogue** — When citizens interact, generate in-character conversation. *Wired.*
 
 Council proposals carry the building catalog in the prompt, so the model can only pick something the engine knows how to build. Every call has a template fallback.

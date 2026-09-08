@@ -20,6 +20,9 @@ def inline_model(tmp_path, monkeypatch):
         initializer=[numpy_helper.from_array(weights, "w")],
     )
     model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 17)])
+    # make_model stamps the installed onnx library's newest IR version, which a
+    # runtime a release or two older refuses; the test is about the conversion.
+    model.ir_version = 9
     src_dir = tmp_path / "model"
     src_dir.mkdir()
     onnx.save(model, src_dir / "model.onnx")

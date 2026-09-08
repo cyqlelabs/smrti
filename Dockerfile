@@ -36,7 +36,8 @@ ENV PYTHONUNBUFFERED=1 \
     HOME=/home/smrti \
     SMRTI_DB=/data/memory.db \
     FASTEMBED_CACHE_PATH=/opt/smrti/models \
-    HF_HOME=/data/models
+    HF_HOME=/data/models \
+    XDG_CACHE_HOME=/data/cache
 
 RUN useradd --system --create-home --home-dir /home/smrti --shell /usr/sbin/nologin smrti \
  && mkdir -p /data /opt/smrti/models \

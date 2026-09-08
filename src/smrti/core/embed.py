@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import threading
 import warnings
+from pathlib import Path
 
 _singleton: "EmbeddingProvider | None" = None
 _singleton_lock = threading.Lock()
@@ -14,6 +15,18 @@ def get_embedding_provider() -> "EmbeddingProvider":
         if _singleton is None:
             _singleton = EmbeddingProvider()
     return _singleton
+
+
+def _mapped_model_dir(model_name: str) -> Path:
+    """Download the model as FastEmbed would and return a directory holding it with its weights mapped."""
+    from fastembed import TextEmbedding
+    from fastembed.common.utils import define_cache_dir
+
+    from .weights import externalized
+
+    description = TextEmbedding._get_model_description(model_name)
+    model_dir = TextEmbedding.download_model(description, str(define_cache_dir()))
+    return externalized(model_dir / description.model_file, with_siblings=True).parent
 
 
 class EmbeddingProvider:
@@ -29,9 +42,18 @@ class EmbeddingProvider:
             with self._lock:
                 if self._model is None:
                     from fastembed import TextEmbedding
+
+                    from .weights import release_heap
+
+                    mapped = _mapped_model_dir(self._model_name)
                     with warnings.catch_warnings():
                         warnings.filterwarnings("ignore", message=".*now uses mean pooling.*")
-                        self._model = TextEmbedding(model_name=self._model_name)
+                        self._model = TextEmbedding(
+                            model_name=self._model_name,
+                            specific_model_path=str(mapped),
+                            enable_cpu_mem_arena=False,
+                        )
+                    release_heap()
         return self._model
 
     def embed(self, text: str) -> list[float]:

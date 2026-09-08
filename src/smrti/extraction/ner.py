@@ -13,6 +13,8 @@ import os
 import threading
 from typing import Optional
 
+from smrti.core.weights import externalized, release_heap
+
 # The ONNX export of the multilingual GLiNER2 model, published alongside the
 # runtime. Override with SMRTI_NER_MODEL to use another export (fp16 variants,
 # the larger English model, or a local path).
@@ -57,9 +59,23 @@ class NERProvider:
         if self._model is None:
             with self._lock:
                 if self._model is None:
+                    import onnxruntime as ort
                     from gliner2_onnx import GLiNER2ONNXRuntime
 
-                    self._model = GLiNER2ONNXRuntime.from_pretrained(self._model_name)
+                    class MappedRuntime(GLiNER2ONNXRuntime):
+                        """GLiNER2's runtime with every weight file mapped from disk."""
+
+                        def _load_model(self, path, providers):
+                            options = ort.SessionOptions()
+                            # No arena: per-run scratch goes back to the
+                            # allocator instead of staying reserved at its peak.
+                            options.enable_cpu_mem_arena = False
+                            return ort.InferenceSession(
+                                str(externalized(path)), providers=providers, sess_options=options
+                            )
+
+                    self._model = MappedRuntime.from_pretrained(self._model_name)
+                    release_heap()
         return self._model
 
     def extract(
@@ -116,7 +132,11 @@ class NERProvider:
         # Filter out verb phrases misidentified as preference/constraint entities.
         # Uses the span head (multilingual) to distinguish noun phrases from
         # imperative clauses like "Avoid at all costs" / "Niemals löschen".
-        return [ent for ent in result if not _is_verb_phrase(ent, model)]
+        result = [ent for ent in result if not _is_verb_phrase(ent, model)]
+        # A pass over a long text leaves ~130MB of freed scratch in the heap;
+        # returning it costs 15ms against the 500ms the pass took.
+        release_heap()
+        return result
 
     def classify_pronoun(self, name: str) -> bool:
         """Return True if `name` is a pronoun rather than a proper name.

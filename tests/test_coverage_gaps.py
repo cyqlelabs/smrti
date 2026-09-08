@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from contextlib import contextmanager
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -50,10 +51,17 @@ class _StubVector(list):
         return list(self)
 
 
+@contextmanager
+def _stub_model():
+    with patch("fastembed.TextEmbedding", _StubModel), \
+            patch("smrti.core.embed._mapped_model_dir", return_value="stub-dir"):
+        yield
+
+
 def test_provider_loads_the_model_lazily_and_once():
     provider = EmbeddingProvider(model_name="stub/model")
     assert provider._model is None
-    with patch("fastembed.TextEmbedding", _StubModel) as _:
+    with _stub_model():
         model = provider._get_model()
         assert model.model_name == "stub/model"
         assert provider._get_model() is model  # cached, not reloaded
@@ -61,14 +69,14 @@ def test_provider_loads_the_model_lazily_and_once():
 
 def test_provider_embeds_a_single_text():
     provider = EmbeddingProvider()
-    with patch("fastembed.TextEmbedding", _StubModel):
+    with _stub_model():
         assert provider.embed("hello") == [0.0, 0.0, 0.0]
         assert provider._get_model().seen[-1] == ["hello"]
 
 
 def test_provider_embeds_a_batch():
     provider = EmbeddingProvider()
-    with patch("fastembed.TextEmbedding", _StubModel):
+    with _stub_model():
         vectors = provider.embed_batch(["a", "b"])
     assert vectors == [[0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]
 

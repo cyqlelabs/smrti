@@ -68,8 +68,12 @@ def test_extract_merges_entities_across_chunks():
 
 def _install_fake_runtime(monkeypatch, from_pretrained):
     module = type(sys)("gliner2_onnx")
-    module.GLiNER2ONNXRuntime = MagicMock()
-    module.GLiNER2ONNXRuntime.from_pretrained = from_pretrained
+
+    class GLiNER2ONNXRuntime:
+        """A class, not a mock: the provider subclasses it to map the weights."""
+
+    GLiNER2ONNXRuntime.from_pretrained = staticmethod(from_pretrained)
+    module.GLiNER2ONNXRuntime = GLiNER2ONNXRuntime
     monkeypatch.setitem(sys.modules, "gliner2_onnx", module)
     return module
 

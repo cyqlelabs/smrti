@@ -59,7 +59,7 @@ docker run -d -p 8421:8421 -v smrti-data:/data \
 ```
 
 - **Tags** — every `v*` release publishes `latest`, the exact version, and a rolling `MAJOR.MINOR`; pin whichever you want to track.
-- **Storage** — `/data` holds the database and the NER weights that download on first extraction; mount a volume or both die with the container.
+- **Storage** — `/data` holds the database, the NER weights that download on first extraction, and the mapped copies of both models that the first load writes; mount a volume or all of them die with the container.
 - **User** — runs as non-root `smrti`.
 
 ## Quick Start

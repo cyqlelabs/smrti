@@ -1,8 +1,20 @@
 """Severity classification for recall results."""
 from __future__ import annotations
 
-from smrti.core.models import AtomType, RecallResult
+from smrti.core.models import Atom, AtomType, RecallResult
 from smrti.core.provenance import VALENCE_STATED
+
+
+def is_critical_warning(atom: Atom) -> bool:
+    """Whether the atom is a stated, severe warning — the one memory kind that
+    becomes a hard constraint at recall, and the one retrieval must never
+    damp on the way there."""
+    return (
+        atom.metadata.get(VALENCE_STATED) is True
+        and atom.type != AtomType.CONCEPT
+        and atom.valence.own < -0.5
+        and atom.valence.own_intensity > 0.5
+    )
 
 
 def classify_memory(r: RecallResult) -> str:
@@ -26,12 +38,9 @@ def classify_memory(r: RecallResult) -> str:
     neighbours — see :class:`smrti.core.models.Valence`.
     """
     atom = r.atom
-    v = atom.valence.own
-    i = atom.valence.own_intensity
     p = atom.truth.probability
     c = atom.truth.confidence
-    stated = atom.metadata.get(VALENCE_STATED) is True
-    if stated and atom.type != AtomType.CONCEPT and v < -0.5 and i > 0.5:
+    if is_critical_warning(atom):
         return "critical_warning"
     if p < 0.3 and c > 0.3:
         return "known_antipattern"

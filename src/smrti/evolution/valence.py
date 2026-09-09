@@ -43,11 +43,14 @@ def propagate_valence(
         neighbor_ids = [r["target_id"] for r in forward if r["target_id"]]
         neighbor_ids += [r["source_id"] for r in backward if r["source_id"]]
 
-    for nid in neighbor_ids:
-        db.execute(
-            """UPDATE atoms SET
-                   valence   = MAX(-1.0, MIN(1.0, valence   + ? * (? - valence))),
-                   intensity = MAX(0.0,  MIN(1.0, intensity + ? * (? - intensity)))
-               WHERE id = ? AND tenant_id = ? AND space = ?""",
-            (step, valence, step, intensity, nid, tenant_id, space),
-        )
+    if not neighbor_ids:
+        return
+    # One statement for the whole neighbourhood rather than a commit per
+    # neighbour.
+    db.execute_many(
+        """UPDATE atoms SET
+               valence   = MAX(-1.0, MIN(1.0, valence   + ? * (? - valence))),
+               intensity = MAX(0.0,  MIN(1.0, intensity + ? * (? - intensity)))
+           WHERE id = ? AND tenant_id = ? AND space = ?""",
+        [(step, valence, step, intensity, nid, tenant_id, space) for nid in neighbor_ids],
+    )

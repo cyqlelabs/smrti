@@ -38,7 +38,7 @@ def _fts_rows(mem) -> list[sqlite3.Row]:
 
 
 def _lexical(mem, query: str, limit: int = 50) -> list[str]:
-    return _lexical_entry_points(query, mem.tenant_id, [mem.write_space], mem.db, limit)
+    return _lexical_entry_points(query, mem.tenant_id, [mem.write_space], mem.db, limit, 0.0)
 
 
 # ── index maintenance ────────────────────────────────────────────────────────
@@ -398,9 +398,9 @@ def test_only_the_lexical_head_joins_the_fused_pool(mem, monkeypatch):
     seen = {}
     real = fan_out._lexical_entry_points
 
-    def spy(query, tenant_id, read_spaces, db, limit):
+    def spy(query, tenant_id, read_spaces, db, limit, min_confidence):
         seen["limit"] = limit
-        return real(query, tenant_id, read_spaces, db, limit)
+        return real(query, tenant_id, read_spaces, db, limit, min_confidence)
 
     monkeypatch.setattr(fan_out, "_lexical_entry_points", spy)
     for n in range(60):

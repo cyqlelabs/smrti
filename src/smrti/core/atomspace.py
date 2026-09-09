@@ -5,7 +5,7 @@ import json
 import struct
 from typing import Optional
 
-from smrti.core.db import Database, fts_write, stable_rowid, vec_delete, vec_insert
+from smrti.core.db import Database, fts_delete, fts_write, stable_rowid, vec_delete, vec_insert
 from smrti.core.embed import EmbeddingProvider
 from smrti.core.models import (
     Atom,
@@ -14,6 +14,25 @@ from smrti.core.models import (
     TruthValue,
     atom_from_row,
 )
+from smrti.core.provenance import ATOM_METADATA_JSON
+
+# Stamped on an atom stored without a vector, so the epoch can find what
+# needs re-embedding without checking every atom against the index.
+VECTOR_MISSING = "vector_missing"
+
+# Chunk size for generated ``IN (...)`` lists, well under SQLite's variable
+# limit on spaces holding tens of thousands of atoms.
+_ID_CHUNK = 400
+
+
+def embedding_text(atom: Atom) -> str:
+    """The text an atom is embedded on: its label, plus its content when it has one."""
+    return f"{atom.label} {atom.content}" if atom.content else atom.label
+
+
+def _chunks(ids: list[str]):
+    for start in range(0, len(ids), _ID_CHUNK):
+        yield ids[start : start + _ID_CHUNK]
 
 
 class AtomSpace:
@@ -141,19 +160,83 @@ class AtomSpace:
                 embedding is not None or require_vector
             ):
                 if embedding is None:
-                    text_to_embed = atom.label
-                    if atom.content:
-                        text_to_embed = f"{atom.label} {atom.content}"
-                    embedding = self._embed.embed(text_to_embed)
+                    embedding = self._embed.embed(embedding_text(atom))
                 vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
                 if existing_vec:
                     statements.extend(vec_delete([atom.id]))
                 statements.append(
                     vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label)
                 )
+            elif not existing_vec:
+                # Stored without a vector: mark it, so the epoch's repair pass
+                # can find it and recall can score it in the meantime.
+                statements.append(
+                    (
+                        f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}', 1) WHERE id = ?",
+                        (atom.id,),
+                    )
+                )
 
         self._db.execute_batch(statements)
         return atom.id
+
+    def file_vector(self, atom: Atom, embedding: list[float]) -> None:
+        """Give an atom stored without a vector its index row, and clear the mark."""
+        vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+        self._db.execute_batch([
+            *vec_delete([atom.id]),
+            vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
+            (
+                f"UPDATE atoms SET metadata = json_remove({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}') WHERE id = ?",
+                (atom.id,),
+            ),
+        ])
+
+    def delete_atoms(self, atom_ids: list[str], tenant_id: str) -> int:
+        """Hard-delete atoms and every row that references them. Returns the count removed.
+
+        The set grows to closure first: the relation edges on the atoms, the
+        edges on those edges (a ``contradicts`` edge between two claim
+        edges), and so on — an edge can sit in any space of the tenant, since
+        a bridge space points back into both parents. Evidence and aliases
+        are filed against relation atoms too (a supersession files negative
+        evidence against the edge it replaced), and all three references are
+        enforced foreign keys, so the whole closure goes in one transaction
+        with the checks deferred to its commit: a delete that ordered the
+        rows by hand left the space half-cleared on the first shape it had
+        not foreseen.
+        """
+        doomed: dict[str, None] = dict.fromkeys(atom_ids)
+        frontier = list(doomed)
+        while frontier:
+            found: list[str] = []
+            for chunk in _chunks(frontier):
+                ph = ",".join("?" * len(chunk))
+                found.extend(
+                    r["id"]
+                    for r in self._db.fetchall(
+                        f"""SELECT id FROM atoms WHERE type = 'relation' AND tenant_id = ?
+                            AND (source_id IN ({ph}) OR target_id IN ({ph}))""",
+                        (tenant_id, *chunk, *chunk),
+                    )
+                    if r["id"] not in doomed
+                )
+            doomed.update(dict.fromkeys(found))
+            frontier = found
+
+        ids = list(doomed)
+        statements: list[tuple] = [("PRAGMA defer_foreign_keys = ON", ())]
+        for chunk in _chunks(ids):
+            ph = ",".join("?" * len(chunk))
+            statements.extend([
+                *vec_delete(chunk),
+                *fts_delete(self._db, chunk),
+                (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM atoms WHERE id IN ({ph})", tuple(chunk)),
+            ])
+        self._db.execute_batch(statements)
+        return len(ids)
 
     def get_atom(self, atom_id: str, tenant_id: str, space: str) -> Atom | None:
         row = self._db.fetchone(
@@ -214,10 +297,7 @@ class AtomSpace:
             and (prior["label"] != atom.label or prior["content"] != atom.content)
         ):
             statements.extend(fts_write(self._db, atom.id, atom.label, atom.content))
-            text_to_embed = atom.label
-            if atom.content:
-                text_to_embed = f"{atom.label} {atom.content}"
-            embedding = self._embed.embed(text_to_embed)
+            embedding = self._embed.embed(embedding_text(atom))
             vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
             statements.extend(vec_delete([atom.id]))
             statements.append(

@@ -202,11 +202,26 @@ class AtomPair(BaseModel):
 
 
 class SpaceOverlap(BaseModel):
-    """Result of computing overlap between two spaces."""
+    """Result of computing overlap between two spaces.
+
+    ``jaccard`` and ``pairs`` describe the sampled atoms — the most salient
+    ``sampled_a`` of the ``size_a`` in the first space, and likewise for the
+    second — so a caller can tell an overlap of two whole spaces from one
+    of their heads.
+    """
     space_a: str
     space_b: str
     jaccard: float = 0.0
     pairs: list[AtomPair] = Field(default_factory=list)
+    sampled_a: int = 0
+    sampled_b: int = 0
+    size_a: int = 0
+    size_b: int = 0
+
+    @property
+    def complete(self) -> bool:
+        """Whether every atom of both spaces was considered."""
+        return self.sampled_a >= self.size_a and self.sampled_b >= self.size_b
 
     @property
     def bridge_space_name(self) -> str:

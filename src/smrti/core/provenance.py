@@ -33,15 +33,44 @@ ATOM_SOURCE = (
 # input, so unreadable metadata is replaced rather than appended to.
 ATOM_METADATA_JSON = "CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END"
 
-# Whether forget() deliberately sank this atom. The stamp is what tells a
-# forget from decay drowning: the epoch lifts a drowned permanent belief back
-# to its asserted probability, and without the stamp that lift would undo
-# every deliberate forget one epoch later. An atom with no stamp predates
-# stamping and reads as never forgotten.
-ATOM_FORGOTTEN = (
-    "COALESCE(CASE WHEN json_valid(metadata) "
-    "THEN json_extract(metadata, '$.forgotten') END, 0)"
-)
+def _metadata_column(table: str) -> str:
+    return f"{table}.metadata" if table else "metadata"
+
+
+def forgotten_sql(table: str = "") -> str:
+    """Whether forget() deliberately sank this atom, read from *table*'s row.
+
+    The stamp is what tells a forget from decay drowning: the epoch lifts a
+    drowned permanent belief back to its asserted probability, and without
+    the stamp that lift would undo every deliberate forget one epoch later.
+    An atom with no stamp predates stamping and reads as never forgotten.
+
+    Every reader that renders or resolves an atom applies this — recall,
+    the proxy's entity enrichment, the extraction context, entity resolution
+    — so that forgetting one atom hides it wherever it is represented.
+    """
+    column = _metadata_column(table)
+    return (
+        f"COALESCE(CASE WHEN json_valid({column}) "
+        f"THEN json_extract({column}, '$.forgotten') END, 0)"
+    )
+
+
+ATOM_FORGOTTEN = forgotten_sql()
+
+# Set on a claim edge that a later claim about the same subject replaced,
+# naming the edge that replaced it. A marked edge is the entity's history;
+# rendering reads its current state from the unmarked ones.
+SUPERSEDED_BY = "superseded_by"
+
+
+def claim_current_sql(table: str = "") -> str:
+    """Whether a claim edge in *table* has not been superseded."""
+    column = _metadata_column(table)
+    return (
+        f"(CASE WHEN json_valid({column}) "
+        f"THEN json_extract({column}, '$.{SUPERSEDED_BY}') END) IS NULL"
+    )
 
 # An atom's own tone read back from SQL, falling back to the current value for
 # rows written before the columns existed. Only propagation reads the drifting

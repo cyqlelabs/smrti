@@ -32,6 +32,17 @@ def create_smrti() -> Smrti:
     )
 
 
+def _coverage(overlap) -> dict:
+    """How much of each space an operation's figures describe."""
+    return {
+        "sampled_a": overlap.sampled_a,
+        "size_a": overlap.size_a,
+        "sampled_b": overlap.sampled_b,
+        "size_b": overlap.size_b,
+        "complete": overlap.complete,
+    }
+
+
 def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     if name == "smrti_remember":
         content = args["content"]
@@ -181,6 +192,7 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 "space_a": result.space_a,
                 "space_b": result.space_b,
                 "jaccard": result.jaccard,
+                "coverage": _coverage(result),
                 "matched_pairs": [
                     {
                         "atom_a": {"id": p.atom_a.id, "label": p.atom_a.label, "space": p.atom_a.space},
@@ -200,6 +212,7 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                     for a in result.atoms
                 ],
                 "jaccard": result.overlap.jaccard if result.overlap else 0.0,
+                "coverage": _coverage(result.overlap) if result.overlap else None,
             }
         elif op == "diff":
             result = mem.space_difference(other_space=other_space, threshold=threshold)

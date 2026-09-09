@@ -19,6 +19,8 @@ from __future__ import annotations
 
 import struct
 
+import numpy as np
+
 from smrti.core.db import stable_rowid
 from smrti.core.models import (
     Atom,
@@ -33,15 +35,37 @@ W_EMBEDDING: float = 0.6
 W_ENTITY_TYPE: float = 0.2
 W_NEIGHBORHOOD: float = 0.2
 
+# How many atoms of each space an operation considers: the most salient
+# ones, by attention. Every result reports the sample against the space's
+# size (``SpaceOverlap.sampled_a`` / ``size_a``), so a Jaccard over a
+# 500-atom head of a 20,000-atom space is read as what it is.
+SAMPLE_LIMIT = 500
+
 
 def _get_space_atoms(tenant_id: str, space: str, db) -> list[Atom]:
-    """Return the top 500 most salient non-relation atoms in a space."""
+    """Return the most salient non-relation atoms in a space, up to SAMPLE_LIMIT."""
     rows = db.fetchall(
         """SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'
-           ORDER BY (sti + lti) DESC LIMIT 500""",
-        (tenant_id, space),
+           ORDER BY (sti + lti) DESC LIMIT ?""",
+        (tenant_id, space, SAMPLE_LIMIT),
     )
     return [atom_from_row(r) for r in rows]
+
+
+def _space_size(tenant_id: str, space: str, db) -> int:
+    row = db.fetchone(
+        "SELECT COUNT(*) AS n FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'",
+        (tenant_id, space),
+    )
+    return row["n"] if row else 0
+
+
+def _unit_rows(vectors: list[list[float]]) -> np.ndarray:
+    """The vectors as rows of unit length; a zero vector stays zero."""
+    matrix = np.asarray(vectors, dtype=np.float32)
+    norms = np.linalg.norm(matrix, axis=1, keepdims=True)
+    norms[norms < 1e-9] = 1.0
+    return matrix / norms
 
 
 def _get_embedding(atom_id: str, db) -> list[float] | None:
@@ -203,18 +227,20 @@ def _match_atoms(
     # Pre-filter: only compute expensive contextual similarity for pairs whose
     # raw embedding similarity is above a looser pre-filter (threshold - 0.15).
     # This avoids neighborhood embedding calls for clearly-unrelated pairs.
+    # The raw similarities come from one matrix product — two full samples
+    # are a quarter of a million pairs, which as Python cosines was seconds
+    # per operation.
     pre_filter = max(0.0, threshold - 0.15)
 
     neighbor_cache: dict[str, list[float] | None] = {}
     candidates: list[tuple[float, str, str]] = []
-    for aid, vec_a in emb_a.items():
-        for bid, vec_b in emb_b.items():
-            emb_sim = _cosine_similarity(vec_a, vec_b)
-            if emb_sim < pre_filter:
-                continue
-
+    if emb_a and emb_b:
+        ids_a, ids_b = list(emb_a), list(emb_b)
+        sims = _unit_rows([emb_a[i] for i in ids_a]) @ _unit_rows([emb_b[i] for i in ids_b]).T
+        for i, j in zip(*np.nonzero(sims >= pre_filter)):
+            aid, bid = ids_a[i], ids_b[j]
             ctx_sim = _contextual_similarity(
-                atom_a_map[aid], atom_b_map[bid], emb_sim, db, embed_engine,
+                atom_a_map[aid], atom_b_map[bid], float(sims[i, j]), db, embed_engine,
                 neighbor_cache=neighbor_cache,
             )
             if ctx_sim >= threshold:
@@ -252,15 +278,22 @@ def space_overlap(
     """
     atoms_a = _get_space_atoms(tenant_id, space_a, db)
     atoms_b = _get_space_atoms(tenant_id, space_b, db)
+    coverage = dict(
+        sampled_a=len(atoms_a),
+        sampled_b=len(atoms_b),
+        size_a=_space_size(tenant_id, space_a, db),
+        size_b=_space_size(tenant_id, space_b, db),
+    )
 
     if not atoms_a or not atoms_b:
-        return SpaceOverlap(space_a=space_a, space_b=space_b, jaccard=0.0)
+        return SpaceOverlap(space_a=space_a, space_b=space_b, jaccard=0.0, **coverage)
 
     pairs, matched_a, matched_b = _match_atoms(
         atoms_a, atoms_b, db, threshold, embed_engine,
     )
 
-    # Jaccard = |A ∩ B| / |A ∪ B| = matched / (|A| + |B| - matched)
+    # Jaccard = |A ∩ B| / |A ∪ B| = matched / (|A| + |B| - matched), over
+    # the sampled atoms.
     intersection_size = len(pairs)
     union_size = len(atoms_a) + len(atoms_b) - intersection_size
     jaccard = intersection_size / union_size if union_size > 0 else 0.0
@@ -270,6 +303,7 @@ def space_overlap(
         space_b=space_b,
         jaccard=jaccard,
         pairs=pairs,
+        **coverage,
     )
 
 

@@ -202,8 +202,8 @@ def test_get_http_returns_client():
 
 # ── _inject_context agent episode filtering ───────────────────────────────────
 
-def test_inject_context_filters_agent_episodes():
-    """Agent-sourced episodes must not be injected back as context."""
+def test_inject_context_serves_agent_episodes_as_the_models_own():
+    """An agent-authored memory is injected, labelled as the model's own earlier reply."""
     from smrti.servers.proxy import _inject_context
 
     agent_atom = Atom(
@@ -221,9 +221,11 @@ def test_inject_context_filters_agent_episodes():
 
     async def _run():
         with patch("smrti.servers.proxy._recall", return_value=[agent_result]):
-            result, ctx, mems = await _inject_context(body, "t1", "s1", ["s1"])
-        return result, ctx
+            with patch("smrti.servers.proxy.get_mem", return_value=MagicMock()):
+                result, ctx, mems = await _inject_context(body, "t1", "s1", ["s1"])
+        return result, ctx, mems
 
-    result, ctx = run(_run())
-    assert ctx == ""
-    assert result == body
+    result, ctx, mems = run(_run())
+    assert "[from your own earlier reply] Agent output" in ctx
+    assert result["messages"][0]["role"] == "system"
+    assert mems[0]["source"] == "agent"

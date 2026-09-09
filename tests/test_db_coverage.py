@@ -197,7 +197,9 @@ def test_personality_migration_rolls_back(db_path):
 def test_vec_atoms_migration_rolls_back(db_path):
     get_database(db_path)
     close_database(db_path)
-    conn = sqlite3.connect(db_path)
+    # Written outside the engine's index maintenance, but with its functions
+    # registered: atoms carries an index on u_lower(label).
+    conn = _make_connection(db_path)
     # A leftover backup table forces the migration to run on the next open,
     # and it needs a row that joins to a real atom or there is nothing to
     # copy and nothing to fail on.
@@ -342,7 +344,7 @@ def test_the_lexical_index_is_not_built_before_the_atoms_table_exists(db_path):
 def test_a_failed_lexical_backfill_rolls_back(db_path):
     get_database(db_path)
     close_database(db_path)
-    conn = sqlite3.connect(db_path)
+    conn = _make_connection(db_path)
     conn.execute(
         "INSERT INTO atoms (id, type, label, tenant_id, space) "
         "VALUES ('a1', 'concept', 'Alice', 't', 's')"

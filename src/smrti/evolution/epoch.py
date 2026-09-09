@@ -1,12 +1,13 @@
 """Consolidation epoch: the main memory evolution loop."""
 from __future__ import annotations
 
-from smrti.core.db import fts_delete, vec_delete
+from smrti.core.atomspace import VECTOR_MISSING, AtomSpace, embedding_text
 from smrti.core.models import (
     PERMANENT_PROBABILITY,
     SUPERSEDED_PROBABILITY,
     EpochResult,
     TruthValue,
+    atom_from_row,
 )
 from smrti.core.provenance import (
     ATOM_FORGOTTEN,
@@ -52,6 +53,20 @@ def _param(personality: dict, key: str, default: float) -> float:
     """
     value = personality.get(key)
     return default if value is None else value
+
+
+def _repair_vectors(tenant_id: str, space: str, db, embed_engine) -> None:
+    rows = db.fetchall(
+        f"""SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'
+            AND NOT {ATOM_FORGOTTEN}
+            AND (CASE WHEN json_valid(metadata)
+                      THEN json_extract(metadata, '$.{VECTOR_MISSING}') END) IS NOT NULL""",
+        (tenant_id, space),
+    )
+    atomspace = AtomSpace(db, embed_engine)
+    for row in rows:
+        atom = atom_from_row(row)
+        atomspace.file_vector(atom, list(embed_engine.embed(embedding_text(atom))))
 
 
 def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
@@ -377,22 +392,18 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     atoms_pruned = len(dead_rows)
 
     if dead_rows:
-        atom_ids = [row["id"] for row in dead_rows]
-        ph = ",".join("?" * len(atom_ids))
-        # Relation cascade stays tenant-scoped but cross-space so bridge edges
-        # referencing pruned atoms are cleaned too; all deletes commit together
-        # so a crash cannot leave atoms invisible to KNN.
-        db.execute_batch([
-            (
-                f"DELETE FROM atoms WHERE type = 'relation' AND tenant_id = ? AND (source_id IN ({ph}) OR target_id IN ({ph}))",
-                (tenant_id, *atom_ids, *atom_ids),
-            ),
-            *vec_delete(atom_ids),
-            *fts_delete(db, atom_ids),
-            (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(atom_ids)),
-            (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(atom_ids)),
-            (f"DELETE FROM atoms WHERE id IN ({ph})", tuple(atom_ids)),
-        ])
+        # The cascade is tenant-scoped but cross-space so bridge edges
+        # referencing pruned atoms are cleaned too, and it commits as one so
+        # a crash cannot leave atoms invisible to KNN.
+        AtomSpace(db, embed_engine).delete_atoms(
+            [row["id"] for row in dead_rows], tenant_id
+        )
+
+    # 7. File the vectors of atoms stored without one. A write whose encoder
+    # failed keeps the atom and marks it; until the mark is cleared the atom
+    # is reachable by word alone and embedded afresh on every recall that
+    # finds it.
+    _repair_vectors(tenant_id, space, db, embed_engine)
 
     return EpochResult(
         beliefs_updated=beliefs_updated,

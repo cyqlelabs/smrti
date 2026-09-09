@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from smrti.core.db import fts_delete, vec_delete
-
 if TYPE_CHECKING:
     from smrti.extraction.ner import NERProvider
 
@@ -174,39 +172,44 @@ def merge_pronoun_into_named(
         (named_atom_id, pronoun_atom_id, tenant_id, write_space),
     )
 
-    # Delete self-referencing edges (e.g. "I→is→I" became "Elara→is→Elara")
-    db.execute(
-        "DELETE FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ? AND tenant_id = ? AND space = ?",
-        (named_atom_id, named_atom_id, tenant_id, write_space),
-    )
+    from smrti.core.atomspace import AtomSpace
 
-    # Delete duplicate relation edges (same source, target, relation triple)
-    db.execute(
-        """DELETE FROM atoms WHERE id IN (
-            SELECT a2.id FROM atoms a1
-            JOIN atoms a2 ON a1.source_id = a2.source_id
-                AND a1.target_id = a2.target_id
-                AND a1.relation = a2.relation
-                AND a1.tenant_id = a2.tenant_id
-                AND a1.space = a2.space
-                AND a1.id < a2.id
-            WHERE a1.type = 'relation' AND a2.type = 'relation'
-                AND a1.tenant_id = ?
-                AND a1.space = ?
-                AND a1.source_id = ?
-        )""",
-        (tenant_id, write_space, named_atom_id),
-    )
-
-    # Delete pronoun atom and its vector entry — scoped to tenant_id + space
-    # like the edge reassignment above, so atoms in other spaces are untouched
-    row = db.fetchone(
+    # Self-referencing edges (e.g. "I→is→I" became "Elara→is→Elara") and
+    # duplicate relation edges (same source, target, relation triple) go
+    # through the one cascade, with everything filed against them.
+    doomed = [
+        r["id"]
+        for r in db.fetchall(
+            "SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ? AND tenant_id = ? AND space = ?",
+            (named_atom_id, named_atom_id, tenant_id, write_space),
+        )
+    ]
+    doomed += [
+        r["id"]
+        for r in db.fetchall(
+            """SELECT a2.id FROM atoms a1
+               JOIN atoms a2 ON a1.source_id = a2.source_id
+                   AND a1.target_id = a2.target_id
+                   AND a1.relation = a2.relation
+                   AND a1.tenant_id = a2.tenant_id
+                   AND a1.space = a2.space
+                   AND a1.id < a2.id
+               WHERE a1.type = 'relation' AND a2.type = 'relation'
+                   AND a1.tenant_id = ?
+                   AND a1.space = ?
+                   AND a1.source_id = ?""",
+            (tenant_id, write_space, named_atom_id),
+        )
+    ]
+    # The pronoun atom itself — scoped to tenant_id + space like the edge
+    # reassignment above, so atoms in other spaces are untouched.
+    if db.fetchone(
         "SELECT 1 FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
         (pronoun_atom_id, tenant_id, write_space),
-    )
-    if row:
-        db.execute_batch(vec_delete([pronoun_atom_id]) + fts_delete(db, [pronoun_atom_id]))
-        db.execute("DELETE FROM atoms WHERE id = ?", (pronoun_atom_id,))
+    ):
+        doomed.append(pronoun_atom_id)
+    if doomed:
+        AtomSpace(db, None).delete_atoms(doomed, tenant_id)
 
 
 def find_and_merge_pronoun_atoms(

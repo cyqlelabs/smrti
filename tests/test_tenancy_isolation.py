@@ -650,8 +650,10 @@ def test_clear_space_removes_vectors_and_evidence(db_path, embed):
 
 def test_clear_space_handles_more_atoms_than_one_chunk(db_path, monkeypatch):
     """The chunked delete must cover every atom, not just the first batch."""
+    import smrti.core.atomspace as atomspace_module
+
     mem = Smrti(db_path=db_path, tenant_id="t", write_space="s")
-    monkeypatch.setattr(Smrti, "_CLEAR_CHUNK", 3)
+    monkeypatch.setattr(atomspace_module, "_ID_CHUNK", 3)
     for i in range(10):
         mem.remember(f"note number {i}")
 

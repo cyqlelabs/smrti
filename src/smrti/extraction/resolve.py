@@ -17,6 +17,7 @@ from smrti.core.models import (
     TruthValue,
 )
 from smrti.core.provenance import (
+    ATOM_FORGOTTEN,
     ATOM_METADATA_JSON,
     ATOM_SOURCE,
     SOURCE_AGENT,
@@ -79,7 +80,9 @@ class EntityResolver:
 
         Searches across read_spaces; new atoms are created in write_space.
         Only atoms in write_space are ever written to — a match found in a
-        space this session merely reads is returned untouched.
+        space this session merely reads is returned untouched. A forgotten
+        atom is never a match on any tier: forgetting is final, and an
+        entity mentioned again after being forgotten is a new one.
         """
         # Tier 3 probes once per space, so a repeated name is repeated ONNX work.
         read_spaces = list(dict.fromkeys(read_spaces))
@@ -88,7 +91,7 @@ class EntityResolver:
         # Tier 0: exact label match across read_spaces (u_lower: Unicode-aware
         # case folding — SQLite's LOWER() only folds ASCII)
         row = self.db.fetchone(
-            f"SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph})",
+            f"SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND NOT {ATOM_FORGOTTEN}",
             (name, entity_type, tenant_id, *read_spaces),
         )
         if row:
@@ -102,7 +105,7 @@ class EntityResolver:
         # never merged into concept atoms.
         atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
         row = self.db.fetchone(
-            f"SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND type = ? AND tenant_id = ? AND space IN ({spaces_ph})",
+            f"SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND NOT {ATOM_FORGOTTEN}",
             (name, atom_type, tenant_id, *read_spaces),
         )
         if row:
@@ -111,14 +114,14 @@ class EntityResolver:
 
         # Tier 1: alias table across read_spaces
         atom_id = self.aliases.lookup(name, tenant_id, read_spaces)
-        if atom_id:
+        if atom_id and not self._forgotten(atom_id):
             self._boost_sti(atom_id, tenant_id, write_space)
             return atom_id
 
         # Tier 2: fuzzy match within same entity_type across read_spaces,
         # bounded to the most salient candidates so the scan can't blow up
         candidates = self.db.fetchall(
-            f"SELECT id, label FROM atoms WHERE entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND type != 'relation' ORDER BY (sti + lti) DESC LIMIT 500",
+            f"SELECT id, label FROM atoms WHERE entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND type != 'relation' AND NOT {ATOM_FORGOTTEN} ORDER BY (sti + lti) DESC LIMIT 500",
             (entity_type, tenant_id, *read_spaces),
         )
         if candidates:
@@ -149,7 +152,7 @@ class EntityResolver:
                 vec_match = row
         if vec_match and vec_match["distance"] < self.cosine_threshold:
             atom_row = self.db.fetchone(
-                "SELECT entity_type FROM atoms WHERE id = ?",
+                f"SELECT entity_type FROM atoms WHERE id = ? AND NOT {ATOM_FORGOTTEN}",
                 (vec_match["atom_id"],),
             )
             if atom_row and atom_row["entity_type"] == entity_type:
@@ -195,6 +198,14 @@ class EntityResolver:
                 self.trust, self.episode_id or None, "mentioned again",
                 self.source, tenant_id, space,
             ),
+        )
+
+    def _forgotten(self, atom_id: str) -> bool:
+        return (
+            self.db.fetchone(
+                f"SELECT 1 FROM atoms WHERE id = ? AND {ATOM_FORGOTTEN}", (atom_id,)
+            )
+            is not None
         )
 
     def _in_write_space(self, atom_id: str, tenant_id: str, space: str) -> bool:

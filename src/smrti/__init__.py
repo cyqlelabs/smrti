@@ -416,10 +416,13 @@ class Smrti:
         permanent belief is normally restored to its asserted confidence),
         keeps reinforcement from lifting it, and drops the long-term floors
         that exempt user testimony from pruning — so the next consolidation
-        may remove it. And nothing else: the retrieval that finds the matches
-        runs without the access boost, because forgetting a memory must not
-        make it more prominent, which is what it did when this method called
-        the ordinary recall.
+        may remove it. Its rows in the vector and lexical indexes are
+        removed too: a forgotten atom is never a candidate, so leaving it in
+        the indexes only let it take a slot in every bounded probe from a
+        memory that could surface. And nothing else: the retrieval that finds
+        the matches runs without the access boost, because forgetting a
+        memory must not make it more prominent, which is what it did when
+        this method called the ordinary recall.
         """
         self._note_activity()
         results = self.recall(query=query, top_k=top_k, boost=False)
@@ -430,15 +433,19 @@ class Smrti:
         for r in results:
             if r.atom.space != self.write_space:
                 continue
-            self.db.execute(
-                f"""UPDATE atoms SET
-                        confidence = MIN(confidence * 0.3, ?),
-                        metadata = json_set({ATOM_METADATA_JSON},
-                                            '$.forgotten', json('true')),
-                        updated_at = datetime('now')
-                    WHERE id = ? AND tenant_id = ? AND space = ?""",
-                (sunk_to, r.atom.id, self.tenant_id, self.write_space),
-            )
+            self.db.execute_batch([
+                (
+                    f"""UPDATE atoms SET
+                            confidence = MIN(confidence * 0.3, ?),
+                            metadata = json_set({ATOM_METADATA_JSON},
+                                                '$.forgotten', json('true')),
+                            updated_at = datetime('now')
+                        WHERE id = ? AND tenant_id = ? AND space = ?""",
+                    (sunk_to, r.atom.id, self.tenant_id, self.write_space),
+                ),
+                *vec_delete([r.atom.id]),
+                *fts_delete(self.db, [r.atom.id]),
+            ])
             forgotten.append(r.atom.label)
         return forgotten
 
@@ -502,10 +509,6 @@ class Smrti:
             "personality": dict(personality) if personality else {},
         }
 
-    # Deleting in chunks keeps the generated ``IN (...)`` lists well under
-    # SQLite's variable limit on spaces holding tens of thousands of atoms.
-    _CLEAR_CHUNK = 400
-
     def clear_space(self) -> int:
         """Hard-delete all atoms, evidence, and aliases in write_space. Returns deleted atom count."""
         ids = [
@@ -517,31 +520,14 @@ class Smrti:
         ]
         count = len(ids)
 
-        # Rows outside this space can still reference its atoms: a bridge space
-        # links back to both parents, and evidence or aliases may have been
-        # filed elsewhere. ``atoms.source_id``/``target_id``, ``evidence`` and
-        # ``aliases`` are all real foreign keys with enforcement on, so those
-        # references have to go first or the delete aborts with an integrity
-        # error and the space is left half-cleared. The cascade stays inside
-        # this tenant — another tenant can never hold a reference to begin with.
-        for start in range(0, count, self._CLEAR_CHUNK):
-            chunk = ids[start : start + self._CLEAR_CHUNK]
-            ph = ",".join("?" * len(chunk))
-            self.db.execute_batch([
-                (
-                    f"DELETE FROM atoms WHERE type = 'relation' AND tenant_id = ? "
-                    f"AND (source_id IN ({ph}) OR target_id IN ({ph}))",
-                    (self.tenant_id, *chunk, *chunk),
-                ),
-                *vec_delete(chunk),
-                *fts_delete(self.db, chunk),
-                (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(chunk)),
-                (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(chunk)),
-                (f"DELETE FROM atoms WHERE id IN ({ph})", tuple(chunk)),
-            ])
+        # Rows outside this space can still reference its atoms — a bridge
+        # space links back to both parents — and the cascade that handles
+        # them lives with the pruner's, in ``AtomSpace.delete_atoms``. It stays
+        # inside this tenant: another tenant can never hold a reference.
+        self.atomspace.delete_atoms(ids, self.tenant_id)
 
-        # Relation atoms are in ``ids`` too, but rows filed against the space
-        # rather than against a surviving atom still need sweeping.
+        # Rows filed against the space rather than against a surviving atom
+        # still need sweeping.
         self.db.execute(
             "DELETE FROM evidence WHERE tenant_id=? AND space=?",
             (self.tenant_id, self.write_space),

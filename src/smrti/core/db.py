@@ -247,13 +247,25 @@ CREATE TABLE IF NOT EXISTS aliases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_aliases_atom ON aliases(atom_id);
+
+CREATE INDEX IF NOT EXISTS idx_atoms_label_norm ON atoms(tenant_id, u_lower(label));
+CREATE INDEX IF NOT EXISTS idx_aliases_alias_norm ON aliases(tenant_id, u_lower(alias));
 """
 
 _READ_POOL_SIZE = 4
 
 
 def _u_lower(value: Any) -> Any:
-    """Unicode-aware lowercase for SQL — SQLite's LOWER() only folds ASCII."""
+    """Unicode-aware lowercase for SQL — SQLite's LOWER() only folds ASCII.
+
+    Registered deterministic, which is what lets the two ``*_norm`` indexes
+    be built on it: entity resolution looks every mention up by
+    ``u_lower(label)``, and without an index on that expression each lookup
+    was a scan of the whole partition calling back into Python per row. The
+    cost is that a connection without the function cannot write to ``atoms``
+    or ``aliases`` — reads still work — so every writer goes through
+    :func:`_make_connection`.
+    """
     return value.lower() if isinstance(value, str) else value
 
 
@@ -460,14 +472,16 @@ class Database:
             is None
         ):
             return
+        # Forgotten atoms are out of the index on purpose — ``forget()`` drops
+        # their rows — so they are not counted as missing from it.
         indexed = conn.execute("SELECT COUNT(*) AS n FROM atoms_fts").fetchone()["n"]
         stored = conn.execute(
-            "SELECT COUNT(*) AS n FROM atoms WHERE type != 'relation'"
+            f"SELECT COUNT(*) AS n FROM atoms WHERE type != 'relation' AND NOT {ATOM_FORGOTTEN}"
         ).fetchone()["n"]
         if indexed >= stored:
             return
         rows = conn.execute(
-            "SELECT id, label, content FROM atoms WHERE type != 'relation'"
+            f"SELECT id, label, content FROM atoms WHERE type != 'relation' AND NOT {ATOM_FORGOTTEN}"
         ).fetchall()
         try:
             conn.execute("BEGIN IMMEDIATE")

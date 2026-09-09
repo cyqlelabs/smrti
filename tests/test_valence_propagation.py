@@ -19,14 +19,14 @@ def test_no_propagation_when_valence_too_small():
     propagate_valence("a1", valence=0.05, intensity=0.5, propagation_factor=0.1,
                       db=db, tenant_id="t", space="s")
     # spread_v = 0.05 * 0.1 = 0.005 < 0.01
-    db.execute.assert_not_called()
+    db.execute_many.assert_not_called()
 
 
 def test_no_propagation_when_factor_zero():
     db = _mock_db(forward_ids=["n1"])
     propagate_valence("a1", valence=1.0, intensity=1.0, propagation_factor=0.0,
                       db=db, tenant_id="t", space="s")
-    db.execute.assert_not_called()
+    db.execute_many.assert_not_called()
 
 
 # ── propagates to neighbors ───────────────────────────────────────────────────
@@ -35,21 +35,21 @@ def test_propagates_to_forward_neighbors():
     db = _mock_db(forward_ids=["n1", "n2"])
     propagate_valence("a1", valence=0.8, intensity=0.6, propagation_factor=0.3,
                       db=db, tenant_id="t", space="s")
-    assert db.execute.call_count == 2
+    assert len(db.execute_many.call_args[0][1]) == 2
 
 
 def test_propagates_to_backward_neighbors():
     db = _mock_db(backward_ids=["b1"])
     propagate_valence("a1", valence=0.8, intensity=0.6, propagation_factor=0.3,
                       db=db, tenant_id="t", space="s")
-    assert db.execute.call_count == 1
+    assert len(db.execute_many.call_args[0][1]) == 1
 
 
 def test_propagates_to_both_directions():
     db = _mock_db(forward_ids=["f1"], backward_ids=["b1"])
     propagate_valence("a1", valence=-0.5, intensity=0.7, propagation_factor=0.5,
                       db=db, tenant_id="t", space="s")
-    assert db.execute.call_count == 2
+    assert len(db.execute_many.call_args[0][1]) == 2
 
 
 # ── inertia-scaled step toward source ─────────────────────────────────────────
@@ -59,7 +59,7 @@ def test_sql_uses_inertia_scaled_step():
     db = _mock_db(forward_ids=["n1"])
     propagate_valence("a1", valence=0.6, intensity=0.4, propagation_factor=0.5,
                       db=db, tenant_id="t", space="s")
-    args = db.execute.call_args[0][1]
+    args = db.execute_many.call_args[0][1][0]
     # args: (step, valence, step, intensity, nid, tenant_id, space)
     step, target_valence = args[0], args[1]
     assert abs(step - 0.1) < 1e-9
@@ -71,7 +71,7 @@ def test_custom_mood_inertia_changes_step():
     db = _mock_db(forward_ids=["n1"])
     propagate_valence("a1", valence=0.6, intensity=0.4, propagation_factor=0.5,
                       db=db, tenant_id="t", space="s", mood_inertia=0.4)
-    args = db.execute.call_args[0][1]
+    args = db.execute_many.call_args[0][1][0]
     step = args[0]
     assert abs(step - 0.3) < 1e-9
 
@@ -86,7 +86,7 @@ def test_none_ids_are_filtered():
     ]
     propagate_valence("a1", valence=0.8, intensity=0.5, propagation_factor=0.5,
                       db=db, tenant_id="t", space="s")
-    assert db.execute.call_count == 1
+    assert len(db.execute_many.call_args[0][1]) == 1
 
 
 # ── Negative valence propagates (value passes through) ───────────────────────
@@ -96,8 +96,8 @@ def test_negative_valence_propagates():
     propagate_valence("a1", valence=-0.8, intensity=0.9, propagation_factor=0.5,
                       db=db, tenant_id="t", space="s")
     # abs(-0.8) * 0.5 = 0.4 >= 0.01, should propagate
-    assert db.execute.call_count == 1
-    args = db.execute.call_args[0][1]
+    assert len(db.execute_many.call_args[0][1]) == 1
+    args = db.execute_many.call_args[0][1][0]
     # args: (step, valence, step, intensity, nid, tenant_id, space)
     target_valence = args[1]
     assert target_valence < 0

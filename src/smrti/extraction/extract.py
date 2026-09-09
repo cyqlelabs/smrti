@@ -12,7 +12,14 @@ from typing import TYPE_CHECKING, Optional
 import httpx
 
 from smrti.core.models import STRUCTURAL_RELATIONS, SUPERSEDED_PROBABILITY, Evidence
-from smrti.core.provenance import ATOM_METADATA_JSON, SOURCE_AGENT
+from smrti.core.provenance import (
+    ATOM_FORGOTTEN,
+    ATOM_METADATA_JSON,
+    SOURCE_AGENT,
+    SUPERSEDED_BY,
+    claim_current_sql,
+    forgotten_sql,
+)
 
 from .prompts import AGENT_EXTRACTION_PROMPT, CLAIMS_ONLY_PROMPT, ENTITY_TYPES, EXTRACTION_PROMPT
 
@@ -366,10 +373,11 @@ def _build_entity_context(mem: "Smrti") -> str:
     should see the current state, not the history.
     """
     rows = mem.db.fetchall(
-        """SELECT id, label, entity_type
+        f"""SELECT id, label, entity_type
            FROM atoms
            WHERE tenant_id = ? AND space = ? AND type IN ('concept', 'belief', 'goal')
              AND source_id IS NULL AND entity_type IS NOT NULL
+             AND NOT {ATOM_FORGOTTEN}
            ORDER BY (sti + lti) DESC
            LIMIT 30""",
         (mem.tenant_id, mem.write_space),
@@ -391,8 +399,8 @@ def _build_entity_context(mem: "Smrti") -> str:
             WHERE r.type = 'relation' AND r.tenant_id = ? AND r.space = ?
               AND r.source_id IN ({ph})
               AND r.relation NOT IN ({rel_ph})
-              AND (CASE WHEN json_valid(r.metadata)
-                        THEN json_extract(r.metadata, '$.superseded_by') END) IS NULL
+              AND {claim_current_sql('r')}
+              AND NOT {forgotten_sql('t')}
             ORDER BY r.confidence DESC, r.created_at DESC""",
         (mem.tenant_id, mem.write_space, *ids, *_STRUCTURAL_RELATIONS),
     )
@@ -583,6 +591,8 @@ def _link_claims(
                     mem.tenant_id, mem.write_space,
                     valence=claim_valence,
                 )
+                if _is_superseded(mem, new_edge):
+                    _revive(mem, new_edge, obj_id, episode_id, source)
                 # Lower the target's tone to the claim's straight away. Epoch
                 # propagation cannot: relation atoms have no neighbours of
                 # their own, so propagate_valence finds nothing to move.
@@ -658,7 +668,7 @@ def _supersede(
         return
     old_edge_id = old_edge["id"]
     mem.db.execute(
-        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.superseded_by', ?)
+        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}', ?)
             WHERE id = ? AND tenant_id = ? AND space = ?""",
         (new_edge_id, old_edge_id, mem.tenant_id, mem.write_space),
     )
@@ -667,8 +677,16 @@ def _supersede(
     note = f"superseded: {predicate} {old_label} -> {new_obj['label'] if new_obj else new_obj_id}"
     trust = _agent_trust(mem) if source == SOURCE_AGENT else 1.0
     pairs = [(new_edge_id, old_edge_id)]
+    # The object belief falls with the claim only when this claim was the
+    # last one holding it. "Tea" is one atom however many people prefer it,
+    # and cutting it because Alice switched to coffee told the graph that
+    # Bob had too.
     old_obj = mem.db.fetchone("SELECT type FROM atoms WHERE id = ?", (old_obj_id,))
-    if old_obj and old_obj["type"] == "belief":
+    if (
+        old_obj
+        and old_obj["type"] == "belief"
+        and not _still_claimed(mem, old_obj_id, except_edge_id=old_edge_id)
+    ):
         pairs.append((new_obj_id, old_obj_id))
     for winner, loser in pairs:
         mem.atomspace.link_atoms(
@@ -681,6 +699,84 @@ def _supersede(
             weight=trust,
             source_episode_id=episode_id or None,
             text=note,
+            source=source,
+            tenant_id=mem.tenant_id,
+            space=mem.write_space,
+        ))
+
+
+def _still_claimed(mem: "Smrti", obj_id: str, except_edge_id: str) -> bool:
+    """Whether a current factual claim other than *except_edge_id* points at the object."""
+    rel_ph = ",".join("?" * len(_STRUCTURAL_RELATIONS))
+    return (
+        mem.db.fetchone(
+            f"""SELECT 1 FROM atoms r WHERE r.type = 'relation' AND r.target_id = ?
+                AND r.id != ? AND r.relation NOT IN ({rel_ph})
+                AND r.tenant_id = ? AND r.space = ? AND {claim_current_sql('r')}
+                LIMIT 1""",
+            (obj_id, except_edge_id, *_STRUCTURAL_RELATIONS, mem.tenant_id, mem.write_space),
+        )
+        is not None
+    )
+
+
+def _is_superseded(mem: "Smrti", edge_id: str) -> bool:
+    row = mem.db.fetchone(
+        f"SELECT 1 FROM atoms r WHERE r.id = ? AND NOT {claim_current_sql('r')}",
+        (edge_id,),
+    )
+    return row is not None
+
+
+# What a revived claim, and the belief it points at, are held at once more.
+# The supersession cut them to SUPERSEDED_PROBABILITY by policy; this is the
+# same policy run backwards, to the probability a claim edge is born with.
+_REVIVED_PROBABILITY = 0.8
+
+
+def _revive(
+    mem: "Smrti", edge_id: str, obj_id: str, episode_id: str, source: str
+) -> None:
+    """Make a claim the graph had marked replaced current again.
+
+    Stating a claim that a later one superseded — Berlin, then Paris, then
+    Berlin again — reuses the original edge, and used to leave its mark in
+    place: the update then superseded Paris as well, and neither city was
+    current. The mark comes off, and the cut is reversed where it landed —
+    the edge, and its object when that is a belief the supersession cut
+    too: every ``contradicts`` edge still naming one of them the loser is
+    deleted, since an unresolved one would cut the claim again at the next
+    epoch and a resolved one has nothing left to say; the probability is
+    lifted back by the policy write that lowered it, so a preference the
+    user returned to stops reading as a known antipattern; and evidence of
+    the revival is filed, so the log says why.
+    """
+    losers = mem.db.fetchall(
+        """SELECT id, CASE WHEN json_valid(metadata)
+                           THEN json_extract(metadata, '$.loser') END AS loser
+           FROM atoms WHERE type = 'relation' AND relation = 'contradicts'
+             AND tenant_id = ? AND space = ? AND target_id IN (?, ?)""",
+        (mem.tenant_id, mem.write_space, edge_id, obj_id),
+    )
+    cut = [c for c in losers if c["loser"] in (edge_id, obj_id)]
+    if cut:
+        mem.atomspace.delete_atoms([c["id"] for c in cut], mem.tenant_id)
+    revived = {edge_id, *(c["loser"] for c in cut)}
+    trust = _agent_trust(mem) if source == SOURCE_AGENT else 1.0
+    for atom_id in revived:
+        mem.db.execute(
+            f"""UPDATE atoms SET
+                    probability = MAX(probability, ?),
+                    metadata = json_remove({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}')
+                WHERE id = ? AND tenant_id = ? AND space = ?""",
+            (_REVIVED_PROBABILITY, atom_id, mem.tenant_id, mem.write_space),
+        )
+        mem.atomspace.add_evidence(Evidence(
+            atom_id=atom_id,
+            observed_probability=_REVIVED_PROBABILITY,
+            weight=trust,
+            source_episode_id=episode_id or None,
+            text="stated again after being superseded",
             source=source,
             tenant_id=mem.tenant_id,
             space=mem.write_space,

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import re
 import time
@@ -19,12 +20,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from smrti import Smrti
-from smrti.core.models import AtomType, RecallResult
+from smrti.core.models import RecallResult
+from smrti.core.provenance import SOURCE_AGENT, claim_current_sql, forgotten_sql
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
 from smrti.servers.viz_routes import api_key_middleware, create_viz_router
+
+
+logger = logging.getLogger("smrti.proxy")
 
 
 @asynccontextmanager
@@ -33,6 +38,10 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(run_reflect_loop(lambda: list(_instances.values())))
     yield
     task.cancel()
+    # An exchange is stored after its answer has gone out, so at shutdown the
+    # ones still in flight are memories the user was already told they have.
+    if _background_tasks:
+        await asyncio.gather(*list(_background_tasks), return_exceptions=True)
 
 
 app = FastAPI(title="Smrti Proxy", version="0.1.0", lifespan=lifespan)
@@ -197,31 +206,18 @@ def _enrich_content(r: RecallResult, mem) -> str:
 
     # Superseded claims are the entity's history, not its state: "lives_in
     # Amsterdam, lives_in Berlin" is exactly the ambiguity the update was
-    # meant to remove.
+    # meant to remove. A forgotten target is out for the same reason recall
+    # leaves it out: this line lands in the prompt, and a forgotten atom
+    # that reached it through a neighbour was not forgotten at all.
     rows = mem.db.fetchall(
-        "SELECT relation, target_id FROM atoms "
-        "WHERE source_id = ? AND type = 'relation' AND tenant_id = ? AND space = ? "
-        "AND (CASE WHEN json_valid(metadata) "
-        "THEN json_extract(metadata, '$.superseded_by') END) IS NULL",
+        f"""SELECT r.relation, t.label FROM atoms r JOIN atoms t ON t.id = r.target_id
+            WHERE r.source_id = ? AND r.type = 'relation' AND r.tenant_id = ? AND r.space = ?
+              AND {claim_current_sql('r')} AND NOT {forgotten_sql('t')}""",
         (atom.id, atom.tenant_id, atom.space),
     )
-    target_ids = [row["target_id"] for row in rows if row["target_id"]]
 
     entity_qualifier = f" [{atom.entity_type.value}]" if atom.entity_type else ""
-
-    if not target_ids:
-        return f"{atom.label}{entity_qualifier}"
-
-    ph = ",".join("?" * len(target_ids))
-    target_rows = mem.db.fetchall(
-        f"SELECT id, label FROM atoms WHERE id IN ({ph})", tuple(target_ids)
-    )
-    target_map = {t["id"]: t["label"] for t in target_rows}
-    parts = [
-        f"{row['relation']}: {target_map[row['target_id']]}"
-        for row in rows
-        if row["target_id"] in target_map
-    ]
+    parts = [f"{row['relation']}: {row['label']}" for row in rows]
     suffix = f" — {', '.join(parts)}" if parts else ""
     return f"{atom.label}{entity_qualifier}{suffix}"
 
@@ -265,6 +261,11 @@ def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, st
     # Appended after the cap: a truncated memory still needs its dates, and
     # the suffix is a handful of characters either way.
     text += _temporal_suffix(r)
+    # The model's own earlier output is a memory too — "what did you
+    # recommend?" has no other answer — but it is served as what it is, not
+    # as something the user said.
+    if r.atom.metadata.get("source") == SOURCE_AGENT:
+        text = f"[from your own earlier reply] {text}"
     conf = r.atom.truth.confidence
     qualifier = "high" if conf >= 0.7 else "medium" if conf >= 0.3 else "low"
     if severity == "critical_warning":
@@ -317,15 +318,6 @@ async def _inject_context(
     if not memories:
         return body, "", []
 
-    # Filter out agent-sourced episodes — they are stored for extraction purposes
-    # but should not be injected back as context (they are the LLM's own output).
-    memories = [
-        r for r in memories
-        if not (r.atom.type == AtomType.EPISODE and r.atom.metadata.get("source") == "agent")
-    ]
-    if not memories:
-        return body, "", []
-
     mem = get_mem(tenant_id, write_space)
     enriched_contents = [_enrich_content(r, mem) for r in memories]
     formatted = [_format_memory(r, c) for r, c in zip(memories, enriched_contents)]
@@ -335,6 +327,7 @@ async def _inject_context(
             "label": r.atom.label,
             "content": c,
             "severity": sev,
+            "source": r.atom.metadata.get("source") or "user",
             "confidence": round(r.atom.truth.confidence, 3),
             "probability": round(r.atom.truth.probability, 3),
             "valence": round(r.atom.valence.valence, 3),
@@ -433,7 +426,20 @@ async def _store_exchange(
                 try:
                     await _extract_and_link(eid, content, tenant_id, write_space, auth, model, source)
                 except Exception:
-                    pass
+                    logger.warning("extraction failed for episode %s", eid, exc_info=True)
+
+
+def _first_choice(payload: dict) -> dict:
+    """The first choice of a completion or chunk, or nothing.
+
+    A stream's final usage chunk carries ``choices: []``; indexing it raised,
+    the client got an error frame instead of ``[DONE]``, and the exchange
+    was never stored.
+    """
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
+        return choices[0]
+    return {}
 
 
 def _upstream_headers(request: Request) -> dict:
@@ -541,9 +547,7 @@ async def _non_stream_proxy(
     except ValueError as exc:
         return _upstream_error(f"upstream returned non-JSON body: {exc}", "upstream_invalid_response")
 
-    assistant_text = (
-        data.get("choices", [{}])[0].get("message", {}).get("content", "")
-    )
+    assistant_text = _first_choice(data).get("message", {}).get("content", "")
     log_entry["status"] = response.status_code
     log_entry["response_snippet"] = (assistant_text or "")[:500]
     log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
@@ -611,8 +615,7 @@ async def _stream_proxy(
                     yield f"data: {payload}\n\n".encode()
                     continue
 
-                delta = chunk.get("choices", [{}])[0].get("delta", {})
-                piece = delta.get("content", "")
+                piece = _first_choice(chunk).get("delta", {}).get("content", "")
                 if piece:
                     accumulated.append(piece)
 

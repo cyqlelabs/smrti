@@ -154,7 +154,7 @@ def test_an_old_extracted_entity_gets_the_tone_its_claims_gave_it(tmp_path):
     path = str(tmp_path / "old.db")
     get_database(path)
     close_database(path)
-    conn = sqlite3.connect(path)
+    conn = _make_connection(path)
     _legacy_entity(conn, "build", "build times")
     _legacy_entity(conn, "dave", "Dave", entity_type="person")
     _legacy_entity(conn, "cake", "cake")
@@ -180,7 +180,7 @@ def test_an_old_episode_keeps_reading_as_it_always_did(tmp_path):
     path = str(tmp_path / "old.db")
     get_database(path)
     close_database(path)
-    conn = sqlite3.connect(path)
+    conn = _make_connection(path)
     conn.execute(
         """INSERT INTO atoms (id, type, label, content, tenant_id, space, probability, confidence, valence, intensity)
            VALUES ('ep', 'episode', 'a note', 'a note', 't', 's', 0.8, 0.5, -0.4, 0.4)"""
@@ -198,7 +198,7 @@ def test_old_healing_hub_edges_are_removed_and_real_claims_kept(tmp_path):
     path = str(tmp_path / "old.db")
     get_database(path)
     close_database(path)
-    conn = sqlite3.connect(path)
+    conn = _make_connection(path)
     _legacy_entity(conn, "alice", "Alice", entity_type="person")
     _legacy_entity(conn, "python", "Python")
     _legacy_entity(conn, "chess", "chess")

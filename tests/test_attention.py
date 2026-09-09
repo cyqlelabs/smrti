@@ -80,18 +80,24 @@ def _mock_db(forward_ids=None, backward_ids=None, in_space=None):
     return db
 
 
+def _batched(db) -> list[tuple]:
+    """The (sql, params) statements propagate_sti committed as one transaction."""
+    return list(db.execute_batch.call_args[0][0])
+
+
 def test_propagate_sti_updates_neighbors():
     db = _mock_db(forward_ids=["n1", "n2"])
     propagate_sti("atom1", boost=1.0, propagation_factor=0.2, db=db, tenant_id="t", space="s")
-    # Both neighbors, plus the deduction from the source.
-    assert db.execute.call_count == 3
+    # Both neighbors, plus the deduction from the source, in one transaction.
+    db.execute.assert_not_called()
+    assert len(db.execute_batch.call_args[0][0]) == 3
 
 
 def test_propagate_sti_no_op_when_spread_too_small():
     db = _mock_db(forward_ids=["n1"])
     propagate_sti("atom1", boost=0.04, propagation_factor=0.2, db=db, tenant_id="t", space="s")
     # spread = 0.04 * 0.2 = 0.008 < 0.01
-    db.execute.assert_not_called()
+    db.execute_batch.assert_not_called()
 
 
 def test_propagate_sti_spread_exactly_at_boundary():
@@ -99,13 +105,13 @@ def test_propagate_sti_spread_exactly_at_boundary():
     db = _mock_db(forward_ids=["n1"])
     propagate_sti("atom1", boost=0.1, propagation_factor=0.1, db=db, tenant_id="t", space="s")
     # 0.01 is NOT < 0.01, so it should propagate: one neighbor + source deduction.
-    assert db.execute.call_count == 2
+    assert len(db.execute_batch.call_args[0][0]) == 2
 
 
 def test_propagate_sti_no_neighbors():
     db = _mock_db()
     propagate_sti("atom1", boost=1.0, propagation_factor=0.5, db=db, tenant_id="t", space="s")
-    db.execute.assert_not_called()
+    db.execute_batch.assert_not_called()
 
 
 def test_propagate_sti_divides_budget_across_fan_out():
@@ -116,7 +122,7 @@ def test_propagate_sti_divides_budget_across_fan_out():
     """
     db = _mock_db(forward_ids=["n1", "n2", "n3", "n4"])
     propagate_sti("hub", boost=1.0, propagation_factor=0.4, db=db, tenant_id="t", space="s")
-    amounts = [c.args[1][0] for c in db.execute.call_args_list]
+    amounts = [params[0] for _, params in _batched(db)]
     neighbor_shares, deducted = amounts[:-1], amounts[-1]
     assert neighbor_shares == [0.1, 0.1, 0.1, 0.1]  # 0.4 budget / 4 neighbors
     assert deducted == 0.4
@@ -131,12 +137,12 @@ def test_propagate_sti_is_conservative():
     """
     db = _mock_db(forward_ids=["n1", "n2"], backward_ids=["n3"])
     propagate_sti("hub", boost=2.0, propagation_factor=0.3, db=db, tenant_id="t", space="s")
-    calls = db.execute.call_args_list
-    gained = sum(c.args[1][0] for c in calls[:-1])
-    given_up = calls[-1].args[1][0]
+    calls = _batched(db)
+    gained = sum(params[0] for _, params in calls[:-1])
+    given_up = calls[-1][1][0]
     assert given_up == gained
-    assert calls[-1].args[1][1] == "hub"
-    assert "sti - ?" in calls[-1].args[0]
+    assert calls[-1][1][1] == "hub"
+    assert "sti - ?" in calls[-1][0]
 
 
 def test_propagate_sti_deduplicates_neighbors():
@@ -144,8 +150,8 @@ def test_propagate_sti_deduplicates_neighbors():
     db = _mock_db(forward_ids=["n1", "n1"], backward_ids=["n1"])
     propagate_sti("hub", boost=1.0, propagation_factor=0.3, db=db, tenant_id="t", space="s")
     # One neighbor update plus the source deduction.
-    assert db.execute.call_count == 2
-    assert db.execute.call_args_list[0].args[1][0] == 0.3
+    assert len(_batched(db)) == 2
+    assert _batched(db)[0][1][0] == 0.3
 
 
 def test_propagate_sti_skips_when_per_neighbor_share_underflows():
@@ -153,7 +159,7 @@ def test_propagate_sti_skips_when_per_neighbor_share_underflows():
     db = _mock_db(forward_ids=[f"n{i}" for i in range(20)])
     # budget = 0.1 (>= 0.01), but 0.1 / 20 = 0.005 per neighbor.
     propagate_sti("hub", boost=1.0, propagation_factor=0.1, db=db, tenant_id="t", space="s")
-    db.execute.assert_not_called()
+    db.execute_batch.assert_not_called()
 
 
 # ── decay_lti ─────────────────────────────────────────────────────────────────
@@ -193,7 +199,7 @@ def test_propagate_sti_none_ids_filtered():
     ]
     propagate_sti("atom1", boost=1.0, propagation_factor=0.2, db=db, tenant_id="t", space="s")
     # Only "n1" is a valid neighbor, plus the deduction from the source.
-    assert db.execute.call_count == 2
+    assert len(_batched(db)) == 2
 
 
 def test_propagate_sti_ignores_neighbors_outside_the_space():
@@ -208,14 +214,14 @@ def test_propagate_sti_ignores_neighbors_outside_the_space():
     db = _mock_db(forward_ids=["mine", "theirs"], in_space=["mine"])
     propagate_sti("hub", boost=1.0, propagation_factor=0.4, db=db, tenant_id="t", space="s")
 
-    calls = db.execute.call_args_list
+    calls = _batched(db)
     assert len(calls) == 2  # one neighbor credit + the source deduction
-    assert calls[0].args[1][1] == "mine"
-    assert calls[0].args[1][0] == 0.4  # whole budget, not a half share
-    assert calls[-1].args[1][0] == 0.4  # deduction equals what was handed out
+    assert calls[0][1][1] == "mine"
+    assert calls[0][1][0] == 0.4  # whole budget, not a half share
+    assert calls[-1][1][0] == 0.4  # deduction equals what was handed out
 
 
 def test_propagate_sti_no_op_when_every_neighbor_is_out_of_space():
     db = _mock_db(forward_ids=["theirs"], in_space=[])
     propagate_sti("hub", boost=1.0, propagation_factor=0.4, db=db, tenant_id="t", space="s")
-    db.execute.assert_not_called()
+    db.execute_batch.assert_not_called()

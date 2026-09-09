@@ -85,12 +85,19 @@ def propagate_sti(
     if spread < 0.01:
         return
 
-    for nid in unique_ids:
-        db.execute(
-            "UPDATE atoms SET sti = MIN(sti + ?, 3.0) WHERE id = ? AND tenant_id = ? AND space = ?",
-            (spread, nid, tenant_id, space),
-        )
-    db.execute(
-        "UPDATE atoms SET sti = MAX(sti - ?, 0.0) WHERE id = ? AND tenant_id = ? AND space = ?",
-        (spread * len(unique_ids), atom_id, tenant_id, space),
-    )
+    # One transaction: the credit and the debit are one move of activation,
+    # and committing them one neighbour at a time cost a commit per edge and
+    # could leave the source charged for shares not yet delivered.
+    db.execute_batch([
+        *(
+            (
+                "UPDATE atoms SET sti = MIN(sti + ?, 3.0) WHERE id = ? AND tenant_id = ? AND space = ?",
+                (spread, nid, tenant_id, space),
+            )
+            for nid in unique_ids
+        ),
+        (
+            "UPDATE atoms SET sti = MAX(sti - ?, 0.0) WHERE id = ? AND tenant_id = ? AND space = ?",
+            (spread * len(unique_ids), atom_id, tenant_id, space),
+        ),
+    ])

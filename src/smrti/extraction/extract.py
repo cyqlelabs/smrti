@@ -15,11 +15,14 @@ from smrti.core.models import STRUCTURAL_RELATIONS, SUPERSEDED_PROBABILITY, Evid
 from smrti.core.provenance import (
     ATOM_FORGOTTEN,
     ATOM_METADATA_JSON,
+    ATOM_SOURCE,
     SOURCE_AGENT,
     SUPERSEDED_BY,
     claim_current_sql,
     forgotten_sql,
 )
+from smrti.decisions import DecisionEngine
+from smrti.decisions.extraction import route_extraction, verify_supersession
 
 from .prompts import AGENT_EXTRACTION_PROMPT, CLAIMS_ONLY_PROMPT, ENTITY_TYPES, EXTRACTION_PROMPT
 
@@ -459,24 +462,54 @@ def _agent_trust(mem: "Smrti") -> float:
     return row["agent_source_trust"]
 
 
+def _episode_text(mem: "Smrti", episode_id: str) -> str:
+    """The text of the episode an extraction is running over, or nothing."""
+    if not episode_id:
+        return ""
+    row = mem.db.fetchone(
+        "SELECT content, label FROM atoms WHERE id = ? AND tenant_id = ?",
+        (episode_id, mem.tenant_id),
+    )
+    if row is None:
+        return ""
+    return row["content"] or row["label"] or ""
+
+
+def _decisions(mem: "Smrti") -> DecisionEngine | None:
+    """The instance's decision engine, or None for a double that has none."""
+    engine = getattr(mem, "decisions", None)
+    return engine if isinstance(engine, DecisionEngine) else None
+
+
+def _resolver(mem: "Smrti", source: str, episode_id: str, context: str | None = None) -> "EntityResolver":
+    """An entity resolver for this extraction, carrying the sentence the
+    mentions came from so an uncertain match can be verified against it."""
+    from .resolve import EntityResolver
+
+    return EntityResolver(
+        mem.db, mem.embed,
+        source=source, agent_trust=_agent_trust(mem), episode_id=episode_id,
+        decisions=_decisions(mem),
+        context=_episode_text(mem, episode_id) if context is None else context,
+    )
+
+
 def _resolve_ner_entities(
     entities: list[dict],
     episode_id: str,
     mem: "Smrti",
     source: str = "user",
+    context: str | None = None,
 ) -> dict[str, str]:
     """Resolve a list of {"name", "type"} dicts via the entity cascade.
 
     Returns a mapping of name → atom_id. Also creates mentions edges.
     Handles pronoun entities: batch-merges where unambiguous, skips type="pronoun",
     and retroactively merges existing pronoun atoms for resolved named persons.
+    ``context`` is the text the mentions came from; read from the episode
+    when not given.
     """
-    from .resolve import EntityResolver
-
-    resolver = EntityResolver(
-        mem.db, mem.embed,
-        source=source, agent_trust=_agent_trust(mem), episode_id=episode_id,
-    )
+    resolver = _resolver(mem, source, episode_id, context)
     entity_ids: dict[str, str] = {}
 
     # Batch-merge pronoun entities before resolution
@@ -565,7 +598,7 @@ def _link_claims(
     ``contradicts`` edge naming it the loser, and filed negative evidence
     against — see :func:`_supersede`.
     """
-    _resolver = None
+    claim_resolver = None
     min_valence = 0.0
     for claim in claims:
         try:
@@ -575,21 +608,22 @@ def _link_claims(
             obj_id = _db_resolve_label(obj_raw, entity_ids, mem)
             # Auto-create missing object atoms as concepts rather than silently dropping
             if not obj_id and obj_raw:
-                if _resolver is None:
-                    from .resolve import EntityResolver
-                    _resolver = EntityResolver(
-                        mem.db, mem.embed,
-                        source=source, agent_trust=_agent_trust(mem), episode_id=episode_id,
-                    )
-                obj_id = _resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
+                if claim_resolver is None:
+                    claim_resolver = _resolver(mem, source, episode_id)
+                obj_id = claim_resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
                 _register_entity(entity_ids, obj_raw, obj_id)
             if subj_id and obj_id and subj_id != obj_id:
                 predicate = claim.get("predicate", "related_to")
                 claim_valence = max(-1.0, min(1.0, float(claim.get("valence") or 0.0)))
+                # A claim edge read from an agent turn carries the agent's
+                # provenance, as the atoms it joins do: it is what lets the
+                # supersession writer tell a user's statement from a
+                # model's guess about the same subject.
                 new_edge = mem.atomspace.link_atoms(
                     subj_id, obj_id, predicate,
                     mem.tenant_id, mem.write_space,
                     valence=claim_valence,
+                    metadata={"source": SOURCE_AGENT} if source == SOURCE_AGENT else None,
                 )
                 if _is_superseded(mem, new_edge):
                     _revive(mem, new_edge, obj_id, episode_id, source)
@@ -621,6 +655,12 @@ def _link_claims(
         _lower_tone(mem, episode_id, min_valence)
 
 
+# What the supersession check filed on a claim edge it declined to let
+# supersede: the verdict, so a later pass or a reader can see why both
+# claims are still current.
+SUPERSESSION_DEFERRED = "supersession_deferred"
+
+
 def _supersede(
     mem: "Smrti",
     subj_id: str,
@@ -649,8 +689,9 @@ def _supersede(
     old_obj_id = _db_resolve_label(old_label, entity_ids, mem)
     if not old_obj_id or old_obj_id == new_obj_id:
         return
+    edge_columns = f"id, relation, created_at, updated_at, {ATOM_SOURCE} AS author"
     old_edge = mem.db.fetchone(
-        """SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
+        f"""SELECT {edge_columns} FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
            AND relation = ? AND tenant_id = ? AND space = ? AND id != ?""",
         (subj_id, old_obj_id, predicate, mem.tenant_id, mem.write_space, new_edge_id),
     )
@@ -659,7 +700,7 @@ def _supersede(
         # of the same predicate; any factual edge to the old object will do.
         rel_ph = ",".join("?" * len(_STRUCTURAL_RELATIONS))
         old_edge = mem.db.fetchone(
-            f"""SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
+            f"""SELECT {edge_columns} FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
                 AND relation NOT IN ({rel_ph}) AND tenant_id = ? AND space = ? AND id != ?
                 ORDER BY created_at DESC LIMIT 1""",
             (subj_id, old_obj_id, *_STRUCTURAL_RELATIONS, mem.tenant_id, mem.write_space, new_edge_id),
@@ -667,6 +708,22 @@ def _supersede(
     if old_edge is None:
         return
     old_edge_id = old_edge["id"]
+
+    # Source trust is a rule, not a judgement: a model's reading of its own
+    # reply never replaces what the user stated. The assistant guessing a
+    # different employer is not a correction, and elevating it to one would
+    # let the graph overwrite testimony with inference.
+    if source == SOURCE_AGENT and old_edge["author"] != SOURCE_AGENT:
+        logger.info(
+            "agent claim %s %s does not supersede the user's %s", predicate, new_obj_id, old_label
+        )
+        return
+
+    if not _supersession_allowed(
+        mem, subj_id, predicate, old_label, new_obj_id, new_edge_id, old_edge, episode_id, source,
+    ):
+        return
+
     mem.db.execute(
         f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}', ?)
             WHERE id = ? AND tenant_id = ? AND space = ?""",
@@ -703,6 +760,70 @@ def _supersede(
             tenant_id=mem.tenant_id,
             space=mem.write_space,
         ))
+
+
+def _supersession_allowed(
+    mem: "Smrti",
+    subj_id: str,
+    predicate: str,
+    old_label: str,
+    new_obj_id: str,
+    new_edge_id: str,
+    old_edge,
+    episode_id: str,
+    source: str,
+) -> bool:
+    """Whether the semantic check lets the new claim replace the old edge.
+
+    True whenever the ``supersession`` task is off or could not answer —
+    the extractor's ``supersedes`` field decided alone before the check
+    existed and still does then. A verdict that keeps both claims is
+    stamped on the new edge (``$.supersession_deferred``) so a reader can
+    see why the older claim is still current. The network call runs
+    outside any transaction; the old edge is read again afterwards, and
+    if it changed or went away while the provider was thinking, the
+    mutation is not made on a stale reading.
+    """
+    engine = _decisions(mem)
+    if engine is None:
+        return True
+    subject = mem.db.fetchone("SELECT label FROM atoms WHERE id = ?", (subj_id,))
+    new_obj = mem.db.fetchone("SELECT label FROM atoms WHERE id = ?", (new_obj_id,))
+    verdict = verify_supersession(
+        engine,
+        episode_text=_episode_text(mem, episode_id),
+        subject=subject["label"] if subject else subj_id,
+        predicate=old_edge["relation"] or predicate,
+        old_object=old_label,
+        new_object=new_obj["label"] if new_obj else new_obj_id,
+        old_stated_at=old_edge["created_at"] or "",
+        old_author=old_edge["author"] or "user",
+        new_author=source,
+        tenant_id=mem.tenant_id,
+        space=mem.write_space,
+    )
+    if verdict is None:
+        return True
+    current = mem.db.fetchone(
+        f"""SELECT updated_at FROM atoms r WHERE r.id = ? AND r.tenant_id = ? AND r.space = ?
+            AND {claim_current_sql('r')}""",
+        (old_edge["id"], mem.tenant_id, mem.write_space),
+    )
+    if current is None or current["updated_at"] != old_edge["updated_at"]:
+        logger.info("old claim %s changed while it was being verified; not superseding", old_edge["id"])
+        return False
+    if not verdict.applied or verdict.allow:
+        return True
+    mem.db.execute(
+        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{SUPERSESSION_DEFERRED}', json(?))
+            WHERE id = ? AND tenant_id = ? AND space = ?""",
+        (
+            json.dumps({"old_edge": old_edge["id"], "label": verdict.label,
+                        "confidence": round(verdict.confidence, 3)}),
+            new_edge_id, mem.tenant_id, mem.write_space,
+        ),
+    )
+    return False
 
 
 def _still_claimed(mem: "Smrti", obj_id: str, except_edge_id: str) -> bool:
@@ -804,14 +925,17 @@ async def extract_and_link(
     model: str,
     upstream: str,
     source: str = "user",
+    entity_context: str | None = None,
 ) -> None:
     """Extract entities/claims from content and link them to the episode atom.
 
     Shared by all serve modes (proxy, MCP, REST). Silently no-ops if the LLM
-    call fails or returns no usable structure.
+    call fails or returns no usable structure. ``entity_context`` is the
+    known-entities block when the caller already built it.
     """
     loop = asyncio.get_running_loop()
-    entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
+    if entity_context is None:
+        entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
     write_time = await loop.run_in_executor(None, _write_time, episode_id, mem)
     extracted = await extract_knowledge(
         content, _get_http(), upstream, auth, model, entity_context, source,
@@ -821,7 +945,7 @@ async def extract_and_link(
         return
 
     def _sync_work() -> None:
-        entity_ids = _resolve_ner_entities(extracted.get("entities", []), episode_id, mem, source)
+        entity_ids = _resolve_ner_entities(extracted.get("entities", []), episode_id, mem, source, content)
         _link_claims(extracted.get("claims", []), entity_ids, mem, episode_id, source)
         _store_temporal(episode_id, mem, extracted.get("temporal", []))
 
@@ -955,11 +1079,37 @@ async def extract_and_link_hybrid(
       - "llm"    — full LLM path (backward compatible)
       - "hybrid" — GLiNER entities + LLM claims when 2+ entities
       - "local"  — GLiNER entities only, no LLM calls
-    source == "agent" always takes the full LLM path.
+    source == "agent" takes the full LLM path. The routing gate, when the
+    ``routing`` decision task is on, runs before any of that and may route
+    a message past the LLM (local entities only) or to it (a durable fact
+    or correction with fewer than two entities).
     """
     mode = _effective_mode(mode, upstream)
+    loop = asyncio.get_running_loop()
+
+    # The routing gate. Before any model is called, three yes/no judgements
+    # about the message decide whether the LLM claim extraction is worth
+    # its call: chatter that holds nothing durable, corrects nothing and
+    # adds nothing is routed past it (the episode is already stored, and
+    # local NER still runs so it is linked to what it mentions), while a
+    # durable fact or a correction is routed *to* it even where the entity
+    # count below would not have called it — "never deploy on Fridays"
+    # names no entity. Off, unavailable, or in shadow, nothing changes.
+    entity_context: str | None = None
+    route = None
+    engine = _decisions(mem)
+    if mode != "local" and engine is not None and engine.enabled("routing"):
+        entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
+        route = await route_extraction(
+            engine, content, source=source, entity_context=entity_context,
+            tenant_id=mem.tenant_id, space=mem.write_space,
+        )
+    if route is not None and route.skip:
+        await _link_local_entities(episode_id, content, mem, source)
+        return
+
     if source == "agent" or mode == "llm":
-        await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
+        await extract_and_link(episode_id, content, mem, auth, model, upstream, source, entity_context)
         return
 
     # Try GLiNER for entity extraction
@@ -968,17 +1118,16 @@ async def extract_and_link_hybrid(
         from smrti.extraction import ner as ner_mod
 
         ner_instance = ner_mod.get_ner()
-        loop = asyncio.get_running_loop()
         ner_entities = await loop.run_in_executor(None, ner_instance.extract, content)
     except ImportError:
         if mode == "hybrid":
-            await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
+            await extract_and_link(episode_id, content, mem, auth, model, upstream, source, entity_context)
             return
         # local mode with no gliner installed — nothing we can do
         return
     except Exception:
         if mode == "hybrid":
-            await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
+            await extract_and_link(episode_id, content, mem, auth, model, upstream, source, entity_context)
             return
         return
 
@@ -986,14 +1135,13 @@ async def extract_and_link_hybrid(
         # NER found nothing — fall through to full LLM extraction so standalone
         # directives/constraints that NER can't parse still get extracted.
         if mode == "hybrid":
-            await extract_and_link(episode_id, content, mem, auth, model, upstream, source)
+            await extract_and_link(episode_id, content, mem, auth, model, upstream, source, entity_context)
         return
 
     # Resolve entities and create mentions edges
     def _sync_resolve() -> dict[str, str]:
-        return _resolve_ner_entities(ner_entities, episode_id, mem, source)
+        return _resolve_ner_entities(ner_entities, episode_id, mem, source, content)
 
-    loop = asyncio.get_running_loop()
     entity_ids = await loop.run_in_executor(None, _sync_resolve)
 
     # In local mode, we're done — no LLM calls
@@ -1029,12 +1177,17 @@ async def extract_and_link_hybrid(
 
         ner_entities = await loop.run_in_executor(None, _inject_speaker_if_missing)
 
-    # Hybrid mode: call LLM for claims only when 2+ unique entities
+    # Hybrid mode: call LLM for claims only when 2+ unique entities — unless
+    # the routing gate found a durable fact or a correction the entity count
+    # cannot see, in which case the full extraction runs on it.
     unique_ids = set(entity_ids.values())
     if len(unique_ids) < 2:
+        if route is not None and route.force_llm:
+            await extract_and_link(episode_id, content, mem, auth, model, upstream, source, entity_context)
         return
 
-    entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
+    if entity_context is None:
+        entity_context = await loop.run_in_executor(None, _build_entity_context, mem)
     write_time = await loop.run_in_executor(None, _write_time, episode_id, mem)
     claims_result = await extract_claims_only(
         content, ner_entities, upstream, auth, model, entity_context, mem.tenant_id,
@@ -1050,11 +1203,7 @@ async def extract_and_link_hybrid(
         _ALLOWED_NEW_TYPES = {"goal", "preference", "constraint", "role", "technology", "skill", "topic", "media", "health", "concept"}
         new_entities = claims_result.get("entities", [])
         if new_entities:
-            from .resolve import EntityResolver
-            resolver = EntityResolver(
-                mem.db, mem.embed,
-                source=source, agent_trust=_agent_trust(mem), episode_id=episode_id,
-            )
+            resolver = _resolver(mem, source, episode_id, content)
             for ent in new_entities:
                 name = (ent.get("name") or "").strip()
                 etype = ent.get("type", "")
@@ -1074,6 +1223,27 @@ async def extract_and_link_hybrid(
         _store_temporal(episode_id, mem, claims_result.get("temporal", []))
 
     await loop.run_in_executor(None, _sync_resolve_and_link)
+
+
+async def _link_local_entities(episode_id: str, content: str, mem: "Smrti", source: str) -> None:
+    """Local NER and resolution only — the skip route's "local processing".
+
+    The episode stays, and it is linked to the entities it mentions, so a
+    memory the gate judged not worth a claim is still reachable through
+    the graph. No model is called; an NER failure is logged and swallowed.
+    """
+    try:
+        from smrti.extraction import ner as ner_mod
+
+        ner_instance = ner_mod.get_ner()
+        loop = asyncio.get_running_loop()
+        entities = await loop.run_in_executor(None, ner_instance.extract, content)
+        if entities:
+            await loop.run_in_executor(
+                None, _resolve_ner_entities, entities, episode_id, mem, source, content
+            )
+    except Exception:
+        logger.debug("local entity linking failed for episode %s", episode_id, exc_info=True)
 
 
 # ── Serialized wrapper ────────────────────────────────────────────────────────

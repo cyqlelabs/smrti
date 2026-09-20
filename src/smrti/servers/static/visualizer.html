@@ -1387,13 +1387,14 @@ function renderCallList() {
   }
   list.innerHTML = SC.calls.map((c, i) => {
     const isProxy = c.kind === 'proxy';
+    const isDecision = c.kind === 'decision';
     const sc = statusCls(c.status);
     const memCount = isProxy && c.memories ? c.memories.length : 0;
     const sub = !isProxy && c.subkind ? ' · ' + c.subkind : '';
     const active = SC.sel && SC.sel.id === c.id ? ' active' : '';
     return `<div class="call-item${active}" data-idx="${i}">
       <div class="call-item-row1">
-        <span class="bk ${isProxy ? 'proxy' : 'extraction'}">${isProxy ? 'PROXY' : 'EXTR'}</span>
+        <span class="bk ${isProxy ? 'proxy' : 'extraction'}">${isProxy ? 'PROXY' : isDecision ? 'DECIDE' : 'EXTR'}</span>
         <span class="call-item-model">${escHtml(trunc(c.model || '—', 22))}</span>
         <span class="bs ${sc}">${c.status || '…'}</span>
         <span class="call-dur">${durStr(c.duration_ms)}</span>
@@ -1547,7 +1548,7 @@ function renderExtractionDetail(c) {
   const ts = c.ts ? new Date(c.ts).toLocaleTimeString() : '';
   const sub = c.subkind || 'full';
   let html = `<div class="cd-header">
-    <span class="bk extraction">EXTR</span>
+    <span class="bk extraction">${c.kind === 'decision' ? 'DECIDE' : 'EXTR'}</span>
     <span class="cd-title">${escHtml(c.model || '—')}</span>
     <span class="bs ${sc}">${c.status || '…'}</span>
     <span class="cd-meta">${escHtml(sub)} · ${escHtml(c.source || '')}</span>
@@ -1562,6 +1563,8 @@ function renderExtractionDetail(c) {
   const msgs = (c.request || {}).messages || [];
   if (msgs.length) {
     html += cdSection(`Request (${msgs.length} messages)`, renderMsgs(msgs), false);
+  } else if (c.kind === 'decision' && c.request) {
+    html += cdSection('Decision request', `<pre class="jsonbox">${escHtml(JSON.stringify(c.request, null, 2))}</pre>`, true);
   }
 
   if (c.response_raw) {

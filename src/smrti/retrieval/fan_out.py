@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import struct
+from typing import Callable
 
 from smrti.core.models import AtomType, RecallResult, atom_from_row
 from smrti.core.atomspace import embedding_text
@@ -282,6 +283,32 @@ def _knn_entry_points(
         limit = min(limit * _REFILL_FACTOR, space_size)
 
 
+# A hook between ranking and selection: given the query and the salience-
+# ranked candidates, returns them in the order selection should cut them.
+# The ``rerank`` decision task is one; a caller's own reranker is another.
+Judge = Callable[[str, list[RecallResult]], list[RecallResult]]
+
+
+def boost_attention(db, atom_ids: list[str], tenant_id: str, write_space: str, sti_boost: float) -> int:
+    """Raise the STI of *atom_ids* within the write space — the access boost.
+
+    Reading a memory is attention, and this is the one write recall makes.
+    It is its own function so that a caller who takes a wider candidate set
+    (``recall(top_k=40, boost=False)``) and keeps five can boost the five
+    it read and not the thirty-five it discarded — and so that nobody
+    reaches for ``reinforce()`` in its place, which is evidence about
+    truth, not attention. Returns how many ids were written.
+    """
+    ids = [atom_id for atom_id in dict.fromkeys(atom_ids) if atom_id]
+    if sti_boost <= 0 or not ids:
+        return 0
+    db.execute_many(
+        "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ? AND tenant_id = ? AND space = ?",
+        [(sti_boost, atom_id, tenant_id, write_space) for atom_id in ids],
+    )
+    return len(ids)
+
+
 def retrieve(
     query: str,
     tenant_id: str,
@@ -292,9 +319,12 @@ def retrieve(
     top_k: int = 10,
     min_confidence: float | None = None,
     boost: bool = True,
+    judge: Judge | None = None,
 ) -> list[RecallResult]:
     """
-    Full retrieval pipeline:
+    Full retrieval pipeline, in three stages — candidates, selection,
+    attention — so that what is boosted is what was selected and nothing
+    that was merely considered:
       1. Embed query
       2. KNN search in vec_atoms per read_space (tenant + space partitioned),
          merged by cosine distance, fused by Reciprocal Rank Fusion with a
@@ -305,8 +335,10 @@ def retrieve(
          write_space); expanded candidates are scored on their true stored
          similarity, near-verbatim episode echoes of the query are damped,
          and agent-authored atoms are discounted by source trust
-      5. Cap near-duplicate episodes and reserve slots for beliefs, then
-         return top_k sorted by descending salience
+      5. Hand the ranked candidates to ``judge`` when one is given (the
+         evidence reranker), cap near-duplicate episodes and reserve slots
+         for beliefs, then return top_k sorted by descending score
+      6. Boost the STI of the returned results only, in the write space
 
     ``min_confidence`` is the surfacing floor. When the caller passes none,
     the write space's personality decides (``min_confidence_to_surface``),
@@ -322,6 +354,44 @@ def retrieve(
     them below the floor as well, but the stamp is the guarantee: a memory
     the caller asked to forget stops surfacing at every floor.
     """
+    results, sti_boost, floor = rank_candidates(
+        query, tenant_id, read_spaces, db, embed_engine, write_space, min_confidence
+    )
+    top_results = select(query, results, top_k, floor, judge)
+    if boost and top_results:
+        boost_attention(db, [r.atom.id for r in top_results], tenant_id, write_space, sti_boost)
+    return top_results
+
+
+def select(
+    query: str,
+    results: list[RecallResult],
+    top_k: int,
+    min_confidence: float,
+    judge: Judge | None = None,
+) -> list[RecallResult]:
+    """The final results from the ranked candidates: judged, capped, cut.
+
+    ``min_confidence`` here is only the diversity cap's belief floor; the
+    surfacing floor was applied while the candidates were gathered.
+    """
+    if judge is not None and results:
+        results = judge(query, results)
+    return diversify(results, top_k, min_confidence)
+
+
+def rank_candidates(
+    query: str,
+    tenant_id: str,
+    read_spaces: list[str],
+    db,
+    embed_engine,
+    write_space: str,
+    min_confidence: float | None = None,
+) -> tuple[list[RecallResult], float, float]:
+    """Every eligible candidate the query reaches, ranked by salience, with
+    the write space's access boost and the surfacing floor that was applied
+    — the first stage of :func:`retrieve`, which makes no write."""
     # One KNN probe is issued per read space, so a repeated name is repeated
     # work — and read_spaces can arrive straight from a request header.
     # Deduplicating in order also keeps the ``space IN (...)`` lists tight.
@@ -394,7 +464,7 @@ def retrieve(
     entry_ids = _rrf_fuse([knn_ids, lexical_ids], knn_pool)
 
     if not entry_ids:
-        return []
+        return [], sti_boost, min_confidence
 
     # Step 2: 1-hop expansion via relation atoms, capped so a hub atom cannot
     # pull an unbounded neighborhood into the scoring set. The budget goes to
@@ -431,7 +501,7 @@ def retrieve(
     expanded_ids.discard(None)
 
     if not expanded_ids:
-        return []
+        return [], sti_boost, min_confidence
 
     # Step 3: Fetch candidate atoms — space-filtered here (overlay boundary),
     # and eligibility-filtered again for what the expansion pulled in.
@@ -492,18 +562,10 @@ def retrieve(
         results.append(RecallResult(atom=atom, salience=salience, similarity=similarity))
 
     results.sort(key=lambda r: r.salience, reverse=True)
-    # Step 5: cap how much of the answer one conversational moment may fill.
-    # Ranking is per-atom and has no opinion about the shape of the set it
-    # produces, which is how five copies of a single exchange came to be a
-    # whole response.
-    top_results = diversify(results, top_k, min_confidence)
-
-    # Boost STI on accessed atoms within write_space only — reading from a
-    # foreign space must not mutate that space's attention weights.
-    if boost and sti_boost > 0 and top_results:
-        db.execute_many(
-            "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ? AND tenant_id = ? AND space = ?",
-            [(sti_boost, r.atom.id, tenant_id, write_space) for r in top_results],
-        )
-
-    return top_results
+    # The diversity cap and the cut to top_k run in ``select``: ranking is
+    # per-atom and has no opinion about the shape of the set it produces,
+    # which is how five copies of a single exchange came to be a whole
+    # response. The access boost runs after that, on the write space only —
+    # reading from a foreign space must not mutate that space's attention
+    # weights, and reading a candidate the cut discarded is not reading.
+    return results, sti_boost, min_confidence

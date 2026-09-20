@@ -324,6 +324,7 @@ async def _inject_context(
 
     memory_dicts = [
         {
+            "id": r.atom.id,
             "label": r.atom.label,
             "content": c,
             "severity": sev,
@@ -332,12 +333,14 @@ async def _inject_context(
             "probability": round(r.atom.truth.probability, 3),
             "valence": round(r.atom.valence.valence, 3),
             "salience": round(r.salience, 3),
+            "evidence": None if r.evidence is None else round(r.evidence, 3),
         }
         for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
     ]
 
     warning_lines = [line for line, sev in formatted if sev in ("critical_warning", "known_antipattern")]
     context_lines = [line for line, sev in formatted if sev == "context"]
+    warning_lines, context_lines = _within_budget(warning_lines, context_lines, cfg.INJECT_BUDGET_CHARS)
 
     parts: list[str] = []
     if warning_lines:
@@ -363,6 +366,36 @@ async def _inject_context(
         messages.insert(0, {"role": "system", "content": injection})
 
     return {**body, "messages": messages}, injection, memory_dicts
+
+
+def _within_budget(
+    warning_lines: list[str], context_lines: list[str], budget: int
+) -> tuple[list[str], list[str]]:
+    """Cut the injected block to *budget* characters, constraints first.
+
+    Applied after selection, so the memories were ranked on their merits
+    and the budget only decides how many of them fit: every behavioral
+    constraint is kept before any background line, and both lists are
+    walked in rank order until the budget is spent. A budget of zero is no
+    budget. A warning over the budget on its own is still kept — the one
+    memory the engine promises to deliver is not what a token limit drops.
+    """
+    if budget <= 0:
+        return warning_lines, context_lines
+    kept_warnings: list[str] = []
+    kept_context: list[str] = []
+    spent = 0
+    for line in warning_lines:
+        if kept_warnings and spent + len(line) > budget:
+            break
+        kept_warnings.append(line)
+        spent += len(line)
+    for line in context_lines:
+        if spent + len(line) > budget:
+            break
+        kept_context.append(line)
+        spent += len(line)
+    return kept_warnings, kept_context
 
 
 # Markers actually emitted by _format_memory / _inject_context — assistant echoes

@@ -252,6 +252,21 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         clear()
         return {"status": "ok"}
 
+    # ── Decision audit ─────────────────────────────────────────────────────
+    @router.get("/decisions")
+    async def get_decisions_log():
+        """Every semantic decision the engine made or failed to make, newest
+        first, with the mode it ran under and whether it was applied — the
+        record shadow mode exists to produce."""
+        from smrti.decisions import audit
+        return audit.get_all()
+
+    @router.delete("/decisions")
+    async def clear_decisions_log():
+        from smrti.decisions import audit
+        audit.clear()
+        return {"status": "ok"}
+
     # ── Prometheus / OpenMetrics exposition ─────────────────────────────────
     @router.get("/metrics")
     async def prometheus_metrics(db: str | None = Query(None)):
@@ -310,6 +325,25 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
             lines.append(f"# HELP {metric} Personality tuning parameter: {key}.")
             lines.append(f"# TYPE {metric} gauge")
             lines.append(f'{metric}{{{labels}}} {float(val)}')
+
+        # decisions made since the process started, by task, mode and outcome
+        from smrti.decisions import audit as _audit
+        from smrti.decisions import get_decisions as _get_decisions
+
+        engine = _get_decisions()
+        lines.append("# HELP smrti_decisions_mode The mode each decision task runs under (0 off, 1 shadow, 2 active).")
+        lines.append("# TYPE smrti_decisions_mode gauge")
+        for task in ("routing", "rerank", "supersession", "entity"):
+            level = {"off": 0, "shadow": 1, "active": 2}.get(engine.mode(task), 0)
+            lines.append(f'smrti_decisions_mode{{task="{task}"}} {level}')
+        counts = _audit.counters()
+        if counts:
+            lines.append("# HELP smrti_decisions_total Decisions by task, mode and outcome.")
+            lines.append("# TYPE smrti_decisions_total counter")
+            for (task, mode, outcome), n in sorted(counts.items()):
+                lines.append(
+                    f'smrti_decisions_total{{task="{_esc(task)}",mode="{_esc(mode)}",outcome="{_esc(outcome)}"}} {int(n)}'
+                )
 
         body = "\n".join(lines) + "\n"
         from fastapi.responses import Response

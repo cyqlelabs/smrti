@@ -1,0 +1,43 @@
+{
+  "description": "Labeled messages for the extraction routing gate. `label` is what the gate must do: `extract` means the claim extraction must not be skipped, `skip` means it may be. `kind` names what is at stake — a durable fact, a correction, a constraint, chatter, or an assistant echo of a known fact — so a recall figure exists per kind. `context` is the known-entities block the gate sees, as extraction would build it from the graph.",
+  "items": [
+    {"text": "Thanks, that worked.", "author": "user", "context": "", "label": "skip", "kind": "chatter", "lang": "en"},
+    {"text": "ok great", "author": "user", "context": "- Nico (person): works_for Cyqle", "label": "skip", "kind": "chatter", "lang": "en"},
+    {"text": "Gracias, ya quedó.", "author": "user", "context": "", "label": "skip", "kind": "chatter", "lang": "es"},
+    {"text": "Can you say that again?", "author": "user", "context": "", "label": "skip", "kind": "chatter", "lang": "en"},
+    {"text": "hmm let me think about it", "author": "user", "context": "", "label": "skip", "kind": "chatter", "lang": "en"},
+    {"text": "Perfecto, muchas gracias por la ayuda.", "author": "user", "context": "- Nico (person): lives_in Córdoba", "label": "skip", "kind": "chatter", "lang": "es"},
+    {"text": "What time is it in Tokyo?", "author": "user", "context": "", "label": "skip", "kind": "chatter", "lang": "en"},
+    {"text": "lol", "author": "user", "context": "", "label": "skip", "kind": "chatter", "lang": "en"},
+
+    {"text": "I now work at Acme instead of Globex.", "author": "user", "context": "- Nico (person): works_for Globex", "label": "extract", "kind": "correction", "lang": "en"},
+    {"text": "Actually I moved to Rosario last month, not Córdoba anymore.", "author": "user", "context": "- Nico (person): lives_in Córdoba", "label": "extract", "kind": "correction", "lang": "en"},
+    {"text": "Ya no uso Postgres, migramos todo a SQLite.", "author": "user", "context": "- Nico (person): uses Postgres", "label": "extract", "kind": "correction", "lang": "es"},
+    {"text": "Correction: the release is on Thursday, not Friday.", "author": "user", "context": "- release (event): scheduled_for Friday", "label": "extract", "kind": "correction", "lang": "en"},
+    {"text": "Me equivoqué, mi hermana se llama Lucía, no Laura.", "author": "user", "context": "- Laura (person): sister_of Nico", "label": "extract", "kind": "correction", "lang": "es"},
+    {"text": "We stopped using Jenkins; everything runs on GitHub Actions now.", "author": "user", "context": "- Cyqle (organization): uses Jenkins", "label": "extract", "kind": "correction", "lang": "en"},
+
+    {"text": "Never deploy directly to production.", "author": "user", "context": "", "label": "extract", "kind": "constraint", "lang": "en"},
+    {"text": "Nunca hagas deploy los viernes.", "author": "user", "context": "", "label": "extract", "kind": "constraint", "lang": "es"},
+    {"text": "Don't ever email the client without cc'ing me.", "author": "user", "context": "", "label": "extract", "kind": "constraint", "lang": "en"},
+    {"text": "Always run the migrations with a backup first.", "author": "user", "context": "", "label": "extract", "kind": "constraint", "lang": "en"},
+    {"text": "No uses tabs, solo espacios, en todo el repo.", "author": "user", "context": "", "label": "extract", "kind": "constraint", "lang": "es"},
+    {"text": "Please avoid at all costs touching the billing tables.", "author": "user", "context": "", "label": "extract", "kind": "constraint", "lang": "en"},
+
+    {"text": "I prefer dark mode.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "en"},
+    {"text": "Prefiero el té al café.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "es"},
+    {"text": "My daughter Ana starts school in September.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "en"},
+    {"text": "I'm allergic to peanuts.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "en"},
+    {"text": "Vivo en Córdoba y trabajo en Cyqle.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "es"},
+    {"text": "My goal this quarter is to ship the memory engine v2.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "en"},
+    {"text": "I hate flying.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "en"},
+    {"text": "Mi cumpleaños es el 14 de marzo.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "es"},
+    {"text": "We use Rust for the ingest service.", "author": "user", "context": "- Cyqle (organization)", "label": "extract", "kind": "durable", "lang": "en"},
+    {"text": "Alice from Acme is our new account manager.", "author": "user", "context": "", "label": "extract", "kind": "durable", "lang": "en"},
+
+    {"text": "As you mentioned, you prefer tea over coffee, so I'll suggest a tea place.", "author": "assistant", "context": "- Nico (person): prefers tea", "label": "skip", "kind": "echo", "lang": "en"},
+    {"text": "Sure! Here is the summary you asked for.", "author": "assistant", "context": "", "label": "skip", "kind": "echo", "lang": "en"},
+    {"text": "Como vivís en Córdoba, te recomiendo salir temprano.", "author": "assistant", "context": "- Nico (person): lives_in Córdoba", "label": "skip", "kind": "echo", "lang": "es"},
+    {"text": "I'd recommend PostgreSQL for this workload because of its JSONB support.", "author": "assistant", "context": "", "label": "extract", "kind": "durable", "lang": "en"}
+  ]
+}

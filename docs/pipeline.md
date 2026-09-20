@@ -59,6 +59,7 @@ flowchart TD
         FUSE["⚖️ Rank Fusion\nReciprocal Rank Fusion\npicks the candidate pool"]
         EXPAND["🌐 Graph Expansion\nFollow relation edges\nto related concepts"]
         SALIENCE["🏆 Salience Ranking\nSimilarity · Attention\nConfidence · Valence"]
+        JUDGE["⚖️ Evidence Judgement\noptional · typed decisions\nanswers? links? superseded? contradicts?"]
         DIVERSE["🎛️ Diversity Cap\nOne moment cannot fill\nmore than a sixth of the answer"]
     end
 
@@ -87,6 +88,7 @@ flowchart TD
     ATOMS -->|"on recall"| KNN & BM25
     KNN & BM25 --> FUSE
     FUSE --> EXPAND --> SALIENCE --> DIVERSE
+    SALIENCE -.->|"shortlist"| JUDGE -.-> DIVERSE
     DIVERSE --> CRITICAL & ANTIPATTERN & CONTEXT_OUT
     CRITICAL & ANTIPATTERN & CONTEXT_OUT --> RESPOND
 
@@ -106,7 +108,7 @@ flowchart TD
     class NER,RESOLVE,PRONOUNS,CLAIMS,CONTEXT understandNode
     class ATOMS,TV,AV,VAL,EDGES storeNode
     class REVISE,DECAY,PROPAGATE,HEAL,PROMOTE,CONTRADICT,PRUNE evolveNode
-    class KNN,BM25,FUSE,EXPAND,SALIENCE,DIVERSE retrieveNode
+    class KNN,BM25,FUSE,EXPAND,SALIENCE,JUDGE,DIVERSE retrieveNode
     class CRITICAL criticalNode
     class ANTIPATTERN warnNode
     class CONTEXT_OUT contextNode

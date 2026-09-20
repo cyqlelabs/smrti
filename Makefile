@@ -2,7 +2,7 @@ DATASET ?= data/longmemeval_s.json
 HALUMEM ?= data/HaluMem-Medium.jsonl
 BENCH_ARGS ?=
 
-.PHONY: test datasets bench bench-baseline bench-halumem bench-all
+.PHONY: test datasets bench bench-baseline bench-halumem bench-decisions bench-all
 
 test:
 	pytest tests/ -q
@@ -26,5 +26,13 @@ bench-baseline:
 # model, and gates on the hallucination rate rising.
 bench-halumem:
 	PYTHONPATH=. python -m bench.halumem.run --dataset $(HALUMEM) $(BENCH_ARGS)
+
+# The extraction routing gate against its labeled set — calls avoided
+# beside missed durable claims, corrections and constraints. Needs a
+# decision provider key (TYPESAFE_API_KEY); fails when a recall floor is
+# missed. A gate that saves calls by skipping valuable updates is a
+# regression, which is why the two are reported together.
+bench-decisions:
+	PYTHONPATH=. python -m bench.decisions.run $(BENCH_ARGS)
 
 bench-all: bench bench-halumem

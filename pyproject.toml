@@ -40,6 +40,7 @@ dependencies = [
     "chonkie-core",
     "gliner2-onnx>=0.1.1",
     "dateparser>=1.2",
+    "laya>=0.3.4,<0.4",
 ]
 
 [project.urls]

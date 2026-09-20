@@ -8,10 +8,10 @@ the distribution over all of them, a ``Score`` rates the state against
 ordered rubric levels. Every question in a request is evaluated against the
 same state, independently of the others.
 
-Nothing here knows which provider answers. :mod:`smrti.decisions.jev` is the
-one adapter shipped; a test double that returns fixed answers is another,
-and either one can be swapped for a different backend without the callers
-in retrieval and extraction noticing.
+Nothing here knows which provider answers. :mod:`smrti.decisions.laya` is
+the local adapter shipped; a test double that returns fixed answers is
+another, and either one can be swapped for a different backend without the
+callers in retrieval and extraction noticing.
 """
 from __future__ import annotations
 

@@ -115,8 +115,8 @@ class Smrti:
         self._temporal = temporal
         # The semantic decision engine (see ``smrti.decisions``): the shared
         # one built from the environment unless the caller hands in its own,
-        # which tests and the bench do. Every task is off by default, so an
-        # instance that never configured it pays nothing for it.
+        # which tests and the bench do. The local model is enabled by default;
+        # SMRTI_DECISIONS=off restores the deterministic-only path.
         self.decisions = decisions if decisions is not None else get_decisions()
         # Memory operations since the last consolidation. The reflect loop
         # reads it to skip a space nobody used: an epoch is a unit of the

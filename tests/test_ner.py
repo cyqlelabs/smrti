@@ -193,7 +193,7 @@ def test_gliner_failure_falls_back_to_llm_in_hybrid(mem):
             ))
             mock_llm.assert_called_once_with(
                 episode_id, "test content", mem,
-                "auth", "model", "http://localhost", "user",
+                "auth", "model", "http://localhost", "user", None,
             )
 
 

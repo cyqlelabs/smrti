@@ -63,9 +63,9 @@ TEMPORAL: bool = os.environ.get("SMRTI_TEMPORAL", "1") == "1"
 EXTRACT_THINKING: str = os.environ.get("SMRTI_EXTRACT_THINKING", "disabled")
 
 # Semantic decisions (``smrti.decisions``) — read there, listed here so the
-# reference is in one place: SMRTI_DECISIONS (off | shadow | active, the
-# default for every task), SMRTI_DECISIONS_ROUTING / _RERANK / _SUPERSESSION
-# / _ENTITY (per-task override), SMRTI_DECISIONS_API_KEY (or
-# TYPESAFE_API_KEY), SMRTI_DECISIONS_URL, SMRTI_DECISIONS_MODEL,
-# SMRTI_DECISIONS_TIMEOUT, and the thresholds in ``decisions/policies.py``.
-DECISIONS: str = os.environ.get("SMRTI_DECISIONS", "off")
+# reference is in one place: SMRTI_DECISIONS (off | shadow | active, with
+# active the default for every task), SMRTI_DECISIONS_ROUTING / _RERANK / _SUPERSESSION
+# / _ENTITY (per-task override), SMRTI_DECISIONS_MODEL,
+# SMRTI_DECISIONS_DEVICE, SMRTI_DECISIONS_TIMEOUT, and the thresholds in
+# ``decisions/policies.py``.
+DECISIONS: str = os.environ.get("SMRTI_DECISIONS", "active")

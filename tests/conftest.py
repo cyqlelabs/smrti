@@ -1,5 +1,6 @@
 """Pytest configuration: ensure each test gets a fresh event loop and database registry."""
 import asyncio
+
 import pytest
 
 
@@ -13,6 +14,20 @@ def reset_event_loop():
         loop.close()
     except Exception:
         pass
+
+
+@pytest.fixture(autouse=True)
+def disable_live_decisions(monkeypatch):
+    """Keep unit tests offline; individual policy tests exercise the active default."""
+    monkeypatch.setenv("SMRTI_DECISIONS", "off")
+    for task in ("ROUTING", "RERANK", "SUPERSESSION", "ENTITY"):
+        monkeypatch.delenv(f"SMRTI_DECISIONS_{task}", raising=False)
+
+    from smrti.decisions import reset_decisions
+
+    reset_decisions(None)
+    yield
+    reset_decisions(None)
 
 
 @pytest.fixture(autouse=True)

@@ -1,6 +1,6 @@
 """The extraction routing gate against its labeled set.
 
-    make bench-decisions            # needs TYPESAFE_API_KEY
+    make bench-decisions            # uses the core local Laya runtime
 
 The gate exists to avoid LLM claim-extraction calls, and a gate that saves
 calls by skipping valuable updates is a regression, so the two numbers are
@@ -142,12 +142,19 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         model = saved.get("model", "")
     else:
-        from smrti.decisions import DecisionPolicy, build_engine
+        from smrti.decisions import DecisionPolicy, DecisionUnavailable, build_engine
 
         policy = DecisionPolicy.from_env().with_modes(routing="active")
         engine = build_engine(policy)
         if engine.provider is None:
-            print("no decision provider: set TYPESAFE_API_KEY (or SMRTI_DECISIONS_API_KEY)", file=sys.stderr)
+            print("no decision provider configured", file=sys.stderr)
+            return 2
+        try:
+            preload = getattr(engine.provider, "preload", None)
+            if preload is not None:
+                preload()
+        except DecisionUnavailable as exc:
+            print(f"could not load local decision model: {exc}", file=sys.stderr)
             return 2
         routes = asyncio.run(route_all(items, engine, args.concurrency))
         model = engine.model

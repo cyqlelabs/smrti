@@ -1,11 +1,11 @@
-"""The decisions package on its own: questions, the Jev adapter, policy,
+"""The decisions package on its own: questions, the Laya adapter, policy,
 engine, and the pure functions the integrations fold answers with."""
 from __future__ import annotations
 
 import asyncio
 import json
+import time
 
-import httpx
 import pytest
 
 from smrti.decisions import (
@@ -32,7 +32,7 @@ from smrti.decisions.extraction import (
     verify_entity,
     verify_supersession,
 )
-from smrti.decisions.jev import JevProvider
+from smrti.decisions.laya import DEFAULT_MODEL, LayaProvider
 from smrti.decisions.policies import MODE_ACTIVE, MODE_OFF, MODE_SHADOW, TASK_RERANK, TASKS
 from smrti.decisions.provider import parse_response
 from smrti.decisions.retrieval import fold_evidence, rerank
@@ -51,7 +51,7 @@ def run(coro):
 
 
 def _policy(**modes) -> DecisionPolicy:
-    return DecisionPolicy().with_modes(**modes)
+    return DecisionPolicy(modes={task: MODE_OFF for task in TASKS}).with_modes(**modes)
 
 
 def _yes(_key, question, _state):
@@ -88,7 +88,7 @@ def test_parse_response_reads_every_kind_and_the_usage():
     questions = {"n": Noul("n?"), "c": Choice("c?", {"a": "", "b": ""}), "s": Score("s?", ["lo", "mid", "hi"])}
     decisions = parse_response(
         {
-            "model": "jev-1.13.0",
+            "model": "laya-test",
             "answers": {
                 "n": {"type": "noul", "noul": 0.25},
                 "c": {"type": "choice", "choice": "b", "probabilities": {"a": 0.3, "b": 0.7}, "confidence": 0.6},
@@ -102,7 +102,7 @@ def test_parse_response_reads_every_kind_and_the_usage():
     assert decisions.noul("n") == 0.25
     assert decisions.choice("c").choice == "b"
     assert decisions["s"].normalized == 0.75
-    assert decisions.model == "jev-1.13.0"
+    assert decisions.model == "laya-test"
     assert decisions.input_tokens == 120
     assert decisions.compact()["c"] == {"choice": "b", "confidence": 0.6}
 
@@ -135,117 +135,131 @@ def test_the_static_provider_validates_its_own_answers():
         provider.ask("state", {"n": Noul("n?")}, timeout=1.0)
 
 
-# ── the Jev adapter ──────────────────────────────────────────────────────────
+# ── the Laya adapter ─────────────────────────────────────────────────────────
 
 
-def _jev(handler, **kwargs) -> JevProvider:
-    return JevProvider(
-        "key-123",
-        transport=httpx.MockTransport(handler),
-        async_transport=httpx.MockTransport(handler),
-        **kwargs,
-    )
+class _FakeLaya:
+    def __init__(self, handler):
+        self.handler = handler
+
+    def predict(self, state, questions):
+        return self.handler(state, questions)
 
 
-def _reply(questions_body: dict, model="jev-test") -> dict:
+def _reply(questions_body: dict) -> dict:
     answers = {}
     for key, q in questions_body.items():
         if q["type"] == "noul":
             answers[key] = {"type": "noul", "noul": 0.8}
         elif q["type"] == "choice":
             first = next(iter(q["criteria"]))
-            answers[key] = {"type": "choice", "choice": first, "probabilities": {first: 1.0}, "confidence": 1.0}
+            answers[key] = {
+                "type": "choice",
+                "choice": first,
+                "probabilities": {first: 1.0},
+                "confidence": 1.0,
+            }
         else:
-            answers[key] = {"type": "score", "score": 0.0, "probabilities": {"0": 1.0}, "confidence": 1.0}
-    return {"model": model, "answers": answers, "usage": {"input_tokens": 42, "output_tokens": 0}}
+            answers[key] = {
+                "type": "score",
+                "score": 0.0,
+                "probabilities": {"0": 1.0},
+                "confidence": 1.0,
+            }
+    return {
+        "model": "laya-rl-agent",
+        "answers": answers,
+        "usage": {"input_tokens": 42, "output_tokens": 0},
+    }
 
 
-def test_jev_posts_the_systemone_request_and_reads_the_answers():
+def _laya(handler, **kwargs) -> LayaProvider:
+    return LayaProvider(agent=_FakeLaya(handler), **kwargs)
+
+
+def test_laya_runs_locally_and_reads_every_answer_kind():
     seen = {}
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        seen["url"] = str(request.url)
-        seen["auth"] = request.headers.get("Authorization")
-        seen["body"] = json.loads(request.content)
-        return httpx.Response(200, json=_reply(seen["body"]["questions"]))
+    def handler(state, questions):
+        seen["state"] = state
+        seen["questions"] = questions
+        return _reply(questions)
 
-    provider = _jev(handler, base_url="https://jev.example/")
-    decisions = provider.ask({"text": "hi"}, {"q": Noul("is it?")}, timeout=2.0)
+    provider = _laya(handler, model="/models/laya-multilingual", device="cpu")
+    questions = {
+        "n": Noul("is it?"),
+        "c": Choice("pick", {"a": "first", "b": "second"}),
+        "s": Score("rate", ["low", "high"]),
+    }
+    decisions = provider.ask({"text": "hola"}, questions, timeout=2.0)
 
-    assert seen["url"] == "https://jev.example/v1/systemone"
-    assert seen["auth"] == "Bearer key-123"
-    assert seen["body"]["state"] == {"text": "hi"}
-    assert seen["body"]["model"] == "jev-latest"
-    assert seen["body"]["questions"]["q"] == {"type": "noul", "instructions": "is it?"}
-    assert decisions.noul("q") == 0.8
-    assert decisions.model == "jev-test"
+    assert seen["state"] == {"text": "hola"}
+    assert seen["questions"]["n"] == {"type": "noul", "instructions": "is it?"}
+    assert seen["questions"]["c"]["criteria"] == {"a": "first", "b": "second"}
+    assert decisions.noul("n") == 0.8
+    assert decisions.choice("c").choice == "a"
+    assert decisions["s"].score == 0.0
+    assert decisions.model == "/models/laya-multilingual"
+    assert provider.device == "cpu"
     assert provider.input_tokens == 42
     assert provider.requests == 1
-    assert provider.estimated_cost_usd == pytest.approx(42 / 1e6 * 0.042)
+    provider.close()
 
 
-def test_jev_retries_once_on_a_rate_limit_and_then_answers():
-    calls = []
+def test_laya_reports_model_failures_as_unavailable():
+    def handler(_state, _questions):
+        raise RuntimeError("weights unavailable")
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(1)
-        if len(calls) == 1:
-            return httpx.Response(429, text="slow down", headers={"Retry-After": "0"})
-        return httpx.Response(200, json=_reply(json.loads(request.content)["questions"]))
-
-    decisions = _jev(handler).ask("s", {"q": Noul("?")}, timeout=2.0)
-    assert decisions.noul("q") == 0.8
-    assert len(calls) == 2
+    provider = _laya(handler)
+    with pytest.raises(DecisionUnavailable, match="inference failed"):
+        provider.ask("s", {"q": Noul("?")}, timeout=1.0)
+    provider.close()
 
 
-def test_jev_does_not_retry_a_rejected_key():
-    calls = []
-
-    def handler(request: httpx.Request) -> httpx.Response:
-        calls.append(1)
-        return httpx.Response(401, text="bad key")
-
-    with pytest.raises(DecisionUnavailable, match="rejected"):
-        _jev(handler).ask("s", {"q": Noul("?")}, timeout=2.0)
-    assert len(calls) == 1
-
-
-def test_jev_reports_a_dropped_connection_as_unavailable():
-    def handler(request: httpx.Request) -> httpx.Response:
-        raise httpx.ConnectError("no route")
-
-    with pytest.raises(DecisionUnavailable, match="failed"):
-        _jev(handler, retries=0).ask("s", {"q": Noul("?")}, timeout=1.0)
-
-
-def test_jev_refuses_an_invalid_reply():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"answers": {"q": {"type": "noul", "noul": "x"}}})
-
+def test_laya_refuses_an_invalid_reply():
+    provider = _laya(
+        lambda _state, _questions: {
+            "answers": {"q": {"type": "noul", "noul": "x"}},
+        }
+    )
     with pytest.raises(DecisionUnavailable):
-        _jev(handler).ask("s", {"q": Noul("?")}, timeout=1.0)
+        provider.ask("s", {"q": Noul("?")}, timeout=1.0)
+    provider.close()
 
 
-def test_jev_async_path_shares_the_contract():
-    def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=_reply(json.loads(request.content)["questions"]))
-
-    provider = _jev(handler)
+def test_laya_async_path_shares_the_contract():
+    provider = _laya(lambda _state, questions: _reply(questions))
     decisions = run(provider.ask_async("s", {"q": Noul("?")}, timeout=1.0))
     assert decisions.noul("q") == 0.8
     run(provider.aclose())
 
 
-def test_jev_needs_a_key():
-    with pytest.raises(ValueError):
-        JevProvider("")
+def test_laya_enforces_the_decision_deadline():
+    def handler(_state, questions):
+        time.sleep(0.05)
+        return _reply(questions)
 
+    provider = _laya(handler)
+    with pytest.raises(DecisionUnavailable, match="within 0.0s"):
+        provider.ask("s", {"q": Noul("?")}, timeout=0.001)
+    provider.close()
+
+
+def test_laya_needs_a_model_id_or_path():
+    with pytest.raises(ValueError):
+        LayaProvider("")
 
 # ── policy ───────────────────────────────────────────────────────────────────
 
 
-def test_every_task_is_off_by_default():
+def test_every_task_is_active_by_default():
     policy = DecisionPolicy.from_env({})
+    assert all(policy.mode(t) == MODE_ACTIVE for t in TASKS)
+    assert policy.any_enabled
+
+
+def test_the_global_off_switch_restores_the_deterministic_path():
+    policy = DecisionPolicy.from_env({"SMRTI_DECISIONS": "off"})
     assert all(policy.mode(t) == MODE_OFF for t in TASKS)
     assert not policy.any_enabled
 
@@ -262,12 +276,15 @@ def test_an_unknown_mode_is_refused_rather_than_read_as_off():
         DecisionPolicy.from_env({"SMRTI_DECISIONS": "on"})
 
 
-def test_thresholds_and_the_key_come_from_the_environment():
+def test_thresholds_and_laya_settings_come_from_the_environment():
     policy = DecisionPolicy.from_env({
-        "TYPESAFE_API_KEY": "k", "SMRTI_DECISIONS_TIMEOUT": "2.5",
+        "SMRTI_DECISIONS_MODEL": "/models/laya",
+        "SMRTI_DECISIONS_DEVICE": "cpu",
+        "SMRTI_DECISIONS_TIMEOUT": "2.5",
         "SMRTI_DECISIONS_RERANK_SHORTLIST": "30", "SMRTI_DECISIONS_ROUTING_SKIP": "0.1",
     })
-    assert policy.api_key == "k"
+    assert policy.model == "/models/laya"
+    assert policy.device == "cpu"
     assert policy.timeout == 2.5
     assert policy.rerank_shortlist == 30
     assert policy.routing_skip == 0.1
@@ -350,22 +367,25 @@ def test_decisions_are_mirrored_into_the_llm_call_log():
     call_log._CALL_LOG.clear()
 
 
-def test_an_enabled_policy_without_a_key_builds_an_engine_with_every_task_off(caplog):
+def test_an_enabled_policy_builds_the_default_laya_provider():
     engine = build_engine(DecisionPolicy.from_env({"SMRTI_DECISIONS": "active"}))
-    assert engine.provider is None
-    assert engine.mode("rerank") == MODE_OFF
-    assert "no API key" in caplog.text
+    assert isinstance(engine.provider, LayaProvider)
+    assert engine.model == DEFAULT_MODEL
+    assert engine.mode("rerank") == MODE_ACTIVE
+    engine.provider.close()
 
 
-def test_a_key_builds_the_jev_provider():
+def test_a_local_model_and_device_configure_the_laya_provider():
     engine = build_engine(DecisionPolicy.from_env({
-        "SMRTI_DECISIONS": "shadow", "TYPESAFE_API_KEY": "k",
-        "SMRTI_DECISIONS_URL": "https://jev.example", "SMRTI_DECISIONS_MODEL": "jev-1.13.0",
+        "SMRTI_DECISIONS": "shadow",
+        "SMRTI_DECISIONS_MODEL": "/models/laya",
+        "SMRTI_DECISIONS_DEVICE": "cpu",
     }))
-    assert isinstance(engine.provider, JevProvider)
-    assert engine.provider.base_url == "https://jev.example"
-    assert engine.model == "jev-1.13.0"
+    assert isinstance(engine.provider, LayaProvider)
+    assert engine.model == "/models/laya"
+    assert engine.provider.device == "cpu"
     assert engine.mode("entity") == MODE_SHADOW
+    engine.provider.close()
 
 
 def test_the_shared_engine_is_built_once_and_can_be_replaced(monkeypatch):
@@ -375,9 +395,13 @@ def test_the_shared_engine_is_built_once_and_can_be_replaced(monkeypatch):
     reset_decisions(None)
     first = get_decisions()
     assert get_decisions() is first
-    assert first.mode("rerank") == MODE_OFF
+    assert first.mode("rerank") == MODE_ACTIVE
+    assert isinstance(first.provider, LayaProvider)
+    closed = []
+    monkeypatch.setattr(first.provider, "close", lambda: closed.append(True))
     replacement = DecisionEngine(_policy(), None)
     reset_decisions(replacement)
+    assert closed == [True]
     assert get_decisions() is replacement
     reset_decisions(None)
 

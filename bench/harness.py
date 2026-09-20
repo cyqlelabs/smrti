@@ -105,22 +105,20 @@ def build_parser(prog: str, config_path: str, baseline_path: str) -> argparse.Ar
     parser.add_argument("--epochs", type=int, default=0, help="reflect() passes to run over each history before querying it")
     parser.add_argument("--top-k", dest="top_k", type=int, default=None, help="override the locked top_k (the proxy injects 5, the MCP tool 10)")
     # The evidence reranker (smrti.decisions, task ``rerank``) judges the
-    # retrieval shortlist through the configured decision provider. Off
-    # unless asked for: it costs a network call per query, needs a key, and
-    # the number it changes is the one the benchmark gates on.
+    # retrieval shortlist through local Laya. It is active by default, just as
+    # it is in the core; the flag selects shadow or deterministic-only runs.
     parser.add_argument(
-        "--decisions", default=None, choices=("off", "shadow", "active"),
-        help="run the evidence reranker in this mode (needs TYPESAFE_API_KEY or SMRTI_DECISIONS_API_KEY)",
+        "--decisions", default="active", choices=("off", "shadow", "active"),
+        help="run the core local evidence reranker in this mode (default: active)",
     )
     return parser
 
 
 def apply_run_modes(args, config: dict) -> None:
-    """Fold --epochs and --top-k into the config the fingerprint is taken from.
+    """Fold run modes into the config the fingerprint is taken from.
 
-    Only when set. The default run has to keep hashing to the recorded
-    baseline, and a run under either mode has to be refused comparison
-    against a baseline that was measured without it.
+    Local decisions are part of the default engine, and runs in different
+    decision modes are not comparable.
     """
     epochs = getattr(args, "epochs", 0) or 0
     if epochs > 0:
@@ -128,10 +126,9 @@ def apply_run_modes(args, config: dict) -> None:
     top_k = getattr(args, "top_k", None)
     if top_k:
         config["top_k"] = top_k
-    decisions = getattr(args, "decisions", None)
-    if decisions and decisions != "off":
-        config["decisions"] = decisions
-        apply_decisions_mode(decisions)
+    decisions = getattr(args, "decisions", "active") or "active"
+    config["decisions"] = decisions
+    apply_decisions_mode(decisions)
 
 
 def apply_decisions_mode(mode: str) -> None:

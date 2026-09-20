@@ -28,10 +28,9 @@ bench-halumem:
 	PYTHONPATH=. python -m bench.halumem.run --dataset $(HALUMEM) $(BENCH_ARGS)
 
 # The extraction routing gate against its labeled set — calls avoided
-# beside missed durable claims, corrections and constraints. Needs a
-# decision provider key (TYPESAFE_API_KEY); fails when a recall floor is
-# missed. A gate that saves calls by skipping valuable updates is a
-# regression, which is why the two are reported together.
+# beside missed durable claims, corrections and constraints. Uses the core
+# local Laya runtime and fails when a recall floor is missed. A gate that saves
+# calls by skipping valuable updates is a regression, so both are reported.
 bench-decisions:
 	PYTHONPATH=. python -m bench.decisions.run $(BENCH_ARGS)
 

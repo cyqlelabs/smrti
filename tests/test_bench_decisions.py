@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 
 import pytest
 
@@ -74,14 +75,21 @@ def test_the_decisions_mode_enters_the_fingerprint(monkeypatch):
 
     monkeypatch.delenv("SMRTI_DECISIONS_RERANK", raising=False)
     base = {"dataset": "x", "top_k": 50}
-    plain = dict(base)
-    apply_run_modes(argparse.Namespace(epochs=0, top_k=None, decisions="off"), plain)
-    assert plain == base
+    disabled = dict(base)
+    apply_run_modes(argparse.Namespace(epochs=0, top_k=None, decisions="off"), disabled)
+    assert disabled["decisions"] == "off"
+    assert config_hash(disabled) != config_hash(base)
+    assert get_decisions().policy.mode("rerank") == "off"
+
+    defaulted = dict(base)
+    apply_run_modes(argparse.Namespace(epochs=0, top_k=None), defaulted)
+    assert defaulted["decisions"] == "active"
+    assert get_decisions().policy.mode("rerank") == "active"
 
     shadowed = dict(base)
     apply_run_modes(argparse.Namespace(epochs=0, top_k=None, decisions="shadow"), shadowed)
     assert shadowed["decisions"] == "shadow"
     assert config_hash(shadowed) != config_hash(base)
-    # the shared engine was rebuilt to run the task in that mode (no key: it stays off)
     assert get_decisions().policy.mode("rerank") == "shadow"
+    os.environ.pop("SMRTI_DECISIONS_RERANK", None)
     reset_decisions(None)

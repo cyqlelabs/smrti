@@ -21,7 +21,7 @@ from rapidfuzz import fuzz
 import smrti.core.embed as embed_module
 from smrti import Smrti
 from smrti.core.provenance import SOURCE_AGENT, VALENCE_STATED
-from smrti.decisions import Choice, DecisionEngine, DecisionPolicy, Noul, StaticProvider, audit
+from smrti.decisions import Choice, DecisionEngine, DecisionPolicy, MODE_OFF, Noul, StaticProvider, TASKS, audit
 from smrti.decisions.extraction import COMPATIBLE, EXPLICIT_UPDATE
 from smrti.extraction.extract import SUPERSESSION_DEFERRED, _link_claims, extract_and_link_hybrid
 from smrti.extraction.resolve import EntityResolver
@@ -69,7 +69,8 @@ def run(coro):
 
 
 def _engine(provider, **modes) -> DecisionEngine:
-    return DecisionEngine(DecisionPolicy().with_modes(**modes), provider)
+    policy = DecisionPolicy(modes={task: MODE_OFF for task in TASKS}).with_modes(**modes)
+    return DecisionEngine(policy, provider)
 
 
 def _mem(tmp_path, engine: DecisionEngine, name="d") -> Smrti:
@@ -156,7 +157,7 @@ def test_a_failed_judgement_keeps_the_local_ranking(tmp_path):
 
 def test_the_evidence_cutoff_never_drops_a_stated_warning(tmp_path):
     provider = _evidence_provider("oslo")
-    policy = DecisionPolicy(rerank_min_evidence=0.5).with_modes(rerank="active")
+    policy = DecisionPolicy(modes={task: MODE_OFF for task in TASKS}, rerank_min_evidence=0.5).with_modes(rerank="active")
     mem = _mem(tmp_path, DecisionEngine(policy, provider))
     answer_id = _three_memories(mem)
     warning_id = mem.remember(

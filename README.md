@@ -140,7 +140,7 @@ Similarity multiplies the standing terms, so a memory that is not about the ques
 - `agent_source_trust` discounts an agent-authored memory's standing, never its similarity.
 - Episodes repeating one already chosen from the same minutes share `max(2, top_k // 6)` slots; beliefs keep up to two.
 - Results below the personality's `min_confidence_to_surface` are excluded unless you pass `min_confidence`; forgotten memories never return.
-- With the optional [decision module](#semantic-decisions-optional) on, the top candidates are judged as evidence for the question and the order blends that judgement with salience; each result then carries an `evidence` score. Only what is returned gets the access boost; `attend(atom_ids)` boosts what an external reranker kept out of a wider `recall(boost=False)`.
+- The core [decision engine](#semantic-decisions) judges the top candidates as evidence for the question and blends that judgement with salience; each result then carries an `evidence` score. Only what is returned gets the access boost; `attend(atom_ids)` boosts what an external reranker kept out of a wider `recall(boost=False)`.
 
 Each result carries a `severity`: `critical_warning` (a valence you stated, on anything but a bare concept), `known_antipattern` (a belief whose probability fell below 0.3, where a superseded preference or constraint lands), or `context`.
 
@@ -156,9 +156,9 @@ Reports that recalled memories were used; a cheap test is that distinctive words
 
 One consolidation epoch: revise pending evidence, decay attention and confidence, propagate both to neighbors, heal orphaned episodes, promote high-STI atoms to long-term importance, resolve contradictions (a superseded claim loses), link similar high-LTI atoms (every tenth epoch), and prune what fell below the floors. The servers run one every `SMRTI_REFLECT_INTERVAL` seconds for each space used in that interval, so idle memory does not age. What you told the agent decays only to the surfacing floor and stays recallable unless you forget it; what it inferred keeps fading, faster for agent-authored atoms.
 
-### Semantic decisions (optional)
+### Semantic decisions
 
-The engine is deterministic and stays so. `smrti.decisions` adds bounded judgements at four points where a rule cannot see what a sentence means and a generative LLM call is the expensive way to find out, answered by [TypeSafe's Jev](https://docs.typesafe.ai) (typed questions — a probability, a choice among options you supply, a score against a rubric — never prose). Each task is **off by default**, runs in **shadow** (ask, record, apply nothing) before it runs **active**, and falls back to the deterministic path on any failure, timeout or invalid reply:
+The engine is deterministic and stays so. `smrti.decisions` adds bounded judgements at four points where a rule cannot see what a sentence means and a generative LLM call is the expensive way to find out, answered locally by [Laya](https://github.com/NandhaKishorM/laya)'s multilingual non-autoregressive model (typed questions — a probability, a choice among options you supply, a score against a rubric — never prose). Laya is a core dependency and every task is **active by default**; each can instead run in **shadow** (ask and record, apply nothing) or be turned **off**. Any failure, timeout, or invalid reply falls back to the deterministic path:
 
 | Task           | Where it runs                     | What it decides                                                                                   |
 | -------------- | --------------------------------- | ------------------------------------------------------------------------------------------------- |
@@ -170,12 +170,13 @@ The engine is deterministic and stays so. `smrti.decisions` adds bounded judgeme
 Two rules hold regardless: a model judgement never restores a forgotten atom, confers permanence, changes tenant or space scope, or mints a critical warning (that needs a valence *you* stated); and an agent's claim never supersedes what the user stated, which is a rule, not a judgement. Decision confidence is stored in the audit log and in decision metadata, never in a memory's truth value.
 
 ```bash
-export TYPESAFE_API_KEY=...            # or SMRTI_DECISIONS_API_KEY
-export SMRTI_DECISIONS=shadow          # every task: off | shadow | active
-export SMRTI_DECISIONS_RERANK=active   # per-task override
+# Laya ships with Smrti; its weights download once on first use.
+# export SMRTI_DECISIONS=off            # explicit deterministic-only rollback
+# export SMRTI_DECISIONS_RERANK=shadow  # per-task override: off | shadow | active
+# export SMRTI_DECISIONS_MODEL=/models/laya-multilingual  # fully offline checkpoint
 ```
 
-Every decision — asked, answered, applied or not, with model version, latency and token usage — is served by `GET /decisions` on the REST and proxy servers (and `DELETE /decisions`), counted into `/metrics` as `smrti_decisions_total{task,mode,outcome}`, and mirrored into the visualizer's LLM Calls tab. `make bench-decisions` runs the routing gate against a labeled bilingual set and reports calls avoided beside missed facts, corrections and constraints; `make bench BENCH_ARGS="--decisions active"` measures the reranker on LongMemEval-S under its own config fingerprint. Provider prices and latencies are the provider's figures, not measured smrti results.
+Every decision — asked, answered, applied or not, with checkpoint, latency and token usage — is served by `GET /decisions` on the REST and proxy servers (and `DELETE /decisions`), counted into `/metrics` as `smrti_decisions_total{task,mode,outcome}`, and mirrored into the visualizer's LLM Calls tab. `make bench-decisions` runs the routing gate against a labeled bilingual set and reports calls avoided beside missed facts, corrections and constraints; `make bench` measures the default active reranker on LongMemEval-S under its own config fingerprint. Inference stays in-process; the default checkpoint is fetched into the Hugging Face cache once, or `SMRTI_DECISIONS_MODEL` can point at an already-downloaded directory for fully offline startup.
 
 ## Server Modes
 
@@ -357,16 +358,15 @@ To get the knowledge graph from `serve rest` or `serve mcp`, point `SMRTI_EXTRAC
 | `SMRTI_NER_MODEL`        | `lmo3/gliner2-multi-v1-onnx` | GLiNER2 ONNX model for local zero-shot NER                     |
 | `SMRTI_TEMPORAL`         | `1`                        | Resolve relative dates against the write time (0 = store text verbatim); one NER pass per write |
 
-**Semantic decisions (all modes, see [above](#semantic-decisions-optional)):**
+**Semantic decisions (all modes, see [above](#semantic-decisions)):**
 
 | Variable                                      | Default                   | Purpose                                                                       |
 | --------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------- |
-| `SMRTI_DECISIONS`                             | `off`                     | Mode for every decision task: `off`, `shadow` (ask and record, apply nothing), `active` |
+| `SMRTI_DECISIONS`                             | `active`                  | Mode for every decision task: `off`, `shadow` (ask and record, apply nothing), `active` |
 | `SMRTI_DECISIONS_ROUTING` / `_RERANK` / `_SUPERSESSION` / `_ENTITY` | `SMRTI_DECISIONS` | Per-task mode override                                             |
-| `SMRTI_DECISIONS_API_KEY`                     | `TYPESAFE_API_KEY`        | Provider key; with none set every task is off                                 |
-| `SMRTI_DECISIONS_URL`                         | `https://api.typesafe.ai` | Provider base URL (`POST /v1/systemone`)                                      |
-| `SMRTI_DECISIONS_MODEL`                       | `jev-latest`              | Model version; recorded on every decision                                     |
-| `SMRTI_DECISIONS_TIMEOUT`                     | `5`                       | Deadline per decision request in seconds; past it the local path answers      |
+| `SMRTI_DECISIONS_MODEL`                       | `convaiinnovations/laya-multilingual` | Hugging Face model id or local checkpoint directory; recorded on every decision |
+| `SMRTI_DECISIONS_DEVICE`                      | auto                        | Laya device override such as `cpu`, `cuda`, or `mps`                     |
+| `SMRTI_DECISIONS_TIMEOUT`                     | `30`                      | Deadline per local decision in seconds; on expiry the deterministic path answers |
 | `SMRTI_DECISIONS_RERANK_SHORTLIST`            | `20`                      | Candidates judged per recall (one request)                                    |
 | `SMRTI_DECISIONS_RERANK_WEIGHT`               | `0.5`                     | Share of the final order the evidence judgement decides against salience      |
 | `SMRTI_DECISIONS_RERANK_MIN_EVIDENCE`         | `0`                       | Drop judged candidates under this evidence score (0 = rerank only, never filter); a stated warning is never dropped |
@@ -522,8 +522,8 @@ graph TD
     end
 
     subgraph Decisions
-        DEC["engine · policies · audit<br/><small>optional · off by default</small>"]
-        JEV["jev<br/><small>typed judgements</small>"]
+        DEC["engine · policies · audit<br/><small>core · active by default</small>"]
+        LAYA["laya · multilingual<br/><small>local typed judgements</small>"]
     end
 
     subgraph Storage
@@ -533,11 +533,11 @@ graph TD
     MCP & REST & PROXY --> S
     S --> Core & Retrieval & Evolution & Extraction & Spaces
     Retrieval & Extraction -.->|"shortlist · route · verify"| DEC
-    DEC --> JEV
+    DEC --> LAYA
     Core & Retrieval & Evolution & Extraction & Spaces --> SQL
 ```
 
-**Retrieval:** embed the query → vector + BM25 search, fused → 1-hop graph expansion → salience ranking → (optional evidence judgement) → diversity cap → top-k → access boost on what was returned. **Consolidation:** the epoch steps under [`reflect()`](#reflect).
+**Retrieval:** embed the query → vector + BM25 search, fused → 1-hop graph expansion → salience ranking → local evidence judgement → diversity cap → top-k → access boost on what was returned. **Consolidation:** the epoch steps under [`reflect()`](#reflect).
 
 ## Data Model
 

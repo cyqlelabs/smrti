@@ -11,8 +11,8 @@ Four tasks, each with its own mode and its own rollback switch:
 - ``entity`` verifies an uncertain fuzzy or embedding match in entity
   resolution against the other candidates, plus "none" and "ambiguous".
 
-Each runs ``off`` (the deterministic path, and the default), ``shadow``
-(ask, record the decision, apply nothing) or ``active``. ``SMRTI_DECISIONS``
+Each runs ``off`` (the deterministic fallback), ``shadow`` (ask, record the
+decision, apply nothing) or ``active`` (the default). ``SMRTI_DECISIONS``
 sets all four; ``SMRTI_DECISIONS_<TASK>`` overrides one. Thresholds are the
 lines the code draws through the provider's probabilities: the provider says
 how likely, the policy says what follows, and a decision below its line is
@@ -65,7 +65,7 @@ DEFAULT_SUPERSESSION_MIN_CONFIDENCE = 0.6
 DEFAULT_ENTITY_MIN_CONFIDENCE = 0.6
 DEFAULT_ENTITY_CANDIDATES = 5
 
-DEFAULT_TIMEOUT = 5.0
+DEFAULT_TIMEOUT = 30.0
 DEFAULT_CACHE_SIZE = 256
 
 
@@ -100,11 +100,9 @@ def _int(environ: Mapping[str, str], name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class DecisionPolicy:
-    modes: dict[str, str] = field(default_factory=lambda: {task: MODE_OFF for task in TASKS})
-    provider: str = "jev"
-    url: str = ""
-    api_key: str = ""
+    modes: dict[str, str] = field(default_factory=lambda: {task: MODE_ACTIVE for task in TASKS})
     model: str = ""
+    device: str = ""
     timeout: float = DEFAULT_TIMEOUT
     cache_size: int = DEFAULT_CACHE_SIZE
     routing_skip: float = DEFAULT_ROUTING_SKIP
@@ -143,17 +141,15 @@ class DecisionPolicy:
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "DecisionPolicy":
         env = os.environ if environ is None else environ
-        default_mode = _mode(env.get("SMRTI_DECISIONS"), MODE_OFF, "SMRTI_DECISIONS")
+        default_mode = _mode(env.get("SMRTI_DECISIONS"), MODE_ACTIVE, "SMRTI_DECISIONS")
         modes = {
             task: _mode(env.get(f"SMRTI_DECISIONS_{task.upper()}"), default_mode, f"SMRTI_DECISIONS_{task.upper()}")
             for task in TASKS
         }
         return cls(
             modes=modes,
-            provider=(env.get("SMRTI_DECISIONS_PROVIDER") or "jev").strip().lower(),
-            url=env.get("SMRTI_DECISIONS_URL", "").strip(),
-            api_key=(env.get("SMRTI_DECISIONS_API_KEY") or env.get("TYPESAFE_API_KEY") or "").strip(),
             model=env.get("SMRTI_DECISIONS_MODEL", "").strip(),
+            device=env.get("SMRTI_DECISIONS_DEVICE", "").strip(),
             timeout=_float(env, "SMRTI_DECISIONS_TIMEOUT", DEFAULT_TIMEOUT),
             cache_size=_int(env, "SMRTI_DECISIONS_CACHE", DEFAULT_CACHE_SIZE),
             routing_skip=_float(env, "SMRTI_DECISIONS_ROUTING_SKIP", DEFAULT_ROUTING_SKIP),

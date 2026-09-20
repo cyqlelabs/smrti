@@ -1,4 +1,4 @@
-"""Optional semantic decisions at the points where rules are too coarse.
+"""Local semantic decisions at the points where rules are too coarse.
 
 Smrti's memory engine — SQLite, embeddings, the PLN arithmetic, the
 lifecycle rules — is deterministic and stays so. This package adds bounded
@@ -7,12 +7,13 @@ a generative LLM call would be the expensive way to find out: whether a
 message holds anything worth extracting (``routing``), which retrieved
 memories are evidence for a question (``rerank``), whether a new claim
 really replaces an older one (``supersession``), and whether an uncertain
-name match is the same entity (``entity``). Each is off unless configured,
-runs in shadow before it runs active, and falls back to the deterministic
+name match is the same entity (``entity``). Each is active by default, can be
+put in shadow or disabled independently, and falls back to the deterministic
 path on any failure.
 
-The provider is TypeSafe's Jev by default (``smrti.decisions.jev``); the
-interface in ``provider.py`` is what a replacement implements.
+The provider is the local multilingual Laya model
+(``smrti.decisions.laya``); the interface in ``provider.py`` keeps callers
+independent of the model runtime.
 
 What a decision may never do: restore a forgotten atom, confer permanence,
 change tenant or space scope, or mint a critical warning. A critical
@@ -76,35 +77,22 @@ __all__ = [
 
 logger = logging.getLogger("smrti.decisions")
 
+
 _engine: DecisionEngine | None = None
 _engine_lock = threading.Lock()
 
 
 def build_engine(policy: DecisionPolicy) -> DecisionEngine:
-    """An engine for *policy*, with the provider it names when one is
-    configured and none otherwise — in which case every task is off
-    whatever the policy says, with one warning that says why."""
+    """An engine for *policy*, with a local Laya provider when any task is
+    configured and no provider otherwise."""
     provider = None
     if policy.any_enabled:
-        if policy.provider == "jev":
-            if policy.api_key:
-                from .jev import DEFAULT_BASE_URL, DEFAULT_MODEL, JevProvider
+        from .laya import DEFAULT_MODEL, LayaProvider
 
-                provider = JevProvider(
-                    policy.api_key,
-                    base_url=policy.url or DEFAULT_BASE_URL,
-                    model=policy.model or DEFAULT_MODEL,
-                    timeout=policy.timeout,
-                )
-            else:
-                logger.warning(
-                    "SMRTI_DECISIONS is enabled but no API key is set "
-                    "(SMRTI_DECISIONS_API_KEY or TYPESAFE_API_KEY) — every decision task is off"
-                )
-        else:
-            logger.warning(
-                "unknown decision provider %r — every decision task is off", policy.provider
-            )
+        provider = LayaProvider(
+            model=policy.model or DEFAULT_MODEL,
+            device=policy.device or None,
+        )
     return DecisionEngine(policy, provider)
 
 
@@ -118,7 +106,16 @@ def get_decisions() -> DecisionEngine:
 
 
 def reset_decisions(engine: DecisionEngine | None = None) -> None:
-    """Replace (or drop, to rebuild from the environment) the shared engine."""
+    """Replace the shared engine and release the provider it owned."""
     global _engine
     with _engine_lock:
+        previous = _engine
         _engine = engine
+    if previous is None or previous is engine:
+        return
+    close = getattr(previous.provider, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            logger.warning("could not close the previous decision provider", exc_info=True)

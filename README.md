@@ -140,6 +140,7 @@ Similarity multiplies the standing terms, so a memory that is not about the ques
 - `agent_source_trust` discounts an agent-authored memory's standing, never its similarity.
 - Episodes repeating one already chosen from the same minutes share `max(2, top_k // 6)` slots; beliefs keep up to two.
 - Results below the personality's `min_confidence_to_surface` are excluded unless you pass `min_confidence`; forgotten memories never return.
+- With the optional [decision module](#semantic-decisions-optional) on, the top candidates are judged as evidence for the question and the order blends that judgement with salience; each result then carries an `evidence` score. Only what is returned gets the access boost; `attend(atom_ids)` boosts what an external reranker kept out of a wider `recall(boost=False)`.
 
 Each result carries a `severity`: `critical_warning` (a valence you stated, on anything but a bare concept), `known_antipattern` (a belief whose probability fell below 0.3, where a superseded preference or constraint lands), or `context`.
 
@@ -154,6 +155,27 @@ Reports that recalled memories were used; a cheap test is that distinctive words
 ### `reflect()`
 
 One consolidation epoch: revise pending evidence, decay attention and confidence, propagate both to neighbors, heal orphaned episodes, promote high-STI atoms to long-term importance, resolve contradictions (a superseded claim loses), link similar high-LTI atoms (every tenth epoch), and prune what fell below the floors. The servers run one every `SMRTI_REFLECT_INTERVAL` seconds for each space used in that interval, so idle memory does not age. What you told the agent decays only to the surfacing floor and stays recallable unless you forget it; what it inferred keeps fading, faster for agent-authored atoms.
+
+### Semantic decisions (optional)
+
+The engine is deterministic and stays so. `smrti.decisions` adds bounded judgements at four points where a rule cannot see what a sentence means and a generative LLM call is the expensive way to find out, answered by [TypeSafe's Jev](https://docs.typesafe.ai) (typed questions — a probability, a choice among options you supply, a score against a rubric — never prose). Each task is **off by default**, runs in **shadow** (ask, record, apply nothing) before it runs **active**, and falls back to the deterministic path on any failure, timeout or invalid reply:
+
+| Task           | Where it runs                     | What it decides                                                                                   |
+| -------------- | --------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `routing`      | before the LLM claim extraction   | Skip the call for chatter that holds nothing durable, corrects nothing and adds nothing; force it for a durable fact or correction that names no entity ("never deploy on Fridays"). The episode is always kept. |
+| `rerank`       | between ranking and the cut       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience, filtered only if you set a cutoff |
+| `supersession` | before an older claim is marked replaced | `same_claim` / `explicit_update` / `compatible` / `contradiction` / `insufficient_context`; only the two updates permit the mutation, ambiguity keeps both claims (stamped `supersession_deferred`) |
+| `entity`       | on an uncertain fuzzy or embedding match | Which candidate the mention names, or `none` / `ambiguous`; under the confidence line a provisional duplicate is made rather than an unjustified identity link |
+
+Two rules hold regardless: a model judgement never restores a forgotten atom, confers permanence, changes tenant or space scope, or mints a critical warning (that needs a valence *you* stated); and an agent's claim never supersedes what the user stated, which is a rule, not a judgement. Decision confidence is stored in the audit log and in decision metadata, never in a memory's truth value.
+
+```bash
+export TYPESAFE_API_KEY=...            # or SMRTI_DECISIONS_API_KEY
+export SMRTI_DECISIONS=shadow          # every task: off | shadow | active
+export SMRTI_DECISIONS_RERANK=active   # per-task override
+```
+
+Every decision — asked, answered, applied or not, with model version, latency and token usage — is served by `GET /decisions` on the REST and proxy servers (and `DELETE /decisions`), counted into `/metrics` as `smrti_decisions_total{task,mode,outcome}`, and mirrored into the visualizer's LLM Calls tab. `make bench-decisions` runs the routing gate against a labeled bilingual set and reports calls avoided beside missed facts, corrections and constraints; `make bench BENCH_ARGS="--decisions active"` measures the reranker on LongMemEval-S under its own config fingerprint. Provider prices and latencies are the provider's figures, not measured smrti results.
 
 ## Server Modes
 
@@ -228,6 +250,13 @@ curl -X POST http://localhost:8420/space_query \
 # Grow a bridge space from what two spaces share
 curl -X POST http://localhost:8420/space_merge \
   -d '{"other_space": "personal", "min_jaccard": 0.1}'
+
+# Boost only what you kept from a wide, unboosted recall you reranked yourself
+curl -X POST http://localhost:8420/attend \
+  -d '{"atom_ids": ["4f2c…"]}'
+
+# The semantic decision log (see "Semantic decisions"), newest first
+curl http://localhost:8420/decisions
 ```
 
 Every endpoint takes an optional `space` to route the call; `/space_query` and
@@ -311,6 +340,7 @@ All server modes read the same environment variables. Everything works with zero
 | `SMRTI_QUERY_CONTEXT_MSGS`    | `5`                      | Recent messages included in the recall query             |
 | `SMRTI_QUERY_MAX_CHARS`       | `500`                    | Max characters of the recall query                       |
 | `SMRTI_INJECT_MAX_CHARS`      | `500`                    | Max characters per injected memory                       |
+| `SMRTI_INJECT_BUDGET_CHARS`   | `0`                      | Total characters of injected memory per request, constraints first, then context in rank order (0 = no budget) |
 
 **Extraction (all modes):**
 
@@ -326,6 +356,24 @@ To get the knowledge graph from `serve rest` or `serve mcp`, point `SMRTI_EXTRAC
 | `SMRTI_EXTRACT_TIMEOUT`  | `60`                       | Extraction request timeout in seconds                            |
 | `SMRTI_NER_MODEL`        | `lmo3/gliner2-multi-v1-onnx` | GLiNER2 ONNX model for local zero-shot NER                     |
 | `SMRTI_TEMPORAL`         | `1`                        | Resolve relative dates against the write time (0 = store text verbatim); one NER pass per write |
+
+**Semantic decisions (all modes, see [above](#semantic-decisions-optional)):**
+
+| Variable                                      | Default                   | Purpose                                                                       |
+| --------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------- |
+| `SMRTI_DECISIONS`                             | `off`                     | Mode for every decision task: `off`, `shadow` (ask and record, apply nothing), `active` |
+| `SMRTI_DECISIONS_ROUTING` / `_RERANK` / `_SUPERSESSION` / `_ENTITY` | `SMRTI_DECISIONS` | Per-task mode override                                             |
+| `SMRTI_DECISIONS_API_KEY`                     | `TYPESAFE_API_KEY`        | Provider key; with none set every task is off                                 |
+| `SMRTI_DECISIONS_URL`                         | `https://api.typesafe.ai` | Provider base URL (`POST /v1/systemone`)                                      |
+| `SMRTI_DECISIONS_MODEL`                       | `jev-latest`              | Model version; recorded on every decision                                     |
+| `SMRTI_DECISIONS_TIMEOUT`                     | `5`                       | Deadline per decision request in seconds; past it the local path answers      |
+| `SMRTI_DECISIONS_RERANK_SHORTLIST`            | `20`                      | Candidates judged per recall (one request)                                    |
+| `SMRTI_DECISIONS_RERANK_WEIGHT`               | `0.5`                     | Share of the final order the evidence judgement decides against salience      |
+| `SMRTI_DECISIONS_RERANK_MIN_EVIDENCE`         | `0`                       | Drop judged candidates under this evidence score (0 = rerank only, never filter); a stated warning is never dropped |
+| `SMRTI_DECISIONS_ROUTING_SKIP` / `_FORCE`     | `0.2` / `0.75`            | Lines under which every routing judgement means "skip the LLM", and over which a durable fact or correction forces it |
+| `SMRTI_DECISIONS_SUPERSESSION_MIN_CONFIDENCE` | `0.6`                     | Choice confidence a supersession verdict needs before the older claim is marked replaced |
+| `SMRTI_DECISIONS_ENTITY_MIN_CONFIDENCE`       | `0.6`                     | Choice confidence an entity verdict needs before an uncertain match is accepted |
+| `SMRTI_DECISIONS_ENTITY_CANDIDATES`           | `5`                       | Matches each resolution tier offers for verification                          |
 
 ### Ignoring Automated Messages
 
@@ -473,16 +521,23 @@ graph TD
         TMP["temporal"]
     end
 
+    subgraph Decisions
+        DEC["engine · policies · audit<br/><small>optional · off by default</small>"]
+        JEV["jev<br/><small>typed judgements</small>"]
+    end
+
     subgraph Storage
         SQL["SQLite + sqlite-vec<br/><small>multilingual-MiniLM-L12-v2 · 384d · ONNX CPU</small>"]
     end
 
     MCP & REST & PROXY --> S
     S --> Core & Retrieval & Evolution & Extraction & Spaces
+    Retrieval & Extraction -.->|"shortlist · route · verify"| DEC
+    DEC --> JEV
     Core & Retrieval & Evolution & Extraction & Spaces --> SQL
 ```
 
-**Retrieval:** embed the query → vector + BM25 search, fused → 1-hop graph expansion → salience ranking → diversity cap → top-k. **Consolidation:** the epoch steps under [`reflect()`](#reflect).
+**Retrieval:** embed the query → vector + BM25 search, fused → 1-hop graph expansion → salience ranking → (optional evidence judgement) → diversity cap → top-k → access boost on what was returned. **Consolidation:** the epoch steps under [`reflect()`](#reflect).
 
 ## Data Model
 

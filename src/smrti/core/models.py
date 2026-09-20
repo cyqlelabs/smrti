@@ -182,6 +182,11 @@ class RecallResult(BaseModel):
     atom: Atom
     salience: float
     similarity: float
+    # How useful the memory was judged as evidence for the query, in [0, 1],
+    # when the ``rerank`` decision task ran over it; None when it did not.
+    # A judgement about this recall, not a property of the atom, which is
+    # why it lives here and not on the atom.
+    evidence: Optional[float] = None
 
 
 class EpochResult(BaseModel):

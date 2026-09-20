@@ -253,6 +253,22 @@ async def reinforce(req: ReinforceRequest):
     )
 
 
+class AttendRequest(BaseModel):
+    atom_ids: list[AtomId] = Field(min_length=1, max_length=64)
+    space: Optional[SpaceName] = None
+
+
+@app.post("/attend")
+async def attend(req: AttendRequest):
+    """Give these memories the access boost recall would have given them.
+
+    For a caller that recalled with a wide ``top_k`` and no boost, reranked
+    the candidates itself and injected a few: the few it read are boosted,
+    the rest are not. Attention, not evidence — ``/reinforce`` is the other.
+    """
+    return await _run_sync(handle_tool, get_mem(req.space), "smrti_attend", req.model_dump())
+
+
 @app.post("/believe")
 async def believe(req: BelieveRequest):
     return await _run_sync(handle_tool, get_mem(req.space), "smrti_believe", req.model_dump())

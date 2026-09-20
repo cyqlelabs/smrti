@@ -34,9 +34,11 @@ from smrti.core.provenance import (
     SOURCE_USER,
     VALENCE_STATED,
 )
+from smrti.decisions import DecisionEngine, get_decisions
+from smrti.decisions.retrieval import make_judge
 from smrti.extraction.sentiment import estimate_valence
 from smrti.extraction.resolve import EntityResolver
-from smrti.retrieval.fan_out import retrieve
+from smrti.retrieval.fan_out import boost_attention, retrieve
 from smrti.evolution.epoch import run_epoch
 from smrti.evolution.reinforcement import DEFAULT_WEIGHT as _REINFORCE_WEIGHT, reinforce_atoms
 from smrti.personality.params import PersonalityProfile, load_preset
@@ -90,6 +92,7 @@ class Smrti:
         extractor=None,
         ignore_patterns: list[str] | None = None,
         temporal: bool = False,
+        decisions: DecisionEngine | None = None,
     ) -> None:
         db_path = os.path.expanduser(db_path)
         parent = os.path.dirname(db_path)
@@ -110,6 +113,11 @@ class Smrti:
         # facade leaves it off and every server mode turns it on (see
         # SMRTI_TEMPORAL). A direct caller who wants it asks for it.
         self._temporal = temporal
+        # The semantic decision engine (see ``smrti.decisions``): the shared
+        # one built from the environment unless the caller hands in its own,
+        # which tests and the bench do. Every task is off by default, so an
+        # instance that never configured it pays nothing for it.
+        self.decisions = decisions if decisions is not None else get_decisions()
         # Memory operations since the last consolidation. The reflect loop
         # reads it to skip a space nobody used: an epoch is a unit of the
         # agent's activity, not of the server's uptime.
@@ -298,16 +306,21 @@ class Smrti:
         min_confidence: float | None = None,
         read_spaces: list[str] | None = None,
         boost: bool = True,
+        rerank: bool = True,
     ) -> list:
         """Recall memories relevant to *query*, most salient first.
 
         ``min_confidence`` left unset means the personality's
         ``min_confidence_to_surface``: the floor the preset promises is the
         floor a caller gets. ``boost=False`` reads without raising the
-        attention of what came back.
+        attention of what came back. ``rerank=False`` skips the evidence
+        judgement even when the ``rerank`` decision task is on — for a
+        caller that retrieves in order to forget, or to feed a reranker of
+        its own (see :meth:`attend` for the boost it then owes).
         """
         self._note_activity()
         spaces = read_spaces if read_spaces is not None else self.read_spaces
+        judge = make_judge(self.decisions, self.tenant_id, self.write_space) if rerank else None
         return retrieve(
             query,
             self.tenant_id,
@@ -318,7 +331,27 @@ class Smrti:
             top_k=top_k,
             min_confidence=min_confidence,
             boost=boost,
+            judge=judge,
         )
+
+    def attend(self, atom_ids: list[str]) -> int:
+        """Give these memories the access boost, as if recall had returned them.
+
+        The other half of ``recall(boost=False)``: a caller that takes a
+        wide candidate set, reranks it itself and keeps a few boosts the
+        few it read here, so the attention weights record what was used
+        and not what was considered. Only atoms in the write space move.
+        This is attention, not evidence — :meth:`reinforce` is the report
+        that a memory turned out to be true, and the two are not
+        interchangeable. Returns how many ids were boosted.
+        """
+        self._note_activity()
+        row = self.db.fetchone(
+            "SELECT sti_boost_on_access AS b FROM personality WHERE tenant_id = ? AND space = ?",
+            (self.tenant_id, self.write_space),
+        )
+        sti_boost = 0.5 if row is None or row["b"] is None else float(row["b"])
+        return boost_attention(self.db, list(atom_ids), self.tenant_id, self.write_space, sti_boost)
 
     def believe(
         self,
@@ -425,7 +458,7 @@ class Smrti:
         this method called the ordinary recall.
         """
         self._note_activity()
-        results = self.recall(query=query, top_k=top_k, boost=False)
+        results = self.recall(query=query, top_k=top_k, boost=False, rerank=False)
         # Below the floor by a margin, never merely at it: the decay floor
         # holds an atom that is still at or above the line.
         sunk_to = self._surfacing_floor() * 0.5

@@ -10,6 +10,7 @@ from rapidfuzz import fuzz, process
 from smrti.core.atomspace import AtomSpace
 from smrti.core.models import (
     INITIAL_CONFIDENCE,
+    STRUCTURAL_RELATIONS,
     Atom,
     AtomType,
     AttentionValue,
@@ -22,7 +23,11 @@ from smrti.core.provenance import (
     ATOM_SOURCE,
     SOURCE_AGENT,
     SOURCE_USER,
+    claim_current_sql,
+    forgotten_sql,
 )
+from smrti.decisions import DecisionEngine
+from smrti.decisions.extraction import verify_entity
 
 
 logger = logging.getLogger("smrti.resolve")
@@ -39,6 +44,15 @@ class EntityResolver:
       2. Fuzzy match (RapidFuzz) — in-process, < 5ms
       3. Embedding cosine sim   — ONNX inference, < 20ms
       4. Create new atom        — write path
+
+    Tiers 0 and 1 are unambiguous and never questioned. A tier 2 match
+    short of the alias-persist score, and every tier 3 match, is uncertain:
+    when the ``entity`` decision task is on, the candidates the tier found
+    are put to the provider with the sentence the mention came from and
+    what the graph records about each, plus "none" and "ambiguous", and
+    only a confident choice of one of them is an identity link — anything
+    else makes a provisional duplicate, which a later mention can still
+    merge, where a wrong link cannot be undone.
     """
 
     def __init__(
@@ -53,6 +67,8 @@ class EntityResolver:
         source: str = SOURCE_USER,
         agent_trust: float = 0.5,
         episode_id: str = "",
+        decisions: DecisionEngine | None = None,
+        context: str = "",
     ) -> None:
         self.db = db
         self.embed_engine = embed_engine
@@ -60,6 +76,8 @@ class EntityResolver:
         self.cosine_threshold = cosine_threshold
         self.source = source
         self.episode_id = episode_id
+        self.decisions = decisions if isinstance(decisions, DecisionEngine) else None
+        self.context = context or ""
         # Atoms extracted from an agent turn start proportionally weaker and
         # corroborate proportionally less, so the graph reflects what the user
         # said unless the model's contribution is picked up later.
@@ -126,13 +144,28 @@ class EntityResolver:
         )
         if candidates:
             names_map = {r["id"]: r["label"] for r in candidates}
-            match = process.extractOne(name, names_map, scorer=fuzz.WRatio)
-            if match and match[1] >= self.fuzzy_threshold:
+            matches = [
+                m for m in process.extract(
+                    name, names_map, scorer=fuzz.WRatio, limit=self._verify_candidates(),
+                )
+                if m[1] >= self.fuzzy_threshold
+            ]
+            if matches:
+                match = matches[0]
                 matched_id = match[2]
-                # Only persist the alias on near-certain matches — a threshold-level
-                # fuzzy hit would otherwise poison tier-1 resolution permanently.
                 if match[1] >= self._ALIAS_PERSIST_SCORE:
+                    # Only persist the alias on near-certain matches — a
+                    # threshold-level fuzzy hit would otherwise poison tier-1
+                    # resolution permanently.
                     self.aliases.add(matched_id, name, tenant_id, write_space)
+                else:
+                    verdict = self._verify(
+                        name, entity_type, [m[2] for m in matches], tenant_id, write_space, read_spaces,
+                    )
+                    if verdict is not None and verdict.applied:
+                        if not verdict.matched:
+                            return self._create_atom(name, entity_type, tenant_id, write_space)
+                        matched_id = verdict.atom_id
                 self._boost_sti(matched_id, tenant_id, write_space)
                 return matched_id
 
@@ -140,25 +173,37 @@ class EntityResolver:
         # support equality only, so probe each read space and keep the best.
         query_vec = self.embed_engine.embed(name)
         vec_bytes = struct.pack(f"{len(query_vec)}f", *query_vec)
-        vec_match = None
+        vec_rows: list = []
         for space in read_spaces:
-            row = self.db.fetchone(
-                """SELECT atom_id, distance FROM vec_atoms
-                   WHERE embedding MATCH ? AND tenant_id = ? AND space = ?
-                   ORDER BY distance LIMIT 1""",
-                (vec_bytes, tenant_id, space),
+            vec_rows.extend(
+                self.db.fetchall(
+                    """SELECT atom_id, distance FROM vec_atoms
+                       WHERE embedding MATCH ? AND tenant_id = ? AND space = ?
+                       ORDER BY distance LIMIT ?""",
+                    (vec_bytes, tenant_id, space, self._verify_candidates()),
+                )
             )
-            if row and (vec_match is None or row["distance"] < vec_match["distance"]):
-                vec_match = row
-        if vec_match and vec_match["distance"] < self.cosine_threshold:
+        vec_rows.sort(key=lambda r: r["distance"])
+        vec_ids = []
+        for row in vec_rows:
+            if row["distance"] >= self.cosine_threshold:
+                break
             atom_row = self.db.fetchone(
                 f"SELECT entity_type FROM atoms WHERE id = ? AND NOT {ATOM_FORGOTTEN}",
-                (vec_match["atom_id"],),
+                (row["atom_id"],),
             )
             if atom_row and atom_row["entity_type"] == entity_type:
-                # Embedding is the least reliable tier — never persist aliases here.
-                self._boost_sti(vec_match["atom_id"], tenant_id, write_space)
-                return vec_match["atom_id"]
+                vec_ids.append(row["atom_id"])
+        if vec_ids:
+            matched_id = vec_ids[0]
+            verdict = self._verify(name, entity_type, vec_ids, tenant_id, write_space, read_spaces)
+            if verdict is not None and verdict.applied:
+                if not verdict.matched:
+                    return self._create_atom(name, entity_type, tenant_id, write_space, vec=query_vec)
+                matched_id = verdict.atom_id
+            # Embedding is the least reliable tier — never persist aliases here.
+            self._boost_sti(matched_id, tenant_id, write_space)
+            return matched_id
 
         # Tier 4: create new atom in write_space (reusing the probe vector)
         return self._create_atom(name, entity_type, tenant_id, write_space, vec=query_vec)
@@ -166,6 +211,85 @@ class EntityResolver:
     # A re-mention asserts the entity is real and still relevant, but it is a
     # weaker signal than an explicit belief assertion — hence short of 1.0.
     _MENTION_PROBABILITY = 0.9
+
+    # How many facts each candidate carries into a verification.
+    _VERIFY_FACTS = 4
+
+    def _verify_candidates(self) -> int:
+        """How many matches a tier keeps for verification — one when the
+        task is off, since the extra rows would then go unread."""
+        if self.decisions is None or not self.decisions.enabled("entity"):
+            return 1
+        return max(1, self.decisions.policy.entity_candidates)
+
+    def _candidate_facts(self, atom_ids: list[str], tenant_id: str, spaces: list[str]) -> list[dict]:
+        """Each candidate with what the graph currently records about it."""
+        if not atom_ids:
+            return []
+        ph = ",".join("?" * len(atom_ids))
+        spaces_ph = ",".join("?" * len(spaces))
+        rows = self.db.fetchall(
+            f"""SELECT id, label, entity_type FROM atoms
+                WHERE id IN ({ph}) AND tenant_id = ? AND space IN ({spaces_ph}) AND NOT {ATOM_FORGOTTEN}""",
+            (*atom_ids, tenant_id, *spaces),
+        )
+        by_id = {r["id"]: {"id": r["id"], "label": r["label"], "entity_type": r["entity_type"], "facts": []}
+                 for r in rows}
+        rel_ph = ",".join("?" * len(STRUCTURAL_RELATIONS))
+        claims = self.db.fetchall(
+            f"""SELECT r.source_id AS subject_id, r.relation AS predicate, t.label AS object
+                FROM atoms r JOIN atoms t ON t.id = r.target_id
+                WHERE r.type = 'relation' AND r.tenant_id = ? AND r.space IN ({spaces_ph})
+                  AND r.source_id IN ({ph}) AND r.relation NOT IN ({rel_ph})
+                  AND {claim_current_sql('r')} AND NOT {forgotten_sql('t')}
+                ORDER BY r.confidence DESC, r.created_at DESC""",
+            (tenant_id, *spaces, *atom_ids, *STRUCTURAL_RELATIONS),
+        )
+        for claim in claims:
+            facts = by_id.get(claim["subject_id"], {}).get("facts")
+            if facts is not None and len(facts) < self._VERIFY_FACTS:
+                facts.append(f"{claim['predicate']} {claim['object']}")
+        return [by_id[atom_id] for atom_id in atom_ids if atom_id in by_id]
+
+    def _verify(
+        self,
+        name: str,
+        entity_type: str,
+        candidate_ids: list[str],
+        tenant_id: str,
+        write_space: str,
+        read_spaces: list[str],
+    ):
+        """Put an uncertain match to the ``entity`` decision task.
+
+        None when the task is off or could not answer, in which case the
+        tier's own best match stands as it always did. A verdict naming an
+        atom is checked against the graph again after the call — the
+        provider was given candidates, and only one of them, still present
+        and not forgotten, can come back.
+        """
+        if self.decisions is None or not self.decisions.enabled("entity"):
+            return None
+        candidates = self._candidate_facts(candidate_ids, tenant_id, read_spaces)
+        if not candidates:
+            return None
+        verdict = verify_entity(
+            self.decisions,
+            name=name,
+            entity_type=entity_type,
+            context=self.context,
+            candidates=candidates,
+            tenant_id=tenant_id,
+            space=write_space,
+        )
+        if verdict is None:
+            return None
+        if verdict.atom_id is not None and (
+            verdict.atom_id not in candidate_ids or self._forgotten(verdict.atom_id)
+        ):
+            logger.warning("entity verification named an atom that was not offered; ignoring it")
+            return None
+        return verdict
 
     def _boost_sti(self, atom_id: str, tenant_id: str, space: str) -> None:
         """Reinforce an atom on re-mention and log the mention as evidence.

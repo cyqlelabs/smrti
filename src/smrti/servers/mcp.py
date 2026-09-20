@@ -108,6 +108,10 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                     "severity": classify_memory(r),
                     "salience": r.salience,
                     "similarity": r.similarity,
+                    # How useful the memory was judged as evidence for the
+                    # query when the rerank decision task ran; null when
+                    # it did not.
+                    "evidence": r.evidence,
                     "space": r.atom.space,
                     # Dates the extraction model pinned down for relative
                     # expressions in this memory. They live in metadata rather
@@ -118,6 +122,12 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 for r in results
             ]
         }
+
+    elif name == "smrti_attend":
+        # The access boost on its own, for a caller that recalled a wide
+        # set without boosting, reranked it itself, and kept a few.
+        atom_ids = args.get("atom_ids") or []
+        return {"status": "ok", "space": mem.write_space, "boosted": mem.attend(atom_ids)}
 
     elif name == "smrti_reinforce":
         atom_ids = args.get("atom_ids") or []

@@ -25,6 +25,10 @@ CORS_ORIGINS: list[str] = [o.strip() for o in _cors_raw.split(",") if o.strip()]
 
 # Max characters of a single memory text injected into the system prompt
 INJECT_MAX_CHARS: int = int(os.environ.get("SMRTI_INJECT_MAX_CHARS", "500"))
+# Total character budget for the injected memory block, applied after
+# selection: behavioral constraints are kept first, then background context
+# in rank order until the budget is spent. 0 (the default) is no budget.
+INJECT_BUDGET_CHARS: int = int(os.environ.get("SMRTI_INJECT_BUDGET_CHARS", "0"))
 
 _read_raw: str = os.environ.get("SMRTI_READ_SPACES", "")
 READ_SPACES: list[str] | None = [s.strip() for s in _read_raw.split(",") if s.strip()] or None
@@ -57,3 +61,11 @@ TEMPORAL: bool = os.environ.get("SMRTI_TEMPORAL", "1") == "1"
 #              token-budget exhaustion on thinking models
 # "enabled"  — pass chat_template_kwargs={"enable_thinking":true} to force thinking on
 EXTRACT_THINKING: str = os.environ.get("SMRTI_EXTRACT_THINKING", "disabled")
+
+# Semantic decisions (``smrti.decisions``) — read there, listed here so the
+# reference is in one place: SMRTI_DECISIONS (off | shadow | active, the
+# default for every task), SMRTI_DECISIONS_ROUTING / _RERANK / _SUPERSESSION
+# / _ENTITY (per-task override), SMRTI_DECISIONS_API_KEY (or
+# TYPESAFE_API_KEY), SMRTI_DECISIONS_URL, SMRTI_DECISIONS_MODEL,
+# SMRTI_DECISIONS_TIMEOUT, and the thresholds in ``decisions/policies.py``.
+DECISIONS: str = os.environ.get("SMRTI_DECISIONS", "off")

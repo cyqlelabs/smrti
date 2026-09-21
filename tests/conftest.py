@@ -16,6 +16,46 @@ def reset_event_loop():
         pass
 
 
+@pytest.fixture(autouse=True, scope="session")
+def never_load_a_real_checkpoint():
+    """No test may start a real Laya checkpoint load.
+
+    ``LayaProvider`` loads on a background daemon thread by design, so a
+    test that builds one without an agent starts a real import of torch and
+    a real download. The thread outlives the test, and a daemon thread still
+    inside native code when the interpreter exits takes the process with it:
+    ``terminate called without an active exception``, SIGABRT, exit 134,
+    after every test in the file has passed. It only shows up where laya is
+    installed, which is CI and not a laptop, and only when the process exits
+    soon after — which is why splitting the suite into three surfaced it and
+    one long run had hidden it.
+
+    The stub answers the import instantly and refuses, so the thread ends
+    where it starts. A test that needs a particular load behaviour installs
+    its own stub over this one.
+    """
+    import sys
+    import types
+
+    stub = types.ModuleType("laya")
+
+    def _refuse(model, device=None):
+        raise RuntimeError(
+            f"the test suite never loads a real checkpoint (asked for {model!r})"
+        )
+
+    stub.load = _refuse
+    previous = sys.modules.get("laya")
+    sys.modules["laya"] = stub
+    try:
+        yield
+    finally:
+        if previous is None:
+            sys.modules.pop("laya", None)
+        else:
+            sys.modules["laya"] = previous
+
+
 @pytest.fixture(autouse=True)
 def disable_live_decisions(monkeypatch):
     """Keep unit tests offline; individual policy tests exercise the active default."""

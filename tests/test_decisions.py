@@ -918,3 +918,311 @@ def test_decide_async_is_off_and_cached_on_the_same_terms_as_decide():
     second = run(engine.decide_async(TASK_RERANK, {"q": 1}, {"n": Noul("?")}, tenant_id="t", space="s"))
     assert first is not None and not first.cached
     assert second is not None and second.cached
+
+
+# ── the validation boundary, refusing every shape it is meant to refuse ──────
+
+
+def test_a_malformed_environment_names_the_variable_it_could_not_read():
+    with pytest.raises(ValueError, match="SMRTI_DECISIONS_TIMEOUT must be a number"):
+        DecisionPolicy.from_env({"SMRTI_DECISIONS_TIMEOUT": "soon"})
+    with pytest.raises(ValueError, match="SMRTI_DECISIONS_COOLDOWN must be a number"):
+        DecisionPolicy.from_env({"SMRTI_DECISIONS_COOLDOWN": "a while"})
+    with pytest.raises(ValueError, match="SMRTI_DECISIONS_CACHE must be an integer"):
+        DecisionPolicy.from_env({"SMRTI_DECISIONS_CACHE": "lots"})
+    with pytest.raises(ValueError, match="SMRTI_DECISIONS_RERANK_SHORTLIST must be an integer"):
+        DecisionPolicy.from_env({"SMRTI_DECISIONS_RERANK_SHORTLIST": "twenty"})
+
+
+def test_with_modes_refuses_a_task_that_does_not_exist():
+    with pytest.raises(ValueError, match="unknown decision task 'reranking'"):
+        DecisionPolicy().with_modes(reranking=MODE_OFF)
+
+
+def test_every_answer_reports_its_own_value():
+    questions = {"n": Noul("?"), "c": Choice("pick", {"a": "first", "b": "second"}), "s": Score("rate", ["low", "high"])}
+    decisions = parse_response(
+        {
+            "answers": {
+                "n": {"type": "noul", "noul": 0.25},
+                "c": {"type": "choice", "choice": "a", "probabilities": {"a": 1.0}, "confidence": 0.9},
+                "s": {"type": "score", "score": 1.0, "probabilities": {"1": 1.0}, "confidence": 0.8},
+            }
+        },
+        questions,
+    )
+    assert decisions["n"].value == 0.25
+    assert decisions["c"].value == "a"
+    assert decisions["s"].value == 1.0
+
+
+@pytest.mark.parametrize(
+    "question, raw, message",
+    [
+        (Choice("pick", {"a": "first", "b": "second"}), {"type": "noul", "choice": "a"}, "expected choice"),
+        (Score("rate", ["low", "high"]), {"type": "noul", "score": 0}, "expected score"),
+        (Score("rate", ["low", "high"]), {"type": "score", "score": 7}, "outside the rubric"),
+        (Score("rate", ["low", "high"]), {"type": "score", "score": -1}, "outside the rubric"),
+        (Noul("?"), {"type": "noul"}, "is not readable"),
+        (Choice("pick", {"a": "first", "b": "second"}), {"type": "choice"}, "is not readable"),
+    ],
+)
+def test_an_answer_of_the_wrong_shape_is_refused(question, raw, message):
+    with pytest.raises(DecisionUnavailable, match=message):
+        parse_response({"answers": {"q": raw}}, {"q": question})
+
+
+@pytest.mark.parametrize(
+    "data, message",
+    [
+        ("not an object", "reply is not an object"),
+        ({"usage": {}}, "carries no answers object"),
+        ({"answers": "nope"}, "carries no answers object"),
+    ],
+)
+def test_a_reply_that_is_not_a_reply_is_refused(data, message):
+    with pytest.raises(DecisionUnavailable, match=message):
+        parse_response(data, {"q": Noul("?")})
+
+
+def test_unreadable_usage_counts_as_none_rather_than_failing_the_decision():
+    questions = {"q": Noul("?")}
+    answers = {"answers": {"q": {"type": "noul", "noul": 0.5}}}
+
+    # usage of the wrong type entirely, and usage whose numbers are not numbers
+    for usage in ("plenty", {"input_tokens": "many", "output_tokens": None}):
+        decisions = parse_response({**answers, "usage": usage}, questions)
+        assert decisions.input_tokens == 0 and decisions.output_tokens == 0
+
+
+# ── the engine's cache, and its refusal to fail over its own logging ─────────
+
+
+def test_the_cache_can_be_switched_off_entirely():
+    provider = StaticProvider(lambda k, q, s: {"type": "noul", "noul": 0.5})
+    engine = DecisionEngine(DecisionPolicy(cache_size=0), provider)
+    first = engine.decide(TASK_RERANK, {"q": 1}, {"n": Noul("?")}, tenant_id="t", space="s")
+    second = engine.decide(TASK_RERANK, {"q": 1}, {"n": Noul("?")}, tenant_id="t", space="s")
+    assert first is not None and second is not None
+    assert not first.cached and not second.cached
+
+
+def test_the_cache_evicts_the_least_recently_used_answer():
+    provider = StaticProvider(lambda k, q, s: {"type": "noul", "noul": 0.5})
+    engine = DecisionEngine(DecisionPolicy(cache_size=2), provider)
+    for i in range(3):
+        engine.decide(TASK_RERANK, {"q": i}, {"n": Noul("?")}, tenant_id="t", space="s")
+    assert len(engine._cache) == 2
+    # The oldest is gone, so asking it again is a fresh call.
+    again = engine.decide(TASK_RERANK, {"q": 0}, {"n": Noul("?")}, tenant_id="t", space="s")
+    assert again is not None and not again.cached
+
+
+def test_active_reads_the_mode_per_task():
+    engine = DecisionEngine(_policy(rerank=MODE_ACTIVE, routing=MODE_SHADOW),
+                            StaticProvider(lambda k, q, s: {"type": "noul", "noul": 0.5}))
+    assert engine.active(TASK_RERANK)
+    assert not engine.active("routing")
+
+
+def test_a_call_log_that_raises_never_fails_the_decision(monkeypatch):
+    import smrti.call_log as call_log
+
+    def explode(*args, **kwargs):
+        raise RuntimeError("the log is full")
+
+    monkeypatch.setattr(call_log, "append", explode)
+    provider = StaticProvider(lambda k, q, s: {"type": "noul", "noul": 0.5})
+    engine = DecisionEngine(DecisionPolicy(), provider)
+    outcome = engine.decide(TASK_RERANK, {"q": 1}, {"n": Noul("?")}, tenant_id="t", space="s")
+    assert outcome is not None
+
+
+# ── what a candidate tells the provider about itself ─────────────────────────
+
+
+def _candidate(**kw) -> RecallResult:
+    from smrti.core.models import AttentionValue, TruthValue, Valence
+
+    atom = Atom(
+        type=kw.pop("type", AtomType.EPISODE),
+        label=kw.pop("label", "a"),
+        content=kw.pop("content", "some memory"),
+        tenant_id="default",
+        space="main",
+        truth=TruthValue(probability=kw.pop("probability", 0.8), confidence=0.5),
+        attention=AttentionValue(sti=0.1, lti=0.1),
+        valence=Valence(valence=0.0, intensity=0.0),
+        **kw,
+    )
+    return RecallResult(atom=atom, salience=1.0, similarity=0.5)
+
+
+def test_a_candidate_carries_its_type_its_standing_and_its_dates():
+    from smrti.core.models import EntityType
+    from smrti.decisions.retrieval import _candidate_state
+
+    typed = _candidate_state("c0", _candidate(type=AtomType.CONCEPT, entity_type=EntityType.PERSON))
+    assert typed["entity_type"] == EntityType.PERSON.value
+
+    current = _candidate_state("c1", _candidate(type=AtomType.BELIEF, probability=0.8))
+    superseded = _candidate_state("c2", _candidate(type=AtomType.BELIEF, probability=0.1))
+    assert current["status"] == "current" and superseded["status"] == "superseded"
+
+    dated = _candidate(
+        metadata={"temporal": [
+            {"text": "mañana", "resolved": "2026-08-27"},
+            {"text": "no resolution"},        # incomplete entries are left out
+            "not a mapping",
+        ]}
+    )
+    assert _candidate_state("c3", dated)["dates"] == ["mañana = 2026-08-27"]
+
+    assert "dates" not in _candidate_state("c4", _candidate())
+
+
+def test_the_judge_keeps_the_local_ranking_when_the_provider_says_nothing():
+    from smrti.decisions.retrieval import judge_evidence, make_judge
+
+    results = [_candidate(label=f"a{i}") for i in range(3)]
+
+    # The provider is there but answers nothing usable, so decide() is None.
+    class _Down:
+        name = "down"
+
+        def ask(self, state, questions, *, timeout):
+            raise DecisionUnavailable("down")
+
+    engine = DecisionEngine(DecisionPolicy(), _Down())
+    assert judge_evidence(engine, "q", results, tenant_id="t", space="s") == results
+
+
+def test_a_judge_that_raises_does_not_lose_the_ranking_it_was_handed():
+    from smrti.decisions.retrieval import make_judge
+    import smrti.decisions.retrieval as retrieval_module
+
+    results = [_candidate(label=f"a{i}") for i in range(3)]
+    engine = DecisionEngine(DecisionPolicy(), StaticProvider(lambda k, q, s: {"type": "noul", "noul": 0.5}))
+    judge = make_judge(engine, "t", "s")
+    assert judge is not None
+
+    # Anything at all going wrong inside the judgement is caught: the local
+    # ranking is the thing that must survive.
+    original = retrieval_module.judge_evidence
+    try:
+        retrieval_module.judge_evidence = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+        assert judge("q", results) == results
+    finally:
+        retrieval_module.judge_evidence = original
+
+
+# ── the three write-path tasks, silent when they are off ─────────────────────
+
+
+def test_the_write_path_tasks_say_nothing_when_they_are_off():
+    engine = DecisionEngine(_policy(), StaticProvider(lambda k, q, s: {"type": "noul", "noul": 0.5}))
+    assert engine.mode(TASK_RERANK) == MODE_OFF  # _policy() turns every task off
+
+    from smrti.decisions.extraction import route_extraction
+
+    assert run(route_extraction(
+        engine, "Alice moved to Paris", source="user", entity_context="", tenant_id="t", space="s"
+    )) is None
+    assert verify_supersession(
+        engine, episode_text="t", subject="Alice", predicate="lives_in", old_object="Berlin",
+        new_object="Paris", old_stated_at="", old_author="user", new_author="user",
+        tenant_id="t", space="s",
+    ) is None
+    assert verify_entity(
+        engine, name="Alice", entity_type="person", context="", candidates=[{"id": "1", "label": "Alice"}],
+        tenant_id="t", space="s",
+    ) is None
+
+
+def test_a_verification_with_no_usable_choice_keeps_both_claims():
+    # The provider answers, but not the question that was asked, so the
+    # choice is absent and the code preserves rather than merges.
+    class _Blank:
+        name = "blank"
+
+        def ask(self, state, questions, *, timeout):
+            return parse_response(
+                {"answers": {k: _reply({k: q.payload()})["answers"][k] for k, q in questions.items()}},
+                questions,
+            )
+
+    engine = DecisionEngine(DecisionPolicy(), _Blank())
+    verdict = verify_supersession(
+        engine, episode_text="t", subject="Alice", predicate="lives_in", old_object="Berlin",
+        new_object="Paris", old_stated_at="", old_author="user", new_author="user",
+        tenant_id="t", space="s",
+    )
+    assert verdict is not None
+
+
+def test_an_empty_shortlist_is_returned_untouched():
+    from smrti.decisions.retrieval import judge_evidence
+
+    engine = DecisionEngine(DecisionPolicy(), StaticProvider(lambda k, q, s: {"type": "noul", "noul": 0.5}))
+    assert judge_evidence(engine, "q", [], tenant_id="t", space="s") == []
+
+
+class _Refuses:
+    name = "down"
+
+    def ask(self, state, questions, *, timeout):
+        raise DecisionUnavailable("down")
+
+
+def test_a_verification_the_provider_could_not_answer_changes_nothing():
+    engine = DecisionEngine(DecisionPolicy(), _Refuses())
+    assert verify_supersession(
+        engine, episode_text="t", subject="Alice", predicate="lives_in", old_object="Berlin",
+        new_object="Paris", old_stated_at="", old_author="user", new_author="user",
+        tenant_id="t", space="s",
+    ) is None
+    assert verify_entity(
+        engine, name="Alice", entity_type="person", context="", candidates=[{"id": "1", "label": "Alice"}],
+        tenant_id="t", space="s",
+    ) is None
+
+
+@pytest.mark.parametrize("key", ["relation", "identity"])
+def test_a_verification_answered_with_the_wrong_kind_preserves_rather_than_merges(monkeypatch, key):
+    # The choice is validated on the way in, so this shape should be
+    # unreachable — but the guard is what keeps an unreadable answer from
+    # being read as a merge, which is the one direction that cannot be undone.
+    wrong_kind = parse_response({"answers": {key: {"type": "noul", "noul": 0.5}}}, {key: Noul("?")})
+    engine = DecisionEngine(DecisionPolicy(), _Refuses())
+    monkeypatch.setattr(
+        engine, "decide",
+        lambda *a, **k: DecisionOutcome(decisions=wrong_kind, mode=MODE_ACTIVE),
+    )
+    if key == "relation":
+        assert verify_supersession(
+            engine, episode_text="t", subject="Alice", predicate="lives_in", old_object="Berlin",
+            new_object="Paris", old_stated_at="", old_author="user", new_author="user",
+            tenant_id="t", space="s",
+        ) is None
+    else:
+        assert verify_entity(
+            engine, name="Alice", entity_type="person", context="",
+            candidates=[{"id": "1", "label": "Alice"}], tenant_id="t", space="s",
+        ) is None
+
+
+def test_replacing_the_shared_engine_survives_a_provider_that_will_not_close():
+    from smrti.decisions import reset_decisions
+
+    class _StubbornProvider:
+        name = "stubborn"
+
+        def ask(self, state, questions, *, timeout):
+            raise DecisionUnavailable("down")
+
+        def close(self):
+            raise RuntimeError("still busy")
+
+    reset_decisions(DecisionEngine(DecisionPolicy(), _StubbornProvider()))
+    # Releasing it must not propagate: the replacement is already in place.
+    reset_decisions(None)

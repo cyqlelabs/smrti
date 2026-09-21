@@ -158,25 +158,24 @@ One consolidation epoch: revise pending evidence, decay attention and confidence
 
 ### Semantic decisions
 
-The engine is deterministic and stays so. `smrti.decisions` adds bounded judgements at four points where a rule cannot see what a sentence means and a generative LLM call is the expensive way to find out, answered locally by [Laya](https://github.com/NandhaKishorM/laya)'s multilingual non-autoregressive model (typed questions — a probability, a choice among options you supply, a score against a rubric — never prose). Laya is a core dependency and every task is **active by default**; each can instead run in **shadow** (ask and record, apply nothing) or be turned **off**. Any failure, timeout, or invalid reply falls back to the deterministic path:
+At four points a rule cannot tell what a sentence means. Instead of a generative LLM call, the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice among options, a score) and never writes prose. Laya ships with Smrti and every task is active by default; a task can run in `shadow` (ask and record, apply nothing) or be turned `off`. Any failure or timeout falls back to the deterministic path.
 
-| Task           | Where it runs                     | What it decides                                                                                   |
-| -------------- | --------------------------------- | ------------------------------------------------------------------------------------------------- |
-| `routing`      | before the LLM claim extraction   | Skip the call for chatter that holds nothing durable, corrects nothing and adds nothing; force it for a durable fact or correction that names no entity ("never deploy on Fridays"). The episode is always kept. |
-| `rerank`       | between ranking and the cut       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience, filtered only if you set a cutoff |
-| `supersession` | before an older claim is marked replaced | `same_claim` / `explicit_update` / `compatible` / `contradiction` / `insufficient_context`; only the two updates permit the mutation, ambiguity keeps both claims (stamped `supersession_deferred`) |
-| `entity`       | on an uncertain fuzzy or embedding match | Which candidate the mention names, or `none` / `ambiguous`; under the confidence line a provisional duplicate is made rather than an unjustified identity link |
+| Task           | Decides                                                                                                                              |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `routing`      | Whether an episode needs the LLM claim extraction. Chatter skips it; a durable fact that names no entity ("never deploy on Fridays") forces it. |
+| `rerank`       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience. |
+| `supersession` | Whether a new claim replaces an older one. Ambiguity keeps both.                                                                     |
+| `entity`       | Which existing atom an uncertain mention names. Under the confidence line, a duplicate is made rather than a wrong merge.            |
 
-Two rules hold regardless: a model judgement never restores a forgotten atom, confers permanence, changes tenant or space scope, or mints a critical warning (that needs a valence *you* stated); and an agent's claim never supersedes what the user stated, which is a rule, not a judgement. Decision confidence is stored in the audit log and in decision metadata, never in a memory's truth value.
+A decision never restores a forgotten atom, confers permanence, changes tenant or space, or mints a critical warning. Its confidence is logged, never written into a truth value.
 
 ```bash
-# Laya ships with Smrti; its weights download once on first use.
-# export SMRTI_DECISIONS=off            # explicit deterministic-only rollback
-# export SMRTI_DECISIONS_RERANK=shadow  # per-task override: off | shadow | active
-# export SMRTI_DECISIONS_MODEL=/models/laya-multilingual  # fully offline checkpoint
+export SMRTI_DECISIONS=off                              # deterministic only
+export SMRTI_DECISIONS_RERANK=shadow                    # per task: off | shadow | active
+export SMRTI_DECISIONS_MODEL=/models/laya-multilingual  # offline checkpoint
 ```
 
-Every decision — asked, answered, applied or not, with checkpoint, latency and token usage — is served by `GET /decisions` on the REST and proxy servers (and `DELETE /decisions`), counted into `/metrics` as `smrti_decisions_total{task,mode,outcome}`, and mirrored into the visualizer's LLM Calls tab. `make bench-decisions` runs the routing gate against a labeled bilingual set and reports calls avoided beside missed facts, corrections and constraints; `make bench` measures the default active reranker on LongMemEval-S under its own config fingerprint. Inference stays in-process; the default checkpoint is fetched into the Hugging Face cache once, or `SMRTI_DECISIONS_MODEL` can point at an already-downloaded directory for fully offline startup.
+`GET /decisions` lists every decision, `/metrics` counts them as `smrti_decisions_total`, and `make bench-decisions` scores the routing gate. Thresholds are in the [Configuration Reference](#configuration-reference).
 
 ## Server Modes
 

@@ -37,12 +37,17 @@ jobs:
       # it once FASTEMBED_CACHE_PATH points somewhere other than the temp dir
       # FastEmbed defaults to.
       - run: echo "FASTEMBED_CACHE_PATH=$HOME/.cache/fastembed" >> "$GITHUB_ENV"
+      # ~/.cache/smrti holds what weights.py derives from the downloads: the
+      # external-data form of each ONNX model. It was missing here, so every
+      # job rebuilt it — and building it means parsing the 1.1GB GLiNER
+      # encoder into the heap, which ONNX Runtime does twice.
       - uses: actions/cache@v4
         with:
           path: |
             ~/.cache/fastembed
             ~/.cache/huggingface
-          key: models-${{ runner.os }}-v2
+            ~/.cache/smrti
+          key: models-${{ runner.os }}-v3
       # The CPU build of torch, before anything can resolve the GPU one.
       #
       # NER still runs on ONNX Runtime, but the decision model does not: laya
@@ -56,6 +61,19 @@ jobs:
       # 600 MB.
       - run: pip install --index-url https://download.pytorch.org/whl/cpu torch
       - run: pip install -e ".[openai]" pytest pytest-cov
+      # Convert the weights in a process that then exits, so the spike above
+      # is not paid inside the one that also holds the models, the databases
+      # and the whole suite. pytest then memory-maps a form already on disk.
+      # The 3.13 job was OOM-killed mid-suite (exit 137) and lost its runner
+      # a second time on the next run; this is the largest allocation in the
+      # job and the only one that is pure setup.
+      - run: |
+          python -c "
+          from smrti.core.embed import get_embedding_provider
+          from smrti.extraction.ner import get_ner
+          get_embedding_provider().embed('warm')
+          get_ner().extract('Alice works at Acme in Amsterdam.')
+          "
       - run: pytest tests/ -q --cov=smrti --cov-report=xml
       # One upload is enough; the other interpreters cover the same lines.
       - if: matrix.python-version == '3.12'

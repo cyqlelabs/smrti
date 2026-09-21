@@ -65,10 +65,12 @@ EXTRACT_THINKING: str = os.environ.get("SMRTI_EXTRACT_THINKING", "disabled")
 # Semantic decisions (``smrti.decisions``) — read there, listed here so the
 # reference is in one place: SMRTI_DECISIONS (off | shadow | active, with
 # active the default for every task), SMRTI_DECISIONS_ROUTING / _RERANK / _SUPERSESSION
-# / _ENTITY (per-task override), SMRTI_DECISIONS_MODEL,
-# SMRTI_DECISIONS_DEVICE, SMRTI_DECISIONS_TIMEOUT (how long one decision may
-# hold up the request advising it), SMRTI_DECISIONS_COOLDOWN (how long the
-# engine stops asking a provider that just failed, so an unavailable model
-# costs one deadline per window instead of one per recall), and the
-# thresholds in ``decisions/policies.py``.
+# / _ENTITY (per-task override), SMRTI_DECISIONS_MODEL (the model directory,
+# found through ``decisions/model.py`` when unset), SMRTI_DECISIONS_DEVICE,
+# SMRTI_DECISIONS_THREADS (cores one inference may hold),
+# SMRTI_DECISIONS_TIMEOUT (how long one decision may hold up the request
+# advising it), SMRTI_DECISIONS_COOLDOWN (how long the engine stops asking a
+# provider that just failed, so an unavailable model costs one deadline per
+# window instead of one per recall), SMRTI_DECISIONS_CACHE (answers kept), and
+# the thresholds in ``decisions/policies.py``.
 DECISIONS: str = os.environ.get("SMRTI_DECISIONS", "active")

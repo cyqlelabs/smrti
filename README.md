@@ -28,7 +28,7 @@ Inspired by [AtomSpace](https://github.com/opencog/atomspace): memories are grap
 
 ## Why smrti
 
-- **Zero infrastructure** — one SQLite file with [sqlite-vec](https://github.com/asg017/sqlite-vec) for KNN, and ONNX embeddings and NER on CPU (no PyTorch). `pip install` and go.
+- **Zero infrastructure** — one SQLite file with [sqlite-vec](https://github.com/asg017/sqlite-vec) for KNN, and ONNX embeddings, NER, and decisions on CPU (no PyTorch anywhere). `pip install` and go.
 - **Error-avoidance memory** — severe failures survive pruning and outrank recent trivia at recall; every result comes back classified as `critical_warning`, `known_antipattern`, or `context`.
 - **Knowledge graph** — in the server modes, a GLiNER2 + LLM pipeline extracts entities and typed relations from what you store and resolves pronouns against the graph; no manual schema.
 - **Three integration paths** — MCP server, REST API, or an OpenAI-compatible proxy that adds memory to an existing app by changing one base URL.
@@ -59,7 +59,7 @@ docker run -d -p 8421:8421 -v smrti-data:/data \
 ```
 
 - **Tags** — every `v*` release publishes `latest`, the exact version, and a rolling `MAJOR.MINOR`; pin whichever you want to track.
-- **Storage** — `/data` holds the database, the NER weights that download on first extraction, and the mapped copies of both models that the first load writes; mount a volume or all of them die with the container.
+- **Storage** — `/data` holds the database, the weights that download on first use (NER on the first extraction, the decision model on the first decision), and the mapped copies of the embedding and NER models that the first load writes; mount a volume or all of them die with the container.
 - **User** — runs as non-root `smrti`.
 
 ## Quick Start
@@ -140,7 +140,7 @@ Similarity multiplies the standing terms, so a memory that is not about the ques
 - `agent_source_trust` discounts an agent-authored memory's standing, never its similarity.
 - Episodes repeating one already chosen from the same minutes share `max(2, top_k // 6)` slots; beliefs keep up to two.
 - Results below the personality's `min_confidence_to_surface` are excluded unless you pass `min_confidence`; forgotten memories never return.
-- The core [decision engine](#semantic-decisions) judges the top candidates as evidence for the question and blends that judgement with salience; each result then carries an `evidence` score. Only what is returned gets the access boost; `attend(atom_ids)` boosts what an external reranker kept out of a wider `recall(boost=False)`.
+- The core [decision engine](#semantic-decisions) judges the top candidates as evidence for the question and blends that judgement with salience; each result then carries an `evidence` score. Pass `rerank=False` to skip the judgement. Only what is returned gets the access boost; `attend(atom_ids)` boosts what an external reranker kept out of a wider `recall(boost=False)`.
 
 Each result carries a `severity`: `critical_warning` (a valence you stated, on anything but a bare concept), `known_antipattern` (a belief whose probability fell below 0.3, where a superseded preference or constraint lands), or `context`.
 
@@ -158,7 +158,9 @@ One consolidation epoch: revise pending evidence, decay attention and confidence
 
 ### Semantic decisions
 
-At four points a rule cannot tell what a sentence means. Instead of a generative LLM call, the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice among options, a score) and never writes prose. Laya ships with Smrti and every task is active by default; a task can run in `shadow` (ask and record, apply nothing) or be turned `off`. Any failure or timeout falls back to the deterministic path.
+At four points a rule cannot tell what a sentence means. Instead of a generative LLM call, the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice among options, a score) and never writes prose. It runs as an int8 ONNX graph — no PyTorch, about 560MB resident. Every task is active by default; a task can run in `shadow` (ask and record, apply nothing) or be turned `off`. Any failure or timeout falls back to the deterministic path.
+
+The runtime installs with Smrti; the weights do not. The first decision fetches them once (250MB, checked against a checksum) into `~/.smrti/decision-model`, or reuses `~/.factor/decision-model` when [Factor](https://github.com/cyqlelabs/factor) already holds a copy. Fetch and load run on their own thread, so recall answers from the deterministic path until the model is ready. `SMRTI_DECISIONS_MODEL` points at a directory you unpacked yourself; `SMRTI_DECISIONS=off` downloads nothing at all.
 
 | Task           | Decides                                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -170,9 +172,10 @@ At four points a rule cannot tell what a sentence means. Instead of a generative
 A decision never restores a forgotten atom, confers permanence, changes tenant or space, or mints a critical warning. Its confidence is logged, never written into a truth value.
 
 ```bash
-export SMRTI_DECISIONS=off                              # deterministic only
-export SMRTI_DECISIONS_RERANK=shadow                    # per task: off | shadow | active
-export SMRTI_DECISIONS_MODEL=/models/laya-multilingual  # offline checkpoint
+export SMRTI_DECISIONS=off                      # deterministic only
+export SMRTI_DECISIONS_RERANK=shadow            # per task: off | shadow | active
+export SMRTI_DECISIONS_MODEL=/models/laya-int8  # a directory you unpacked; no download
+export SMRTI_DECISIONS_THREADS=2                # cap the cores inference may hold
 ```
 
 `GET /decisions` lists every decision, `/metrics` counts them as `smrti_decisions_total`, and `make bench-decisions` scores the routing gate. Thresholds are in the [Configuration Reference](#configuration-reference).
@@ -313,6 +316,7 @@ All server modes read the same environment variables. Everything works with zero
 | Variable                 | Default              | Purpose                                            |
 | ------------------------ | -------------------- | -------------------------------------------------- |
 | `SMRTI_DB`               | `~/.smrti/memory.db` | Database file path                                 |
+| `SMRTI_HOME`             | `~/.smrti`           | Where the decision model is unpacked               |
 | `SMRTI_PERSONALITY`      | `balanced`           | Personality preset                                 |
 | `SMRTI_TENANT_ID`        | `default`            | Tenant partition (hard isolation)                  |
 | `SMRTI_SPACE`            | `default`            | Write space                                        |
@@ -363,9 +367,12 @@ To get the knowledge graph from `serve rest` or `serve mcp`, point `SMRTI_EXTRAC
 | --------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------- |
 | `SMRTI_DECISIONS`                             | `active`                  | Mode for every decision task: `off`, `shadow` (ask and record, apply nothing), `active` |
 | `SMRTI_DECISIONS_ROUTING` / `_RERANK` / `_SUPERSESSION` / `_ENTITY` | `SMRTI_DECISIONS` | Per-task mode override                                             |
-| `SMRTI_DECISIONS_MODEL`                       | `convaiinnovations/laya-multilingual` | Hugging Face model id or local checkpoint directory; recorded on every decision |
-| `SMRTI_DECISIONS_DEVICE`                      | auto                        | Laya device override such as `cpu`, `cuda`, or `mps`                     |
+| `SMRTI_DECISIONS_MODEL`                       | Factor's copy, else `~/.smrti/decision-model` | Model directory to load; unset, the weights are fetched there on first use |
+| `SMRTI_DECISIONS_DEVICE`                      | auto                      | Execution provider passed to the ONNX runtime; unset lets it choose            |
+| `SMRTI_DECISIONS_THREADS`                     | runtime default           | Cores one decision may hold; cap it on a machine that has two of them          |
 | `SMRTI_DECISIONS_TIMEOUT`                     | `30`                      | Deadline per local decision in seconds; on expiry the deterministic path answers |
+| `SMRTI_DECISIONS_COOLDOWN`                    | `60`                      | Seconds the engine stops asking a provider that just failed, so an unavailable model costs one deadline per window instead of one per recall |
+| `SMRTI_DECISIONS_CACHE`                       | `256`                     | Answers kept in the LRU cache; a state names the atoms it was built from, so it invalidates itself (0 = no cache) |
 | `SMRTI_DECISIONS_RERANK_SHORTLIST`            | `20`                      | Candidates judged per recall (one request)                                    |
 | `SMRTI_DECISIONS_RERANK_WEIGHT`               | `0.5`                     | Share of the final order the evidence judgement decides against salience      |
 | `SMRTI_DECISIONS_RERANK_MIN_EVIDENCE`         | `0`                       | Drop judged candidates under this evidence score (0 = rerank only, never filter); a stated warning is never dropped |
@@ -477,7 +484,7 @@ Each preset tunes 17 hyperparameters. To create a custom personality, start from
 ```mermaid
 graph TD
     subgraph Facade
-        S["Smrti<br/><small>remember · recall · believe · reinforce · reflect · forget · status</small>"]
+        S["Smrti<br/><small>remember · recall · attend · believe · reinforce · reflect · forget · status</small>"]
     end
 
     subgraph Servers
@@ -522,7 +529,7 @@ graph TD
 
     subgraph Decisions
         DEC["engine · policies · audit<br/><small>core · active by default</small>"]
-        LAYA["laya · multilingual<br/><small>local typed judgements</small>"]
+        LAYA["laya · model<br/><small>multilingual int8 ONNX · local typed judgements</small>"]
     end
 
     subgraph Storage

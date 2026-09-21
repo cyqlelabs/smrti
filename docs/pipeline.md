@@ -59,7 +59,7 @@ flowchart TD
         FUSE["⚖️ Rank Fusion\nReciprocal Rank Fusion\npicks the candidate pool"]
         EXPAND["🌐 Graph Expansion\nFollow relation edges\nto related concepts"]
         SALIENCE["🏆 Salience Ranking\nSimilarity · Attention\nConfidence · Valence"]
-        JUDGE["⚖️ Evidence Judgement\noptional · typed decisions\nanswers? links? superseded? contradicts?"]
+        JUDGE["⚖️ Evidence Judgement\nlocal model · typed decisions\nanswers? links? superseded? contradicts?"]
         DIVERSE["🎛️ Diversity Cap\nOne moment cannot fill\nmore than a sixth of the answer"]
     end
 

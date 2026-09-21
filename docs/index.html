@@ -984,7 +984,7 @@
     <section class="arch-section">
       <div class="wrap">
         <p class="section-label">Architecture</p>
-        <h2 class="section-title">Seven layers, one SQLite file</h2>
+        <h2 class="section-title">Eight layers, one SQLite file</h2>
         <p class="section-text">Vector indexing via sqlite-vec (multilingual-MiniLM-L12-v2, 384 dimensions, 50+ languages) and lexical indexing via FTS5, both in the one file. Entity resolution cascades through exact match, cross-type label match, alias lookup, fuzzy matching (RapidFuzz), and embedding similarity before creating new nodes.</p>
 
         <div class="arch-container" id="archDiagram">
@@ -1021,8 +1021,13 @@
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
+              <span class="arch-layer-name">decisions</span>
+              <span class="arch-layer-files">engine.py (the one door, cached) &middot; policies.py &middot; provider.py &middot; laya.py (int8 ONNX, no PyTorch) &middot; model.py &middot; retrieval.py (rerank) &middot; extraction.py (routing, supersession, entity) &middot; audit.py</span>
+            </div>
+            <div class="arch-layer-arrow">&darr;</div>
+            <div class="arch-layer">
               <span class="arch-layer-name">core</span>
-              <span class="arch-layer-files">models.py &middot; atomspace.py &middot; db.py &middot; embed.py &middot; provenance.py</span>
+              <span class="arch-layer-files">models.py &middot; atomspace.py &middot; db.py &middot; embed.py &middot; weights.py &middot; provenance.py</span>
             </div>
           </div>
         </div>
@@ -1033,12 +1038,13 @@
     <section>
       <div class="wrap">
         <p class="section-label">API</p>
-        <h2 class="section-title">Seven operations</h2>
-        <p class="section-text">remember, recall, believe, reinforce, reflect, forget, personality. The Python API is the same interface the MCP and REST servers expose.</p>
+        <h2 class="section-title">Eight operations</h2>
+        <p class="section-text">remember, recall, attend, believe, reinforce, reflect, forget, personality. The Python API is the same interface the MCP and REST servers expose.</p>
 
         <div class="code-tabs" role="tablist">
           <button class="code-tab active" role="tab" aria-selected="true" aria-controls="tab-remember" data-panel="tab-remember">remember</button>
           <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-recall" data-panel="tab-recall">recall</button>
+          <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-attend" data-panel="tab-attend">attend</button>
           <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-believe" data-panel="tab-believe">believe</button>
           <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-reinforce" data-panel="tab-reinforce">reinforce</button>
           <button class="code-tab" role="tab" aria-selected="false" aria-controls="tab-reflect" data-panel="tab-reflect">reflect</button>
@@ -1075,6 +1081,16 @@ results = engine.<span class="fn">recall</span>(<span class="st">"deployment ris
 
 <span class="cm"># KNN + BM25, fused &rarr; 1-hop graph expansion &rarr; salience &rarr; diversity cap</span>
 <span class="cm"># Negative-valence atoms surface first when relevant</span></pre></div>
+
+        <div class="code-panel" role="tabpanel" id="tab-attend"><pre><span class="cm"># Read wide without raising attention, rerank it yourself,</span>
+<span class="cm"># then boost only what you kept</span>
+results = engine.<span class="fn">recall</span>(<span class="st">"deployment risks"</span>, <span class="fn">top_k</span>=<span class="nb">50</span>, <span class="fn">boost</span>=<span class="kw">False</span>)
+kept = my_reranker(results)[:<span class="nb">5</span>]
+
+engine.<span class="fn">attend</span>([r.atom.id <span class="kw">for</span> r <span class="kw">in</span> kept])
+
+<span class="cm"># Attention, not evidence: reinforce() reports that a memory</span>
+<span class="cm"># was used, attend() only raises what is in focus.</span></pre></div>
 
         <div class="code-panel" role="tabpanel" id="tab-believe"><pre><span class="cm"># Assert a belief with supporting evidence</span>
 engine.<span class="fn">believe</span>(
@@ -1162,6 +1178,36 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
             </ul>
           </div>
         </div>
+      </div>
+    </section>
+
+    <!-- Decisions -->
+    <section>
+      <div class="wrap">
+        <p class="section-label">Decisions</p>
+        <h2 class="section-title">Four judgements a rule cannot make</h2>
+        <p class="section-text">Is this message worth an extraction call? Does this memory answer the question? Does this claim replace the older one? Does this mention name someone already in the graph? A local multilingual model answers each as a typed question — a probability, a choice among options, a score — and never writes prose. It runs as an int8 ONNX graph on CPU, and every task is active by default.</p>
+
+        <div class="usecase-grid">
+          <div class="usecase-card">
+            <div class="usecase-title">routing</div>
+            <div class="usecase-desc">Whether an episode needs the LLM claim extraction. Chatter skips it; a durable fact that names no entity &mdash; "never deploy on Fridays" &mdash; forces it.</div>
+          </div>
+          <div class="usecase-card">
+            <div class="usecase-title">rerank</div>
+            <div class="usecase-desc">Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise. Blended with salience.</div>
+          </div>
+          <div class="usecase-card">
+            <div class="usecase-title">supersession</div>
+            <div class="usecase-desc">Whether a new claim replaces an older one. Ambiguity keeps both.</div>
+          </div>
+          <div class="usecase-card">
+            <div class="usecase-title">entity</div>
+            <div class="usecase-desc">Which existing atom an uncertain mention names. Under the confidence line, a duplicate is made rather than a wrong merge.</div>
+          </div>
+        </div>
+
+        <p class="section-text" style="margin-top:2.5rem">Any failure or timeout falls back to the deterministic path, so a model that is missing or still loading costs precision and never availability. A decision may not restore a forgotten atom, confer permanence, cross a tenant, or mint a critical warning, and its confidence is logged rather than written into a truth value. Run a task in <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">shadow</code> to record what it would have decided, or turn it <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">off</code>. <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">GET /decisions</code> lists every one of them.</p>
       </div>
     </section>
 
@@ -1508,13 +1554,14 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
         {
           id: 'recall', num: '⑤', label: 'Recall',
           accent: '#a855f7', bg: '#2d1b4e', text: '#e9d5ff',
-          desc: 'A vector KNN and a BM25 search are fused by reciprocal rank fusion. Graph expansion follows relation edges outward. Salience ranks by relevance times standing, and a diversity cap keeps one moment from filling the answer.',
+          desc: 'A vector KNN and a BM25 search are fused by reciprocal rank fusion. Graph expansion follows relation edges outward. Salience ranks by relevance times standing, the local decision model judges the shortlist as evidence for the question, and a diversity cap keeps one moment from filling the answer.',
           nodes: [
             { name: 'Semantic Search', tip: 'KNN vector similarity across all memories' },
             { name: 'Lexical Search',  tip: 'BM25 over the words themselves, in any language' },
             { name: 'Rank Fusion',     tip: 'Reciprocal rank fusion picks the candidate pool' },
             { name: 'Graph Expansion', tip: 'Follow relation edges to related concepts' },
             { name: 'Salience Ranking',tip: 'similarity \u00d7 (attention + confidence + LTI + valence weights)' },
+            { name: 'Evidence Judgement', tip: 'A typed judgement of the shortlist: answers, links, superseded, contradicts' },
             { name: 'Diversity Cap',   tip: 'One moment cannot fill more than a sixth of the answer' },
           ]
         },

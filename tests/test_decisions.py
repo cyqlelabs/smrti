@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 import time
 
 import pytest
@@ -34,7 +35,7 @@ from smrti.decisions.extraction import (
 )
 from smrti.decisions.laya import DEFAULT_MODEL, LayaProvider
 from smrti.decisions.policies import MODE_ACTIVE, MODE_OFF, MODE_SHADOW, TASK_RERANK, TASKS
-from smrti.decisions.provider import parse_response
+from smrti.decisions.provider import parse_response, questions_payload
 from smrti.decisions.retrieval import fold_evidence, rerank
 from smrti.core.models import Atom, AtomType, RecallResult
 
@@ -521,3 +522,195 @@ def test_audit_records_are_newest_first_and_clear_keeps_the_counters():
     assert audit.get_all() == []
     assert audit.counters()[("a", "active", "x")] == 1
     assert _audit_module is audit
+
+
+# ── the load never runs on a caller's thread ─────────────────────────────────
+#
+# A checkpoint load imports torch and may download 322M parameters. Paid on
+# the caller, it sat behind the decision deadline and put a fixed wall in
+# front of every recall — 30 seconds against a retrieval that takes 48ms,
+# which is longer than any client waits, so the answer arrived after every
+# one of them had given up. These pin that it is never paid there again.
+
+
+class _SlowLoad(LayaProvider):
+    """A provider whose checkpoint load is still running."""
+
+    def __init__(self, gate: threading.Event, **kwargs):
+        super().__init__(**kwargs)
+        self.gate = gate
+        self.loads = 0
+
+    def _load(self):
+        self.loads += 1
+        self.gate.wait(30)
+        return self._agent
+
+
+class _FailingLoad(LayaProvider):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.loads = 0
+
+    def _load(self):
+        self.loads += 1
+        raise DecisionUnavailable("no such checkpoint")
+
+
+def test_a_decision_asked_before_the_model_is_loaded_does_not_wait_for_it():
+    gate = threading.Event()
+    provider = _SlowLoad(gate, model="convaiinnovations/laya-multilingual")
+    try:
+        started = time.monotonic()
+        with pytest.raises(DecisionUnavailable, match="still loading"):
+            # A 30s deadline: the point is that none of it is spent.
+            provider.ask("s", {"q": Noul("?")}, timeout=30.0)
+        assert time.monotonic() - started < 1.0
+        assert not provider.ready
+    finally:
+        gate.set()
+        provider.close()
+
+
+def test_the_load_is_started_once_however_many_callers_arrive():
+    gate = threading.Event()
+    provider = _SlowLoad(gate, model="m")
+    try:
+        for _ in range(5):
+            with pytest.raises(DecisionUnavailable):
+                provider.ask("s", {"q": Noul("?")}, timeout=1.0)
+        gate.set()
+        provider.preload(timeout=5)
+        assert provider.loads == 1
+    finally:
+        gate.set()
+        provider.close()
+
+
+def test_a_failed_load_backs_off_instead_of_being_retried_per_request():
+    provider = _FailingLoad(model="m")
+    try:
+        for _ in range(4):
+            with pytest.raises(DecisionUnavailable):
+                provider.ask("s", {"q": Noul("?")}, timeout=1.0)
+            # The loader thread has to finish before the next ask sees the error.
+            deadline = time.monotonic() + 5
+            while provider._loader is not None and time.monotonic() < deadline:
+                time.sleep(0.01)
+        # Each attempt imports torch before it can fail; one is enough.
+        assert provider.loads == 1
+    finally:
+        provider.close()
+
+
+def test_a_loaded_model_answers_as_before():
+    provider = _laya(lambda state, questions: _reply(questions), model="m")
+    assert provider.ready
+    assert provider.preload() is True
+    assert provider.ask("s", {"q": Noul("?")}, timeout=2.0).noul("q") == 0.8
+
+
+def test_a_stalled_load_does_not_keep_the_process_from_exiting():
+    # The loader is a daemon thread on purpose: a non-daemon executor worker
+    # stuck in a download is joined by the interpreter's atexit hook, which
+    # is how a stopped engine leaves a process that will not die.
+    gate = threading.Event()
+    provider = _SlowLoad(gate, model="m")
+    try:
+        with pytest.raises(DecisionUnavailable):
+            provider.ask("s", {"q": Noul("?")}, timeout=1.0)
+        deadline = time.monotonic() + 5
+        while provider._loader is None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert provider._loader is not None and provider._loader.daemon
+    finally:
+        gate.set()
+        provider.close()
+
+
+# ── the engine stops asking a provider that just failed ──────────────────────
+
+
+class _Unavailable:
+    name = "down"
+
+    def __init__(self):
+        self.calls = 0
+
+    def ask(self, state, questions, *, timeout):
+        self.calls += 1
+        raise DecisionUnavailable("down")
+
+
+def test_the_engine_pays_one_deadline_per_cooldown_not_one_per_request():
+    provider = _Unavailable()
+    engine = DecisionEngine(DecisionPolicy(cooldown=60.0), provider)
+    for i in range(5):
+        # A distinct state each time, so the answer cache cannot be what
+        # spares the provider.
+        assert engine.decide(
+            TASK_RERANK, {"q": i}, {"n": Noul("?")}, tenant_id="t", space="s"
+        ) is None
+    assert provider.calls == 1
+
+
+def test_the_cooldown_lifts_and_a_working_provider_clears_it():
+    provider = _Unavailable()
+    engine = DecisionEngine(DecisionPolicy(cooldown=60.0), provider)
+    assert engine.decide(TASK_RERANK, {"q": 0}, {"n": Noul("?")}, tenant_id="t", space="s") is None
+    assert engine._offline()
+
+    engine._retry_at = time.monotonic() - 1  # the window has passed
+    assert not engine._offline()
+    engine.provider = _FakeProviderThatAnswers()
+    assert engine.decide(TASK_RERANK, {"q": 1}, {"n": Noul("?")}, tenant_id="t", space="s") is not None
+    assert not engine._offline()
+
+
+class _FakeProviderThatAnswers:
+    name = "ok"
+
+    def ask(self, state, questions, *, timeout):
+        from smrti.decisions.provider import parse_response
+        return parse_response(_reply(questions_payload(questions)), questions)
+
+
+def test_a_zero_cooldown_restores_asking_every_time():
+    provider = _Unavailable()
+    engine = DecisionEngine(DecisionPolicy(cooldown=0.0), provider)
+    for i in range(3):
+        engine.decide(TASK_RERANK, {"q": i}, {"n": Noul("?")}, tenant_id="t", space="s")
+    assert provider.calls == 3
+
+
+def test_recall_keeps_its_local_ranking_and_its_speed_when_the_model_is_loading():
+    from smrti.core.models import Atom, AtomType, AttentionValue, RecallResult, TruthValue, Valence
+    from smrti.decisions.retrieval import make_judge
+
+    gate = threading.Event()
+    provider = _SlowLoad(gate, model="m")
+    engine = DecisionEngine(DecisionPolicy(), provider)
+    judge = make_judge(engine, "default", "main")
+    assert judge is not None  # rerank is active by default
+
+    results = [
+        RecallResult(
+            atom=Atom(
+                type=AtomType.EPISODE, label=f"a{i}", content=f"m{i}",
+                tenant_id="default", space="main",
+                truth=TruthValue(probability=0.8, confidence=0.5),
+                attention=AttentionValue(sti=0.1, lti=0.1),
+                valence=Valence(valence=0.0, intensity=0.0),
+            ),
+            salience=1.0 - i * 0.01, similarity=0.5,
+        )
+        for i in range(30)
+    ]
+    try:
+        started = time.monotonic()
+        got = judge("where do we deploy", results)
+        assert time.monotonic() - started < 1.0
+        assert [r.atom.id for r in got] == [r.atom.id for r in results]
+    finally:
+        gate.set()
+        provider.close()

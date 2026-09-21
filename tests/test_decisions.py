@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import threading
 import time
+import types
+from contextlib import contextmanager
 
 import pytest
 
@@ -714,3 +717,204 @@ def test_recall_keeps_its_local_ranking_and_its_speed_when_the_model_is_loading(
     finally:
         gate.set()
         provider.close()
+
+
+# ── the real load path ───────────────────────────────────────────────────────
+#
+# Every test above replaces `_load`, which left the one function the fix is
+# about — the import and the checkpoint load — without a line of coverage.
+# These drive the real one against a stand-in `laya` module.
+
+
+@contextmanager
+def _fake_laya(loader):
+    """Install a module named `laya` whose `load` is *loader*, then remove it."""
+    module = types.ModuleType("laya")
+    module.load = loader
+    previous = sys.modules.get("laya")
+    sys.modules["laya"] = module
+    try:
+        yield module
+    finally:
+        if previous is None:
+            sys.modules.pop("laya", None)
+        else:
+            sys.modules["laya"] = previous
+
+
+def test_the_real_load_imports_laya_and_serves_the_next_decision():
+    seen = {}
+
+    def loader(model, device=None):
+        seen["model"], seen["device"] = model, device
+        return _FakeLaya(lambda state, questions: _reply(questions))
+
+    provider = LayaProvider(model="checkpoint-x", device="cpu")
+    try:
+        with _fake_laya(loader):
+            # The first caller is turned away rather than made to wait...
+            with pytest.raises(DecisionUnavailable):
+                provider.ask("s", {"q": Noul("?")}, timeout=1.0)
+            assert provider.preload(timeout=5) is True
+        assert seen == {"model": "checkpoint-x", "device": "cpu"}
+        assert provider.ready
+        # ...and the one after the load lands gets the model.
+        assert provider.ask("s", {"q": Noul("?")}, timeout=2.0).noul("q") == 0.8
+    finally:
+        provider.close()
+
+
+def test_a_missing_laya_package_is_reported_as_unavailable():
+    provider = LayaProvider(model="m")
+    previous = sys.modules.get("laya")
+    sys.modules["laya"] = None  # an import of this name now raises ImportError
+    try:
+        with pytest.raises(DecisionUnavailable, match="missing from the Smrti core installation"):
+            provider._load()
+    finally:
+        if previous is None:
+            sys.modules.pop("laya", None)
+        else:
+            sys.modules["laya"] = previous
+        provider.close()
+
+
+def test_a_checkpoint_that_will_not_load_is_reported_with_its_model():
+    def loader(model, device=None):
+        raise RuntimeError("no such revision")
+
+    provider = LayaProvider(model="bad/checkpoint")
+    try:
+        with _fake_laya(loader):
+            with pytest.raises(DecisionUnavailable, match="could not load Laya model 'bad/checkpoint'"):
+                provider._load()
+            assert not provider.ready
+    finally:
+        provider.close()
+
+
+def test_an_already_loaded_agent_short_circuits_the_load():
+    agent = _FakeLaya(lambda state, questions: _reply(questions))
+    provider = LayaProvider(agent=agent, model="m")
+    try:
+        # No `laya` module installed: reaching the import would raise.
+        assert provider._load() is agent
+    finally:
+        provider.close()
+
+
+# ── the deadline, and the guards around one call ─────────────────────────────
+
+
+def test_the_deadline_defaults_rejects_nonsense_and_refuses_an_expired_one():
+    provider = _laya(lambda state, questions: _reply(questions))
+    try:
+        assert provider._deadline(None) == 30.0
+        assert provider._deadline(2) == 2.0
+        with pytest.raises(ValueError, match="must be a number"):
+            provider._deadline("soon")
+        with pytest.raises(DecisionUnavailable, match="already expired"):
+            provider._deadline(0)
+        with pytest.raises(DecisionUnavailable, match="already expired"):
+            provider._deadline(-1)
+    finally:
+        provider.close()
+
+
+def test_a_decision_with_no_questions_is_a_programming_error():
+    provider = _laya(lambda state, questions: _reply(questions))
+    try:
+        with pytest.raises(ValueError, match="at least one question"):
+            provider._predict("s", {})
+    finally:
+        provider.close()
+
+
+def test_the_async_path_bounds_a_model_that_does_not_answer():
+    started = threading.Event()
+    release = threading.Event()
+
+    def handler(state, questions):
+        started.set()
+        release.wait(30)
+        return _reply(questions)
+
+    provider = _laya(handler)
+    try:
+        with pytest.raises(DecisionUnavailable, match="within 0.0s"):
+            run(provider.ask_async("s", {"q": Noul("?")}, timeout=0.01))
+    finally:
+        release.set()
+        provider.close()
+
+
+# ── the cooldown holds on the async door too ─────────────────────────────────
+
+
+class _UnavailableAsync:
+    name = "down"
+
+    def __init__(self):
+        self.calls = 0
+
+    async def ask_async(self, state, questions, *, timeout):
+        self.calls += 1
+        raise DecisionUnavailable("down")
+
+
+class _AnswersAsync:
+    name = "ok"
+
+    async def ask_async(self, state, questions, *, timeout):
+        return parse_response(_reply(questions_payload(questions)), questions)
+
+
+def test_decide_async_pays_one_deadline_per_cooldown():
+    provider = _UnavailableAsync()
+    engine = DecisionEngine(DecisionPolicy(cooldown=60.0), provider)
+
+    async def drive():
+        for i in range(4):
+            assert await engine.decide_async(
+                TASK_RERANK, {"q": i}, {"n": Noul("?")}, tenant_id="t", space="s"
+            ) is None
+
+    run(drive())
+    assert provider.calls == 1
+    assert engine._offline()
+
+
+def test_decide_async_clears_the_cooldown_when_the_provider_answers():
+    engine = DecisionEngine(DecisionPolicy(cooldown=60.0), _AnswersAsync())
+    outcome = run(
+        engine.decide_async(TASK_RERANK, {"q": 0}, {"n": Noul("?")}, tenant_id="t", space="s")
+    )
+    assert outcome is not None and not engine._offline()
+
+
+def test_predict_passes_the_unready_signal_through_unchanged():
+    # `_predict` re-raises DecisionUnavailable rather than wrapping it as an
+    # inference failure: "the model is not loaded yet" is not a bad answer.
+    provider = LayaProvider(model="m")
+    try:
+        # Whether the background load is still running or has already failed
+        # decides the wording, so assert on what must never change: the signal
+        # arrives as-is and not wrapped as an inference failure.
+        with pytest.raises(DecisionUnavailable) as raised:
+            provider._predict("s", {"q": Noul("?")})
+        assert "inference failed" not in str(raised.value)
+    finally:
+        provider.close()
+
+
+def test_decide_async_is_off_and_cached_on_the_same_terms_as_decide():
+    engine = DecisionEngine(_policy(rerank=MODE_OFF), _AnswersAsync())
+    assert run(
+        engine.decide_async(TASK_RERANK, {"q": 0}, {"n": Noul("?")}, tenant_id="t", space="s")
+    ) is None
+
+    engine = DecisionEngine(DecisionPolicy(), _AnswersAsync())
+    first = run(engine.decide_async(TASK_RERANK, {"q": 1}, {"n": Noul("?")}, tenant_id="t", space="s"))
+    second = run(engine.decide_async(TASK_RERANK, {"q": 1}, {"n": Noul("?")}, tenant_id="t", space="s"))
+    assert first is not None and not first.cached
+    assert second is not None and second.cached

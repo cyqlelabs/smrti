@@ -249,9 +249,16 @@ def test_laya_enforces_the_decision_deadline():
     provider.close()
 
 
-def test_laya_needs_a_model_id_or_path():
-    with pytest.raises(ValueError):
-        LayaProvider("")
+def test_a_provider_with_no_model_named_resolves_one_when_it_loads():
+    # Where the weights are is a question for load time, not construction:
+    # the engine has to exist on a box that has none so every decision site
+    # can fall back through it.
+    provider = LayaProvider("")
+    try:
+        assert provider.model == ""
+        assert not provider.ready
+    finally:
+        provider.close()
 
 # ── policy ───────────────────────────────────────────────────────────────────
 
@@ -374,7 +381,12 @@ def test_decisions_are_mirrored_into_the_llm_call_log():
 def test_an_enabled_policy_builds_the_default_laya_provider():
     engine = build_engine(DecisionPolicy.from_env({"SMRTI_DECISIONS": "active"}))
     assert isinstance(engine.provider, LayaProvider)
-    assert engine.model == DEFAULT_MODEL
+    # The model is resolved when it is first loaded, not when the engine is
+    # built: importing smrti must not go looking for 343 MB of weights, and
+    # on a box that has none the engine still has to exist so every decision
+    # site can fall back through it.
+    assert engine.model == DEFAULT_MODEL == ""
+    assert not engine.provider.ready
     assert engine.mode("rerank") == MODE_ACTIVE
     engine.provider.close()
 
@@ -728,25 +740,26 @@ def test_recall_keeps_its_local_ranking_and_its_speed_when_the_model_is_loading(
 
 @contextmanager
 def _fake_laya(loader):
-    """Install a module named `laya` whose `load` is *loader*, then remove it."""
-    module = types.ModuleType("laya")
-    module.load = loader
-    previous = sys.modules.get("laya")
-    sys.modules["laya"] = module
+    """Install a module named `edgejev` whose `Agent` is *loader*, then remove
+    it. The runtime is EdgeJev; the model it serves is still Laya."""
+    module = types.ModuleType("edgejev")
+    module.Agent = loader
+    previous = sys.modules.get("edgejev")
+    sys.modules["edgejev"] = module
     try:
         yield module
     finally:
         if previous is None:
-            sys.modules.pop("laya", None)
+            sys.modules.pop("edgejev", None)
         else:
-            sys.modules["laya"] = previous
+            sys.modules["edgejev"] = previous
 
 
-def test_the_real_load_imports_laya_and_serves_the_next_decision():
+def test_the_real_load_imports_the_runtime_and_serves_the_next_decision():
     seen = {}
 
-    def loader(model, device=None):
-        seen["model"], seen["device"] = model, device
+    def loader(model_dir, threads=None, provider=None):
+        seen["model"], seen["provider"] = model_dir, provider
         return _FakeLaya(lambda state, questions: _reply(questions))
 
     provider = LayaProvider(model="checkpoint-x", device="cpu")
@@ -756,7 +769,7 @@ def test_the_real_load_imports_laya_and_serves_the_next_decision():
             with pytest.raises(DecisionUnavailable):
                 provider.ask("s", {"q": Noul("?")}, timeout=1.0)
             assert provider.preload(timeout=5) is True
-        assert seen == {"model": "checkpoint-x", "device": "cpu"}
+        assert seen == {"model": "checkpoint-x", "provider": "cpu"}
         assert provider.ready
         # ...and the one after the load lands gets the model.
         assert provider.ask("s", {"q": Noul("?")}, timeout=2.0).noul("q") == 0.8
@@ -764,29 +777,29 @@ def test_the_real_load_imports_laya_and_serves_the_next_decision():
         provider.close()
 
 
-def test_a_missing_laya_package_is_reported_as_unavailable():
+def test_a_missing_runtime_is_reported_as_unavailable():
     provider = LayaProvider(model="m")
-    previous = sys.modules.get("laya")
-    sys.modules["laya"] = None  # an import of this name now raises ImportError
+    previous = sys.modules.get("edgejev")
+    sys.modules["edgejev"] = None  # an import of this name now raises ImportError
     try:
-        with pytest.raises(DecisionUnavailable, match="missing from the Smrti core installation"):
+        with pytest.raises(DecisionUnavailable, match="missing from the Smrti installation"):
             provider._load()
     finally:
         if previous is None:
-            sys.modules.pop("laya", None)
+            sys.modules.pop("edgejev", None)
         else:
-            sys.modules["laya"] = previous
+            sys.modules["edgejev"] = previous
         provider.close()
 
 
 def test_a_checkpoint_that_will_not_load_is_reported_with_its_model():
-    def loader(model, device=None):
-        raise RuntimeError("no such revision")
+    def loader(model_dir, threads=None, provider=None):
+        raise RuntimeError("no such directory")
 
     provider = LayaProvider(model="bad/checkpoint")
     try:
         with _fake_laya(loader):
-            with pytest.raises(DecisionUnavailable, match="could not load Laya model 'bad/checkpoint'"):
+            with pytest.raises(DecisionUnavailable, match="could not load the decision model at 'bad/checkpoint'"):
                 provider._load()
             assert not provider.ready
     finally:
@@ -1249,3 +1262,112 @@ def test_the_suite_can_never_start_a_real_checkpoint_load():
     assert getattr(laya, "__file__", None) is None
     with pytest.raises(RuntimeError, match="never loads a real checkpoint"):
         laya.load("convaiinnovations/laya-multilingual")
+
+
+# --- where the weights come from -------------------------------------------
+
+
+def _artifact(tmp_path, *, graph=b"a graph", config=None):
+    """A tarball shaped like the published one."""
+    import io, json as _json, tarfile
+
+    payload = {
+        "edgejev.json": (config if config is not None else _json.dumps(
+            {"max_len": 1024, "head_max_len": 256, "onnx_file": "model.onnx"}
+        )).encode(),
+        "model.onnx": graph,
+    }
+    blob = io.BytesIO()
+    with tarfile.open(fileobj=blob, mode="w:gz") as tar:
+        for name, body in payload.items():
+            info = tarfile.TarInfo("./" + name)
+            info.size = len(body)
+            tar.addfile(info, io.BytesIO(body))
+    return blob.getvalue()
+
+
+def test_the_model_is_resolved_explicit_then_shared_then_own(tmp_path, monkeypatch):
+    from smrti.decisions import model as model_source
+
+    explicit, shared, own = tmp_path / "explicit", tmp_path / "factor", tmp_path / "own"
+    for directory in (explicit, shared, own):
+        directory.mkdir()
+        (directory / "edgejev.json").write_text('{"max_len": 1024, "onnx_file": "model.onnx"}')
+        (directory / "model.onnx").write_bytes(b"graph")
+
+    monkeypatch.setenv("FACTOR_HOME", str(tmp_path))
+    monkeypatch.setenv("SMRTI_HOME", str(tmp_path / "smrti_home"))
+    (tmp_path / "decision-model").mkdir()
+    for name in ("edgejev.json", "model.onnx"):
+        (tmp_path / "decision-model" / name).write_bytes((shared / name).read_bytes())
+
+    # An explicit directory wins over everything.
+    monkeypatch.setenv("SMRTI_DECISIONS_MODEL", str(explicit))
+    assert model_source.resolve() == explicit
+
+    # Without one, the copy Factor already has is used rather than a second
+    # 343 MB of the same weights.
+    monkeypatch.delenv("SMRTI_DECISIONS_MODEL")
+    assert model_source.resolve() == tmp_path / "decision-model"
+
+    # An explicit directory that holds no model is an error, not a fallback:
+    # somebody said where it is and was wrong, and quietly downloading
+    # another copy would hide that.
+    monkeypatch.setenv("SMRTI_DECISIONS_MODEL", str(tmp_path / "nothing-here"))
+    with pytest.raises(FileNotFoundError):
+        model_source.resolve()
+
+
+def test_the_artifact_is_checked_before_it_is_unpacked(tmp_path, monkeypatch):
+    import hashlib
+    from smrti.decisions import model as model_source
+
+    blob = _artifact(tmp_path)
+    served = tmp_path / "served.tar.gz"
+    served.write_bytes(blob)
+    url = served.as_uri()
+
+    destination = tmp_path / "model"
+    with pytest.raises(ValueError, match="checksum"):
+        model_source.fetch(destination, url=url, sha256="0" * 64)
+    assert not destination.exists(), "a model that failed its checksum was unpacked anyway"
+
+    model_source.fetch(destination, url=url, sha256=hashlib.sha256(blob).hexdigest())
+    assert model_source.is_ready(destination)
+    assert (destination / "model.onnx").read_bytes() == b"a graph"
+
+
+def test_a_half_unpacked_model_does_not_read_as_installed(tmp_path):
+    from smrti.decisions import model as model_source
+
+    directory = tmp_path / "model"
+    directory.mkdir()
+    assert not model_source.is_ready(directory)
+
+    (directory / "edgejev.json").write_text('{"max_len": 1024, "onnx_file": "model.onnx"}')
+    assert not model_source.is_ready(directory), "metadata without a graph is not a model"
+
+    (directory / "model.onnx").write_bytes(b"")
+    assert not model_source.is_ready(directory), "an empty graph is not a model"
+
+    (directory / "model.onnx").write_bytes(b"graph")
+    assert model_source.is_ready(directory)
+
+
+def test_the_archive_cannot_write_outside_its_directory(tmp_path):
+    import io, tarfile
+    from smrti.decisions import model as model_source
+
+    blob = io.BytesIO()
+    with tarfile.open(fileobj=blob, mode="w:gz") as tar:
+        info = tarfile.TarInfo("../escaped")
+        info.size = 3
+        tar.addfile(info, io.BytesIO(b"bad"))
+    blob.seek(0)
+
+    directory = tmp_path / "unpack"
+    directory.mkdir()
+    with tarfile.open(fileobj=blob) as tar:
+        with pytest.raises(ValueError, match="outside the archive"):
+            model_source._extract(tar, directory)
+    assert not (tmp_path / "escaped").exists()

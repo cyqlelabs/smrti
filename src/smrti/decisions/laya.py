@@ -1,5 +1,13 @@
 """Local adapter for the multilingual Laya typed-decision model.
 
+The model is Laya; the runtime is EdgeJev, which serves the same checkpoint
+as an int8 ONNX graph through onnxruntime. Nothing about the decisions
+changes — same three primitives, same calibration, same thresholds — but the
+weights are 343 MB instead of 1290 MB, resident size is about 560 MB instead
+of 2.9 GB, and torch is gone from the dependency tree entirely. On the boxes
+Smrti is meant to share with an agent, that is the difference between a
+decision engine and a machine that swaps.
+
 Laya exposes the same three primitives Smrti uses (``noul``, ``choice`` and
 ``score``), so the adapter only has to translate the question dataclasses to
 Laya's dictionaries and validate its answer through the shared provider
@@ -7,9 +15,9 @@ boundary. Inference is serialized on one worker because one model instance
 is shared by every sync and async caller.
 
 **The checkpoint is never loaded on a caller's thread.** Loading it means
-importing torch and, on a machine that has not cached the weights,
-downloading a 322M-parameter checkpoint from Hugging Face — minutes of work
-behind a decision that exists to save milliseconds. A caller that arrives
+mapping a 343 MB graph and, on a machine that has not got the weights,
+fetching them first — seconds to minutes of work behind a decision that
+exists to save milliseconds. A caller that arrives
 before the model is ready is told so immediately (``DecisionUnavailable``)
 and falls back to the deterministic path, which is what every decision site
 already does with that answer. The load runs once, on a daemon thread, and
@@ -20,20 +28,23 @@ the load sits behind the decision deadline, every recall waits the whole
 deadline because nothing remembers the last one already did, and a
 30-second wall appears in front of a retrieval that takes 48ms. A failed
 load then backs off rather than being retried per request, because each
-attempt imports torch before it can fail.
+attempt may re-try a 250 MB download before it can fail.
 
-A local checkpoint path can be supplied through ``SMRTI_DECISIONS_MODEL``
-to avoid any first-run download.
+A local model directory can be supplied through ``SMRTI_DECISIONS_MODEL`` to
+avoid any first-run download; see :mod:`smrti.decisions.model` for where the
+weights are looked for otherwise.
 """
 from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Mapping
 
+from . import model as model_source
 from .provider import (
     DecisionUnavailable,
     Decisions,
@@ -45,11 +56,32 @@ from .provider import (
 
 logger = logging.getLogger("smrti.decisions.laya")
 
-DEFAULT_MODEL = "convaiinnovations/laya-multilingual"
 
-# How long a failed load is left alone before another is attempted. Each
-# attempt imports torch and may re-try a download before it can fail, so
-# retrying per request costs far more than the decisions are worth.
+def _threads() -> int | None:
+    """How many cores inference may hold.
+
+    ``SMRTI_DECISIONS_THREADS`` decides; unset leaves the runtime's own
+    default. The cap exists because the machines this matters on have two
+    slow cores, and a decision that takes the whole box for 200 ms is worse
+    than one that takes half of it for 400.
+    """
+    raw = os.environ.get("SMRTI_DECISIONS_THREADS", "").strip()
+    if not raw:
+        return None
+    try:
+        threads = int(raw)
+    except ValueError:
+        logger.warning("SMRTI_DECISIONS_THREADS=%r is not a number; ignoring it", raw)
+        return None
+    return threads if threads > 0 else None
+
+# Empty means "resolve it": an explicit directory, the one Factor already
+# has, or Smrti's own — see :func:`smrti.decisions.model.resolve`.
+DEFAULT_MODEL = ""
+
+# How long a failed load is left alone before another is attempted. A failing
+# attempt may re-try a 250 MB download before it can fail, so retrying per
+# request costs far more than the decisions are worth.
 LOAD_RETRY_SECONDS = 900.0
 
 
@@ -65,8 +97,6 @@ class LayaProvider:
         device: str | None = None,
         agent: Any | None = None,
     ) -> None:
-        if not model:
-            raise ValueError("a Laya model id or local path is required")
         self.model = model
         self.device = device or None
         self._agent = agent
@@ -87,19 +117,25 @@ class LayaProvider:
         self._retry_at = 0.0
 
     def _load(self) -> Any:
-        """Import Laya and load the checkpoint. Runs on the loader thread."""
+        """Import the runtime and map the graph. Runs on the loader thread."""
         if self._agent is not None:
             return self._agent
         try:
-            import laya
+            import edgejev
         except ImportError as exc:
             raise DecisionUnavailable(
-                "Laya is missing from the Smrti core installation; reinstall Smrti's dependencies"
+                "the decision runtime is missing from the Smrti installation; "
+                "reinstall Smrti's dependencies"
             ) from exc
         try:
-            agent = laya.load(self.model, device=self.device)
+            directory = self.model or str(model_source.resolve())
         except Exception as exc:
-            raise DecisionUnavailable(f"could not load Laya model {self.model!r}: {exc}") from exc
+            raise DecisionUnavailable(f"no decision model to load: {exc}") from exc
+        try:
+            agent = edgejev.Agent(directory, threads=_threads(), provider=self.device or None)
+        except Exception as exc:
+            raise DecisionUnavailable(f"could not load the decision model at {directory!r}: {exc}") from exc
+        self.model = directory
         self._agent = agent
         return agent
 
@@ -112,7 +148,7 @@ class LayaProvider:
                 self._load_error = str(exc)
                 self._retry_at = time.monotonic() + LOAD_RETRY_SECONDS
             logger.warning(
-                "Laya model %r could not be loaded (%s); decisions fall back to the "
+                "the decision model %r could not be loaded (%s); decisions fall back to the "
                 "deterministic path and the load is retried in %.0f minutes",
                 self.model, exc, LOAD_RETRY_SECONDS / 60,
             )
@@ -120,7 +156,7 @@ class LayaProvider:
             with self._load_lock:
                 self._load_error = None
             logger.info(
-                "Laya model %r ready after %.1fs; decisions are live",
+                "the decision model %r is ready after %.1fs; decisions are live",
                 self.model, time.monotonic() - started,
             )
         finally:
@@ -155,11 +191,11 @@ class LayaProvider:
         with self._load_lock:
             error, loading = self._load_error, self._loader is not None
         if error is not None:
-            raise DecisionUnavailable(f"Laya is not available: {error}")
+            raise DecisionUnavailable(f"the decision model is not available: {error}")
         raise DecisionUnavailable(
-            f"the Laya model {self.model!r} is still loading"
+            "the decision model is still loading"
             if loading
-            else f"the Laya model {self.model!r} is not loaded"
+            else "the decision model is not loaded"
         )
 
     @property
@@ -191,11 +227,11 @@ class LayaProvider:
         except DecisionUnavailable:
             raise
         except Exception as exc:
-            raise DecisionUnavailable(f"Laya inference failed: {exc}") from exc
+            raise DecisionUnavailable(f"decision inference failed: {exc}") from exc
         if isinstance(result, Mapping):
             result = dict(result)
-            # Laya currently reports the generic architecture name. The
-            # configured checkpoint is the useful identity for audit/cache.
+            # The runtime reports the generic architecture name. The model
+            # actually loaded is the useful identity for audit and cache.
             result["model"] = self.model
         return result
 
@@ -243,7 +279,7 @@ class LayaProvider:
             result = future.result(timeout=deadline)
         except FutureTimeout as exc:
             future.cancel()
-            raise DecisionUnavailable(f"no answer from Laya within {deadline:.1f}s") from exc
+            raise DecisionUnavailable(f"no answer from the decision model within {deadline:.1f}s") from exc
         return self._read(result, questions, started)
 
     async def ask_async(
@@ -262,7 +298,7 @@ class LayaProvider:
             result = await asyncio.wait_for(asyncio.shield(wrapped), timeout=deadline)
         except asyncio.TimeoutError as exc:
             future.cancel()
-            raise DecisionUnavailable(f"no answer from Laya within {deadline:.1f}s") from exc
+            raise DecisionUnavailable(f"no answer from the decision model within {deadline:.1f}s") from exc
         return self._read(result, questions, started)
 
     def close(self) -> None:

@@ -43,8 +43,18 @@ jobs:
             ~/.cache/fastembed
             ~/.cache/huggingface
           key: models-${{ runner.os }}-v2
-      # NER runs on ONNX Runtime, so the install is wheels only — no torch, and
-      # the HuggingFace half of the cache above holds the exported NER model.
+      # The CPU build of torch, before anything can resolve the GPU one.
+      #
+      # NER still runs on ONNX Runtime, but the decision model does not: laya
+      # declares nothing but "torch>=2.0.0", and on Linux pip answers that
+      # with the CUDA build. Measured, that install is 5.6 GB, of which 3.2 GB
+      # is NVIDIA runtime libraries and 897 MB is triton — on a runner with no
+      # GPU, ~14 GB of disk, and a pip cache holding the same wheels again. It
+      # is what killed this job: the suite was OOM-killed mid-run (exit 137)
+      # and took the runner with it. Installing the CPU wheel first leaves
+      # laya's dependency already satisfied and the whole environment near
+      # 600 MB.
+      - run: pip install --index-url https://download.pytorch.org/whl/cpu torch
       - run: pip install -e ".[openai]" pytest pytest-cov
       - run: pytest tests/ -q --cov=smrti --cov-report=xml
       # One upload is enough; the other interpreters cover the same lines.

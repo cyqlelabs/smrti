@@ -65,7 +65,22 @@ DEFAULT_SUPERSESSION_MIN_CONFIDENCE = 0.6
 DEFAULT_ENTITY_MIN_CONFIDENCE = 0.6
 DEFAULT_ENTITY_CANDIDATES = 5
 
-DEFAULT_TIMEOUT = 30.0
+# How long a decision may hold up the work it is advising. A decision is an
+# aside inside a request a client is waiting on — retrieval itself is tens of
+# milliseconds — so the deadline belongs on that scale and not on a model
+# download's. At 30s it was longer than the whole budget every caller gives
+# the engine: a recall that waited it out returned well after Factor's 10s
+# ambient recall and its 30s HTTP ceiling had both given up, so the deadline
+# was only ever reached by a request nobody was still listening to.
+DEFAULT_TIMEOUT = 5.0
+
+# How long the engine stops asking after the provider could not answer. A
+# provider that just failed almost certainly fails again, and paying the
+# deadline per request is how one unavailable model becomes a wall in front
+# of every recall. One request per window pays it; the rest fall straight
+# through to the deterministic path.
+DEFAULT_COOLDOWN = 60.0
+
 DEFAULT_CACHE_SIZE = 256
 
 
@@ -104,6 +119,7 @@ class DecisionPolicy:
     model: str = ""
     device: str = ""
     timeout: float = DEFAULT_TIMEOUT
+    cooldown: float = DEFAULT_COOLDOWN
     cache_size: int = DEFAULT_CACHE_SIZE
     routing_skip: float = DEFAULT_ROUTING_SKIP
     routing_force: float = DEFAULT_ROUTING_FORCE
@@ -151,6 +167,7 @@ class DecisionPolicy:
             model=env.get("SMRTI_DECISIONS_MODEL", "").strip(),
             device=env.get("SMRTI_DECISIONS_DEVICE", "").strip(),
             timeout=_float(env, "SMRTI_DECISIONS_TIMEOUT", DEFAULT_TIMEOUT),
+            cooldown=_float(env, "SMRTI_DECISIONS_COOLDOWN", DEFAULT_COOLDOWN),
             cache_size=_int(env, "SMRTI_DECISIONS_CACHE", DEFAULT_CACHE_SIZE),
             routing_skip=_float(env, "SMRTI_DECISIONS_ROUTING_SKIP", DEFAULT_ROUTING_SKIP),
             routing_force=_float(env, "SMRTI_DECISIONS_ROUTING_FORCE", DEFAULT_ROUTING_FORCE),

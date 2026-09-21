@@ -32,9 +32,13 @@ RUN apt-get update \
  && apt-get install -y --no-install-recommends libgomp1 \
  && rm -rf /var/lib/apt/lists/*
 
+# SMRTI_HOME keeps the decision model in the volume. It is 250MB, fetched on
+# the first decision, and under $HOME it would die with the container and be
+# fetched again by the next one.
 ENV PYTHONUNBUFFERED=1 \
     HOME=/home/smrti \
     SMRTI_DB=/data/memory.db \
+    SMRTI_HOME=/data \
     FASTEMBED_CACHE_PATH=/opt/smrti/models \
     HF_HOME=/data/models \
     XDG_CACHE_HOME=/data/cache

@@ -84,6 +84,32 @@ DEFAULT_MODEL = ""
 # request costs far more than the decisions are worth.
 LOAD_RETRY_SECONDS = 900.0
 
+# How many questions ride in one native call.
+#
+# Batching is not an optimization here, and it does not leave the answer
+# alone either. Measured on the real checkpoint against twenty candidates'
+# eighty evidence questions: one at a time took 185.6s and peaked at 1015 MB,
+# while all eighty in a single call took 197.9s and peaked at 21798 MB. The
+# one big call is slower *and* twenty-one times the memory, because the
+# runtime reserves the whole batch's attention buffers before it starts and
+# its session holds them at that peak afterwards. That is how a 100 MB engine
+# became a 25 GB one within a minute of a single turn.
+#
+# It is also a different answer, reproducibly: run twice, each shape repeats
+# itself exactly (drift 0.0000), while one question's probability moves by up
+# to 0.33 depending only on which other questions were sent with it. These
+# are independent propositions about independent candidates, so an answer
+# that moves with its neighbours is the contaminated one. One question per
+# call is the only shape that answers each on its own evidence.
+MAX_QUESTIONS_PER_CALL = 1
+
+
+def _tokens(usage: Mapping[str, Any], name: str) -> int:
+    try:
+        return int(usage.get(name, 0) or 0)
+    except (TypeError, ValueError):
+        return 0
+
 
 class LayaProvider:
     """A lazy, process-local Laya provider with bounded, serialized calls."""
@@ -101,6 +127,10 @@ class LayaProvider:
         self.device = device or None
         self._agent = agent
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="smrti-laya")
+        # When the one worker is running a prediction, this is when it
+        # started; 0.0 while it is idle. Read by ``_refuse_if_overrun`` to
+        # tell a busy model from one that has stopped answering.
+        self._running_since = 0.0
         self._accounting_lock = threading.Lock()
         self.input_tokens = 0
         self.output_tokens = 0
@@ -219,21 +249,73 @@ class LayaProvider:
             thread.join(timeout)
         return self._agent is not None
 
-    def _predict(self, state: State, questions: Mapping[str, Question]) -> Any:
+    def _predict(
+        self,
+        state: State,
+        questions: Mapping[str, Question],
+        stop_at: float | None = None,
+    ) -> Any:
         if not questions:
             raise ValueError("a decision needs at least one question")
+        agent = self._require_ready()
+        items = list(questions.items())
+        answers: dict[str, Any] = {}
+        input_tokens = 0
+        output_tokens = 0
+        self._running_since = time.monotonic()
         try:
-            result = self._require_ready().predict(state, questions_payload(questions))
-        except DecisionUnavailable:
-            raise
-        except Exception as exc:
-            raise DecisionUnavailable(f"decision inference failed: {exc}") from exc
-        if isinstance(result, Mapping):
-            result = dict(result)
+            for start in range(0, len(items), MAX_QUESTIONS_PER_CALL):
+                if start and stop_at is not None and time.monotonic() >= stop_at:
+                    # Nobody is waiting for this any more. Every question has
+                    # to be answered for the reply to parse, so there is
+                    # nothing here worth salvaging — and the whole point of
+                    # stopping is to not spend the next chunk's memory and
+                    # cores on an answer that will never be read.
+                    raise DecisionUnavailable(
+                        f"the decision model answered {len(answers)} of {len(items)} "
+                        "questions before the deadline"
+                    )
+                chunk = dict(items[start : start + MAX_QUESTIONS_PER_CALL])
+                try:
+                    piece = agent.predict(state, questions_payload(chunk))
+                except DecisionUnavailable:
+                    raise
+                except Exception as exc:
+                    raise DecisionUnavailable(f"decision inference failed: {exc}") from exc
+                if not isinstance(piece, Mapping):
+                    raise DecisionUnavailable("reply is not an object")
+                part = piece.get("answers")
+                if isinstance(part, Mapping):
+                    answers.update(part)
+                usage = piece.get("usage")
+                if isinstance(usage, Mapping):
+                    input_tokens += _tokens(usage, "input_tokens")
+                    output_tokens += _tokens(usage, "output_tokens")
+        finally:
+            self._running_since = 0.0
+        return {
+            "answers": answers,
+            "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
             # The runtime reports the generic architecture name. The model
             # actually loaded is the useful identity for audit and cache.
-            result["model"] = self.model
-        return result
+            "model": self.model,
+        }
+
+    def _refuse_if_overrun(self, deadline: float) -> None:
+        """Fail now rather than queue behind a call already later than this.
+
+        Inference is serialized on one worker and a running call cannot be
+        cancelled — ``Future.cancel`` does nothing once the work has started.
+        So a caller that queues behind one which has already outrun its own
+        deadline spends its whole deadline in a wait that cannot succeed, and
+        so does every caller behind it. The deterministic path is right there
+        and costs nothing.
+        """
+        started = self._running_since
+        if started and time.monotonic() - started >= deadline:
+            raise DecisionUnavailable(
+                "the decision model is busy with a call that outran its deadline"
+            )
 
     def _read(
         self,
@@ -273,11 +355,14 @@ class LayaProvider:
     ) -> Decisions:
         deadline = self._deadline(timeout)
         self._require_ready()
+        self._refuse_if_overrun(deadline)
         started = time.monotonic()
-        future = self._executor.submit(self._predict, state, questions)
+        future = self._executor.submit(self._predict, state, questions, started + deadline)
         try:
             result = future.result(timeout=deadline)
         except FutureTimeout as exc:
+            # Cancelling only helps while the work is still queued; one that
+            # has started stops at its next question, on ``stop_at``.
             future.cancel()
             raise DecisionUnavailable(f"no answer from the decision model within {deadline:.1f}s") from exc
         return self._read(result, questions, started)
@@ -291,12 +376,15 @@ class LayaProvider:
     ) -> Decisions:
         deadline = self._deadline(timeout)
         self._require_ready()
+        self._refuse_if_overrun(deadline)
         started = time.monotonic()
-        future = self._executor.submit(self._predict, state, questions)
+        future = self._executor.submit(self._predict, state, questions, started + deadline)
         wrapped = asyncio.wrap_future(future)
         try:
             result = await asyncio.wait_for(asyncio.shield(wrapped), timeout=deadline)
         except asyncio.TimeoutError as exc:
+            # Cancelling only helps while the work is still queued; one that
+            # has started stops at its next question, on ``stop_at``.
             future.cancel()
             raise DecisionUnavailable(f"no answer from the decision model within {deadline:.1f}s") from exc
         return self._read(result, questions, started)

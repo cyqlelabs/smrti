@@ -182,11 +182,10 @@ def _laya(handler, **kwargs) -> LayaProvider:
 
 
 def test_laya_runs_locally_and_reads_every_answer_kind():
-    seen = {}
+    calls = []
 
     def handler(state, questions):
-        seen["state"] = state
-        seen["questions"] = questions
+        calls.append((state, questions))
         return _reply(questions)
 
     provider = _laya(handler, model="/models/laya-multilingual", device="cpu")
@@ -197,16 +196,76 @@ def test_laya_runs_locally_and_reads_every_answer_kind():
     }
     decisions = provider.ask({"text": "hola"}, questions, timeout=2.0)
 
-    assert seen["state"] == {"text": "hola"}
-    assert seen["questions"]["n"] == {"type": "noul", "instructions": "is it?"}
-    assert seen["questions"]["c"]["criteria"] == {"a": "first", "b": "second"}
+    # One question per native call — see MAX_QUESTIONS_PER_CALL. The state is
+    # repeated with each, since every question is answered against all of it.
+    assert len(calls) == 3
+    assert [state for state, _ in calls] == [{"text": "hola"}] * 3
+    assert all(len(body) == 1 for _, body in calls)
+    sent = {key: body for _, asked in calls for key, body in asked.items()}
+    assert sent["n"] == {"type": "noul", "instructions": "is it?"}
+    assert sent["c"]["criteria"] == {"a": "first", "b": "second"}
     assert decisions.noul("n") == 0.8
     assert decisions.choice("c").choice == "a"
     assert decisions["s"].score == 0.0
     assert decisions.model == "/models/laya-multilingual"
     assert provider.device == "cpu"
-    assert provider.input_tokens == 42
+    # Usage is summed over the calls one ``ask`` made, not read off the last.
+    assert provider.input_tokens == 42 * 3
     assert provider.requests == 1
+    provider.close()
+
+
+def test_laya_stops_asking_once_the_deadline_has_passed():
+    """A caller that has given up must not go on paying for the rest.
+
+    Every question has to be answered for a reply to parse, so a run cut
+    short is unavailable rather than partial — but the questions after the
+    deadline are never asked, which is the point: each one reserves its own
+    memory and holds the single worker for as long as it runs.
+    """
+    asked = []
+
+    def handler(_state, questions):
+        asked.extend(questions)
+        time.sleep(0.05)
+        return _reply(questions)
+
+    provider = _laya(handler)
+    questions = {f"q{i}": Noul("?") for i in range(20)}
+    with pytest.raises(DecisionUnavailable):
+        provider.ask("s", questions, timeout=0.12)
+    assert 0 < len(asked) < 20  # it stopped rather than working through all
+    provider.close()
+
+
+def test_laya_refuses_rather_than_queues_behind_an_overrun_call():
+    """Inference is serialized on one worker, and a running call cannot be
+    cancelled, so queueing behind one that already outran the caller's
+    deadline is a wait that cannot succeed."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def handler(_state, questions):
+        started.set()
+        release.wait(5.0)
+        return _reply(questions)
+
+    provider = _laya(handler)
+
+    def overrun():
+        try:
+            provider.ask("s", {"q": Noul("?")}, timeout=0.05)
+        except DecisionUnavailable:
+            pass
+
+    slow = threading.Thread(target=overrun, daemon=True)
+    slow.start()
+    assert started.wait(2.0)
+    time.sleep(0.15)  # the running call is now well past a 0.05s deadline
+    with pytest.raises(DecisionUnavailable, match="outran its deadline"):
+        provider.ask("s", {"q2": Noul("?")}, timeout=0.05)
+    release.set()
+    slow.join(5.0)
     provider.close()
 
 

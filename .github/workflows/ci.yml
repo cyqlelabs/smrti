@@ -74,7 +74,29 @@ jobs:
           get_embedding_provider().embed('warm')
           get_ner().extract('Alice works at Acme in Amsterdam.')
           "
-      - run: pytest tests/ -q --cov=smrti --cov-report=xml
+      # The suite in three processes rather than one.
+      #
+      # test (3.13) was losing its runner partway through — OOM-killed with
+      # exit 137 on the first occurrence — while 3.10, 3.11 and 3.12 finished
+      # the same suite on the same dependencies. Measured here, memory across
+      # a run only ever goes up: the embedding and NER models are process-wide
+      # singletons by design, every database the tests open adds to the same
+      # heap, and nothing gives any of it back until the process exits. Which
+      # allocation tips one interpreter over is not visible from outside the
+      # runner, and does not have to be: what the job needs is a smaller peak,
+      # and three processes have a third of the accumulation each.
+      #
+      # Every file runs exactly once — the split is a deterministic slice of
+      # the sorted list, so nothing is skipped or reordered — and --cov-append
+      # combines the three into the one report codecov reads. Verified against
+      # a single-process run: same pass and fail counts, and byte-identical
+      # coverage (4568 valid, 4167 covered).
+      - run: |
+          files=( $(ls tests/test_*.py | sort) )
+          per=$(( (${#files[@]} + 2) / 3 ))
+          pytest "${files[@]:0:per}"      -q --cov=smrti --cov-report=
+          pytest "${files[@]:per:per}"    -q --cov=smrti --cov-report= --cov-append
+          pytest "${files[@]:$((per*2))}" -q --cov=smrti --cov-report=xml --cov-append
       # One upload is enough; the other interpreters cover the same lines.
       - if: matrix.python-version == '3.12'
         uses: codecov/codecov-action@v4

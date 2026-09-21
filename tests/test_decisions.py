@@ -903,6 +903,12 @@ def test_predict_passes_the_unready_signal_through_unchanged():
         with pytest.raises(DecisionUnavailable) as raised:
             provider._predict("s", {"q": Noul("?")})
         assert "inference failed" not in str(raised.value)
+        # Leave nothing in flight: a loader thread still running when the
+        # interpreter exits is what aborts the process.
+        deadline = time.monotonic() + 5
+        while provider._loader is not None and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert provider._loader is None
     finally:
         provider.close()
 
@@ -1226,3 +1232,20 @@ def test_replacing_the_shared_engine_survives_a_provider_that_will_not_close():
     reset_decisions(DecisionEngine(DecisionPolicy(), _StubbornProvider()))
     # Releasing it must not propagate: the replacement is already in place.
     reset_decisions(None)
+
+
+def test_the_suite_can_never_start_a_real_checkpoint_load():
+    """The guard in conftest is the reason chunk one stopped aborting.
+
+    A bare LayaProvider begins a real load on a background thread, and in
+    CI — where laya is installed — that thread imports torch. Killed
+    mid-import when the interpreter exits, it takes the process with it
+    (SIGABRT, exit 134) after every test has already passed. This pins the
+    stub in place so that cannot come back unnoticed.
+    """
+    import laya
+
+    # The stub is a bare module object, so it has no file on disk at all.
+    assert getattr(laya, "__file__", None) is None
+    with pytest.raises(RuntimeError, match="never loads a real checkpoint"):
+        laya.load("convaiinnovations/laya-multilingual")

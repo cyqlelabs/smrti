@@ -565,3 +565,19 @@ def test_the_attend_route(client):
     resp = client.post("/attend", json={"atom_ids": [atom_id]})
     assert resp.status_code == 200 and resp.json()["boosted"] == 1
     assert client.post("/attend", json={"atom_ids": []}).status_code == 422
+
+
+def test_in_llm_mode_the_skip_route_touches_no_tagger(tmp_path):
+    # llm mode is for machines that cannot hold the 2.3 GB tagger; a message
+    # the gate judged not worth a claim must not load it for the mentions.
+    mem = _mem(tmp_path, _engine(_route_provider(0.05, 0.02, 0.05), routing="active"))
+    episode_id, claims_only, full, ner = _hybrid(
+        mem, "Thanks Nico, that worked at Cyqle",
+        [{"name": "Nico", "type": "person"}, {"name": "Cyqle", "type": "organization"}],
+        mode="llm",
+    )
+    ner.extract.assert_not_called()
+    claims_only.assert_not_awaited()
+    full.assert_not_awaited()
+    assert _mentions(mem, episode_id) == []
+    assert _row(mem, episode_id) is not None  # the episode itself stays

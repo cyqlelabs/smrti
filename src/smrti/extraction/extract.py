@@ -1105,7 +1105,12 @@ async def extract_and_link_hybrid(
             tenant_id=mem.tenant_id, space=mem.write_space,
         )
     if route is not None and route.skip:
-        await _link_local_entities(episode_id, content, mem, source)
+        # The episode is stored and embedded already; what the skip route
+        # adds is the mentions edges local NER can find. In llm mode there
+        # is no local NER — that mode is for machines that cannot hold the
+        # tagger — so the episode stays reachable by its vector alone.
+        if mode != "llm":
+            await _link_local_entities(episode_id, content, mem, source)
         return
 
     if source == "agent" or mode == "llm":

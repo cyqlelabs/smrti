@@ -52,8 +52,11 @@ EXTRACT_URL: str = (
 EXTRACT_MODEL: str = os.environ.get("SMRTI_EXTRACT_MODEL", "")
 # Resolve relative dates ("mañana", "next Friday") against the write time as
 # episodes are stored, so a memory read back next week still says which day it
-# meant. Costs one NER pass per write; set to 0 to store text verbatim.
-TEMPORAL: bool = os.environ.get("SMRTI_TEMPORAL", "1") == "1"
+# meant. Costs one NER pass per write; set to 0 to store text verbatim. Never
+# in llm mode: that mode exists for machines that cannot hold local models,
+# the tagger is a 2.3 GB one, and the extraction model resolves dates itself
+# there (the TEMPORAL section of its prompt).
+TEMPORAL: bool = os.environ.get("SMRTI_TEMPORAL", "1") == "1" and EXTRACT_MODE != "llm"
 # Thinking mode for extraction LLM calls.
 # "auto"     — don't modify the request (default)
 # "disabled" — pass chat_template_kwargs={"enable_thinking":false} to suppress

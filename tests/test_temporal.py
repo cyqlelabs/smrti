@@ -281,3 +281,20 @@ def test_a_failure_anywhere_leaves_the_text_exactly_as_written(monkeypatch):
     monkeypatch.setattr(temporal_mod, "resolve_spans", _boom)
 
     assert annotate("The session is tomorrow", BASE) == "The session is tomorrow"
+
+
+def test_llm_mode_never_runs_the_tagger(monkeypatch):
+    import importlib
+
+    from smrti.servers import config as cfg_mod
+
+    monkeypatch.setenv("SMRTI_EXTRACT_MODE", "llm")
+    try:
+        importlib.reload(cfg_mod)
+        assert cfg_mod.TEMPORAL is False
+        monkeypatch.setenv("SMRTI_EXTRACT_MODE", "hybrid")
+        importlib.reload(cfg_mod)
+        assert cfg_mod.TEMPORAL is True
+    finally:
+        monkeypatch.delenv("SMRTI_EXTRACT_MODE", raising=False)
+        importlib.reload(cfg_mod)

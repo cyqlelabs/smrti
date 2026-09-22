@@ -1022,7 +1022,7 @@
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
               <span class="arch-layer-name">decisions</span>
-              <span class="arch-layer-files">engine.py (the one door, cached) &middot; policies.py &middot; provider.py &middot; laya.py (int8 ONNX, no PyTorch) &middot; model.py &middot; retrieval.py (rerank) &middot; extraction.py (routing, supersession, entity) &middot; audit.py</span>
+              <span class="arch-layer-files">engine.py (the one door, cached) &middot; policies.py &middot; provider.py &middot; laya.py (int8 ONNX, no PyTorch) &middot; model.py &middot; retrieval.py (rerank) &middot; extraction.py (routing, supersession, entity, tone) &middot; audit.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -1204,6 +1204,14 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           <div class="usecase-card">
             <div class="usecase-title">entity</div>
             <div class="usecase-desc">Which existing atom an uncertain mention names. Under the confidence line, a duplicate is made rather than a wrong merge.</div>
+            <div class="usecase-card">
+            <div class="usecase-title">tone</div>
+            <div class="usecase-desc">Whose an estimated negative valence is: about the thing the memory describes, or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned.</div>
+          </div>
+        </div>
+          <div class="usecase-card">
+            <div class="usecase-title">tone</div>
+            <div class="usecase-desc">Whose an estimated negative valence is: about the thing the memory describes, or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned.</div>
           </div>
         </div>
 

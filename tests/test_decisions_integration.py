@@ -22,7 +22,7 @@ import smrti.core.embed as embed_module
 from smrti import Smrti
 from smrti.core.provenance import SOURCE_AGENT, VALENCE_STATED
 from smrti.decisions import Choice, DecisionEngine, DecisionPolicy, MODE_OFF, Noul, StaticProvider, TASKS, audit
-from smrti.decisions.extraction import COMPATIBLE, EXPLICIT_UPDATE
+from smrti.decisions.extraction import COMPATIBLE, EXPLICIT_UPDATE, TONE_DECISION, TONE_SPEAKER, TONE_THING
 from smrti.extraction.extract import SUPERSESSION_DEFERRED, _link_claims, extract_and_link_hybrid
 from smrti.extraction.resolve import EntityResolver
 from smrti.servers.mcp import handle_tool
@@ -500,6 +500,105 @@ def test_an_embedding_match_is_verified_too(tmp_path):
     duplicate = _resolver(mem, provider, **kwargs).resolve("Alice", "person", "t", "s", ["s"])
     assert duplicate != smith
     assert provider.calls and provider.calls[0]["state"]["candidates"][0]["label"] == "Alice Smith"
+
+
+# ── tone ─────────────────────────────────────────────────────────────────────
+
+
+def _tone_provider(label: str, confidence: float = 0.9) -> StaticProvider:
+    def answer(_k, question, _s):
+        assert isinstance(question, Choice)
+        return {"type": "choice", "choice": label, "probabilities": {label: confidence}, "confidence": confidence}
+
+    return StaticProvider(answer)
+
+
+@pytest.fixture
+def grim_estimate(monkeypatch):
+    """The sentiment estimator reads every text as a grave one — the reading
+    a curt request or an apology gets, and the one that buys a pruning floor."""
+    monkeypatch.setattr("smrti.estimate_valence", lambda text, embed: -0.9)
+
+
+def test_a_speakers_mood_is_damped_under_every_line_it_used_to_cross(tmp_path, grim_estimate):
+    provider = _tone_provider(TONE_SPEAKER)
+    mem = _mem(tmp_path, _engine(provider, tone="active"))
+    atom_id = mem.remember("cerra el navegador")
+    row = _row(mem, atom_id)
+    damped = -0.9 * mem.decisions.policy.tone_damping
+    # both pairs carry the damped tone, and the intensity follows it
+    assert row["valence"] == pytest.approx(damped)
+    assert row["intrinsic_valence"] == pytest.approx(damped)
+    assert row["intensity"] == pytest.approx(abs(damped))
+    assert row["intrinsic_intensity"] == pytest.approx(abs(damped))
+    # no pruning floor: the estimate alone would have bought one at −0.9
+    assert row["lti"] == 0.0
+    meta = json.loads(row["metadata"])
+    assert meta[TONE_DECISION] == {"estimate": -0.9, "label": TONE_SPEAKER, "confidence": 0.9}
+    # still an estimate: no decision may state a valence
+    assert VALENCE_STATED not in meta
+    assert provider.calls[0]["state"]["author"] == "user"
+    assert audit.counters()[("tone", "active", TONE_SPEAKER)] == 1
+
+
+def test_a_verdict_on_the_thing_itself_keeps_the_estimate_and_its_floor(tmp_path, grim_estimate):
+    mem = _mem(tmp_path, _engine(_tone_provider(TONE_THING), tone="active"))
+    row = _row(mem, mem.remember("the deploy wiped the production volume"))
+    assert row["valence"] == pytest.approx(-0.9) and row["intrinsic_valence"] == pytest.approx(-0.9)
+    assert row["lti"] == 0.5
+    assert TONE_DECISION not in json.loads(row["metadata"])
+
+
+def test_a_stated_valence_is_never_questioned(tmp_path, grim_estimate):
+    provider = _tone_provider(TONE_SPEAKER)
+    mem = _mem(tmp_path, _engine(provider, tone="active"))
+    row = _row(mem, mem.remember("never deploy without a backup", valence=-0.8))
+    assert row["valence"] == pytest.approx(-0.8) and row["lti"] == 0.5
+    assert json.loads(row["metadata"])[VALENCE_STATED] is True
+    assert provider.calls == []
+
+
+def test_shadow_tone_stores_the_estimate_and_records_the_verdict(tmp_path, grim_estimate):
+    mem = _mem(tmp_path, _engine(_tone_provider(TONE_SPEAKER), tone="shadow"))
+    row = _row(mem, mem.remember("cerra el navegador"))
+    assert row["valence"] == pytest.approx(-0.9) and row["lti"] == 0.5
+    assert TONE_DECISION not in json.loads(row["metadata"])
+    record = audit.get_all()[0]
+    assert record["task"] == "tone" and record["mode"] == "shadow" and not record["applied"]
+
+
+def test_an_unavailable_tone_judge_stores_the_estimate(tmp_path, grim_estimate):
+    class _Down:
+        name = "down"
+        model = "m"
+
+        def ask(self, *a, **k):
+            from smrti.decisions import DecisionUnavailable
+            raise DecisionUnavailable("loading")
+
+    mem = _mem(tmp_path, _engine(_Down(), tone="active"))
+    row = _row(mem, mem.remember("cerra el navegador"))
+    assert row["valence"] == pytest.approx(-0.9)
+    assert TONE_DECISION not in json.loads(row["metadata"])
+
+
+def test_beliefs_and_the_remember_tool_go_through_the_same_judge(tmp_path, grim_estimate):
+    provider = _tone_provider(TONE_SPEAKER)
+    mem = _mem(tmp_path, _engine(provider, tone="active"))
+    row = _row(mem, mem.believe("disculpa por la frustración causada", 0.8, source=SOURCE_AGENT))
+    assert row["valence"] == pytest.approx(-0.9 * mem.decisions.policy.tone_damping)
+    assert provider.calls[-1]["state"] == {
+        "text": "disculpa por la frustración causada", "author": "assistant", "kind": "belief",
+    }
+    out = handle_tool(mem, "smrti_remember", {"content": "¿y por qué afirmaste que seguía con timeouts?",
+                                              "source": "agent"})
+    assert provider.calls[-1]["state"]["author"] == "assistant"
+    assert TONE_DECISION in json.loads(_row(mem, out["atom_id"])["metadata"])
+    # a stated one through the tool is a report, and stands
+    out = handle_tool(mem, "smrti_remember", {"content": "no afirmar problemas sin verificarlos primero",
+                                              "type": "belief", "valence": -0.8})
+    assert _row(mem, out["atom_id"])["valence"] == pytest.approx(-0.8)
+    assert len(provider.calls) == 2
 
 
 # ── the server surface ───────────────────────────────────────────────────────

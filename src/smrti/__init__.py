@@ -35,6 +35,7 @@ from smrti.core.provenance import (
     VALENCE_STATED,
 )
 from smrti.decisions import DecisionEngine, get_decisions
+from smrti.decisions.extraction import TONE_DECISION, judge_tone
 from smrti.decisions.retrieval import make_judge
 from smrti.extraction.sentiment import estimate_valence
 from smrti.extraction.resolve import EntityResolver
@@ -225,7 +226,9 @@ class Smrti:
             )
         self._note_activity()
         content, temporal = self._resolve_deixis(content)
-        valence, stated = self._resolve_valence(content, valence)
+        valence, stated, tone = self._resolve_valence(
+            content, valence, source=(metadata or {}).get("source", SOURCE_USER), kind=type
+        )
         atom = Atom(
             type=AtomType(type),
             label=content[:100],
@@ -240,7 +243,7 @@ class Smrti:
             tenant_id=self.tenant_id,
             space=self.write_space,
             metadata=self._with_temporal(
-                {**_write_metadata("", stated), **(metadata or {})}, temporal
+                {**_write_metadata("", stated), **tone, **(metadata or {})}, temporal
             ),
         )
         return self.atomspace.add_atom(atom)
@@ -268,17 +271,40 @@ class Smrti:
             metadata["temporal"] = temporal
         return metadata
 
-    def _resolve_valence(self, content: str, valence: float | None) -> tuple[float, bool]:
-        """Return the atom's tone and whether the caller was the one who set it.
+    def _resolve_valence(
+        self, content: str, valence: float | None, *, source: str, kind: str
+    ) -> tuple[float, bool, dict]:
+        """Return the atom's tone, whether the caller was the one who set it,
+        and the metadata the tone decision left, if it changed anything.
 
         Estimation lives here rather than in each caller so the answer to "did
         someone report this, or did a model read the mood of the words?" is
         decided once. Only the first can become a behavioral constraint at
         recall, and a caller that had to remember to say so would forget.
+
+        An estimate is then put to the ``tone`` decision task: the estimator
+        scores the mood of the words, and a curt request or an apology reads
+        as negative as the failure it is about, so a confident verdict that
+        the tone is the speaker's damps it (see
+        :func:`smrti.decisions.extraction.judge_tone`). A stated valence is
+        never questioned — the caller made a report, and the report stands.
         """
-        if valence is None:
-            return estimate_valence(content, self.embed), False
-        return valence, True
+        if valence is not None:
+            return valence, True, {}
+        estimate = estimate_valence(content, self.embed)
+        verdict = judge_tone(
+            self.decisions, text=content, estimate=estimate, source=source, kind=kind,
+            tenant_id=self.tenant_id, space=self.write_space,
+        )
+        if verdict is None or not verdict.damped:
+            return estimate, False, {}
+        return verdict.valence, False, {
+            TONE_DECISION: {
+                "estimate": round(estimate, 3),
+                "label": verdict.label,
+                "confidence": round(verdict.confidence, 4),
+            }
+        }
 
     @staticmethod
     def _resolve_intensity(valence: float, intensity: float | None) -> float:
@@ -381,7 +407,9 @@ class Smrti:
             else INITIAL_CONFIDENCE["belief"]
         )
         statement, temporal = self._resolve_deixis(statement)
-        valence, stated = self._resolve_valence(statement, valence)
+        valence, stated, tone = self._resolve_valence(
+            statement, valence, source=source, kind=AtomType.BELIEF.value
+        )
         atom = Atom(
             type=AtomType.BELIEF,
             label=statement[:100],
@@ -393,7 +421,7 @@ class Smrti:
             tenant_id=self.tenant_id,
             space=self.write_space,
             metadata=self._with_temporal(
-                {**_write_metadata(source, stated), **(metadata or {})}, temporal
+                {**_write_metadata(source, stated), **tone, **(metadata or {})}, temporal
             ),
         )
         atom_id = self.atomspace.add_atom(atom)

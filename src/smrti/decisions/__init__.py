@@ -2,12 +2,13 @@
 
 Smrti's memory engine — SQLite, embeddings, the PLN arithmetic, the
 lifecycle rules — is deterministic and stays so. This package adds bounded
-judgements at four points where a rule cannot see what a sentence means and
+judgements at five points where a rule cannot see what a sentence means and
 a generative LLM call would be the expensive way to find out: whether a
 message holds anything worth extracting (``routing``), which retrieved
 memories are evidence for a question (``rerank``), whether a new claim
-really replaces an older one (``supersession``), and whether an uncertain
-name match is the same entity (``entity``). Each is active by default, can be
+really replaces an older one (``supersession``), whether an uncertain
+name match is the same entity (``entity``), and whether an estimated
+valence is the memory's own or the speaker's mood (``tone``). Each is active by default, can be
 put in shadow or disabled independently, and falls back to the deterministic
 path on any failure.
 
@@ -19,7 +20,9 @@ What a decision may never do: restore a forgotten atom, confer permanence,
 change tenant or space scope, or mint a critical warning. A critical
 warning needs a valence the caller stated, and a model's reading of the
 text is an estimate, which is why no code path here writes
-``VALENCE_STATED``.
+``VALENCE_STATED``. The one decision that touches a valence at all only ever
+shrinks an estimate, never a stated value and never past zero: it can take
+a pruning floor away from a curt request, not hand one to anything.
 """
 from __future__ import annotations
 
@@ -36,6 +39,7 @@ from .policies import (
     TASK_RERANK,
     TASK_ROUTING,
     TASK_SUPERSESSION,
+    TASK_TONE,
     TASKS,
     DecisionPolicy,
 )
@@ -68,6 +72,7 @@ __all__ = [
     "TASK_RERANK",
     "TASK_ROUTING",
     "TASK_SUPERSESSION",
+    "TASK_TONE",
     "build_engine",
     "decision_counters",
     "decision_records",

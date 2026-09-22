@@ -9,6 +9,7 @@ import os
 
 import pytest
 
+from bench.decisions import tone
 from bench.decisions.run import DEFAULT_SET, MUST_EXTRACT_KINDS, load_items, main, score_routes
 from bench.harness import apply_run_modes, config_hash
 
@@ -93,3 +94,58 @@ def test_the_decisions_mode_enters_the_fingerprint(monkeypatch):
     assert get_decisions().policy.mode("rerank") == "shadow"
     os.environ.pop("SMRTI_DECISIONS_RERANK", None)
     reset_decisions(None)
+
+
+# ── the tone set ─────────────────────────────────────────────────────────────
+
+
+def test_the_tone_set_is_labeled_in_three_languages():
+    items = tone.load_items(tone.DEFAULT_SET)
+    assert len(items) >= 25
+    assert all(i["label"] in (tone.KEEP, tone.DAMP) for i in items)
+    assert all(i["author"] in ("user", "assistant") for i in items)
+    kinds = {i["kind"] for i in items}
+    assert {"failure", "rule", "preference", "apology", "thanks", "request"} <= kinds
+    assert {i["lang"] for i in items} >= {"en", "es", "de"}
+    # the estimate the check is asked about crosses every line a tone can
+    assert tone.ESTIMATE < -0.7
+
+
+def test_the_tone_report_pairs_damps_with_false_damps():
+    items = [
+        {"text": "sorry", "label": "speaker", "kind": "apology", "lang": "en"},
+        {"text": "gracias", "label": "speaker", "kind": "thanks", "lang": "es"},
+        {"text": "the deploy failed", "label": "thing", "kind": "failure", "lang": "en"},
+        {"text": "never deploy", "label": "thing", "kind": "rule", "lang": "en"},
+        {"text": "close it", "label": "speaker", "kind": "request", "lang": "en"},
+    ]
+    verdicts = [
+        {"label": "speaker", "confidence": 0.6, "damped": True, "raw_label": "speaker"},
+        {"label": "thing", "confidence": 0.1, "damped": False, "raw_label": "speaker"},   # under the line
+        {"label": "speaker", "confidence": 0.7, "damped": True, "raw_label": "speaker"},  # the false damp
+        {"label": "thing", "confidence": 0.3, "damped": False, "raw_label": "speaker"},   # the margin
+        {"label": None},                                                                # unavailable
+    ]
+    report = tone.score_verdicts(items, verdicts)
+    assert report["damp_rate"] == {"n": 3, "damped": 1, "rate": pytest.approx(1 / 3)}
+    assert report["damped_by_kind"]["apology"] == {"n": 1, "damped": 1, "rate": 1.0}
+    assert report["damped_by_kind"]["thanks"]["rate"] == 0.0
+    assert report["damped_by_language"]["es"]["damped"] == 0
+    assert report["false_damps"] == [{"text": "the deploy failed", "kind": "failure", "lang": "en", "confidence": 0.7}]
+    assert report["worst_wrong_confidence"] == 0.7
+    assert report["unavailable"] == 1
+
+
+def test_tone_replay_scores_a_saved_run_and_fails_on_a_false_damp(tmp_path, capsys):
+    items = tone.load_items(tone.DEFAULT_SET)
+    clean = [{"label": i["label"], "confidence": 0.5, "damped": i["label"] == tone.DAMP, "raw_label": i["label"]}
+             for i in items]
+    saved = tmp_path / "run.json"
+    saved.write_text(json.dumps({"verdicts": clean, "model": "replay"}))
+    assert tone.main(["--replay", str(saved)]) == 0
+    assert "damped:" in capsys.readouterr().out
+    clean[[i["label"] for i in items].index(tone.KEEP)]["damped"] = True
+    saved.write_text(json.dumps({"verdicts": clean, "model": "replay"}))
+    assert tone.main(["--replay", str(saved)]) == 1
+    saved.write_text(json.dumps({"verdicts": clean[:3], "model": "replay"}))
+    assert tone.main(["--replay", str(saved)]) == 2

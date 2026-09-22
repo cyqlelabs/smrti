@@ -1327,7 +1327,7 @@ def test_a_verification_the_provider_could_not_answer_changes_nothing():
     ) is None
 
 
-@pytest.mark.parametrize("key", ["relation", "identity"])
+@pytest.mark.parametrize("key", ["relation", "identity", "tone"])
 def test_a_verification_answered_with_the_wrong_kind_preserves_rather_than_merges(monkeypatch, key):
     # The choice is validated on the way in, so this shape should be
     # unreachable — but the guard is what keeps an unreadable answer from
@@ -1344,6 +1344,9 @@ def test_a_verification_answered_with_the_wrong_kind_preserves_rather_than_merge
             new_object="Paris", old_stated_at="", old_author="user", new_author="user",
             tenant_id="t", space="s",
         ) is None
+    elif key == "tone":
+        # the estimate stands: an unreadable answer is not a damp
+        assert judge_tone(engine, **_tone_args()) is None
     else:
         assert verify_entity(
             engine, name="Alice", entity_type="person", context="",

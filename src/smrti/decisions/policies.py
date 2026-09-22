@@ -1,6 +1,6 @@
 """What each decision task is allowed to do, and at which thresholds.
 
-Four tasks, each with its own mode and its own rollback switch:
+Five tasks, each with its own mode and its own rollback switch:
 
 - ``routing`` gates the LLM claim-extraction call behind three yes/no
   judgements about the message (durable? a correction? new?).
@@ -10,10 +10,13 @@ Four tasks, each with its own mode and its own rollback switch:
   before the graph marks the earlier one a loser.
 - ``entity`` verifies an uncertain fuzzy or embedding match in entity
   resolution against the other candidates, plus "none" and "ambiguous".
+- ``tone`` asks whose an *estimated* valence is — a lasting verdict on what
+  the memory describes, or the speaker's passing mood — and damps the
+  estimate when it is the mood. A stated valence is never questioned.
 
 Each runs ``off`` (the deterministic fallback), ``shadow`` (ask, record the
 decision, apply nothing) or ``active`` (the default). ``SMRTI_DECISIONS``
-sets all four; ``SMRTI_DECISIONS_<TASK>`` overrides one. Thresholds are the
+sets all five; ``SMRTI_DECISIONS_<TASK>`` overrides one. Thresholds are the
 lines the code draws through the provider's probabilities: the provider says
 how likely, the policy says what follows, and a decision below its line is
 the same as no decision at all.
@@ -38,7 +41,8 @@ TASK_ROUTING = "routing"
 TASK_RERANK = "rerank"
 TASK_SUPERSESSION = "supersession"
 TASK_ENTITY = "entity"
-TASKS = (TASK_ROUTING, TASK_RERANK, TASK_SUPERSESSION, TASK_ENTITY)
+TASK_TONE = "tone"
+TASKS = (TASK_ROUTING, TASK_RERANK, TASK_SUPERSESSION, TASK_ENTITY, TASK_TONE)
 
 # The routing gate's lines. A message every one of whose three judgements
 # sits under ``skip`` gets no claim extraction; one whose durable-fact or
@@ -64,6 +68,23 @@ DEFAULT_RERANK_MIN_EVIDENCE = 0.0
 DEFAULT_SUPERSESSION_MIN_CONFIDENCE = 0.6
 DEFAULT_ENTITY_MIN_CONFIDENCE = 0.6
 DEFAULT_ENTITY_CANDIDATES = 5
+
+# Tone: the choice confidence a verdict of "the speaker's mood" needs before
+# an estimated valence is damped, and what the estimate is multiplied by
+# when it is. Damping is the destructive direction — a real warning read as
+# mood loses the ranking shift and the pruning floor its tone bought — so an
+# unsure verdict keeps the estimate. The line is lower than the other two
+# verifications' because it was measured rather than inherited: on the
+# `bench/decisions` tone set the checkpoint puts apologies on "speaker" at
+# 0.52–0.61 confidence and never puts a failure, bug, rule or preference
+# there at all, so 0.6 would catch almost nothing and 0.4 catches the clear
+# cases with the whole interval under it as margin. A quarter keeps the
+# sign, since the words were charged and recall reports the mood a memory
+# carries, while landing under every line the engine draws through a tone:
+# the claim writer's −0.3, the salience shift at −0.5, the pruning floor at
+# −0.7.
+DEFAULT_TONE_MIN_CONFIDENCE = 0.4
+DEFAULT_TONE_DAMPING = 0.25
 
 # How long a decision may hold up the work it is advising. A decision is an
 # aside inside a request a client is waiting on — retrieval itself is tens of
@@ -132,6 +153,8 @@ class DecisionPolicy:
     supersession_min_confidence: float = DEFAULT_SUPERSESSION_MIN_CONFIDENCE
     entity_min_confidence: float = DEFAULT_ENTITY_MIN_CONFIDENCE
     entity_candidates: int = DEFAULT_ENTITY_CANDIDATES
+    tone_min_confidence: float = DEFAULT_TONE_MIN_CONFIDENCE
+    tone_damping: float = DEFAULT_TONE_DAMPING
 
     def mode(self, task: str) -> str:
         return self.modes.get(task, MODE_OFF)
@@ -183,4 +206,6 @@ class DecisionPolicy:
             ),
             entity_min_confidence=_float(env, "SMRTI_DECISIONS_ENTITY_MIN_CONFIDENCE", DEFAULT_ENTITY_MIN_CONFIDENCE),
             entity_candidates=_int(env, "SMRTI_DECISIONS_ENTITY_CANDIDATES", DEFAULT_ENTITY_CANDIDATES),
+            tone_min_confidence=_float(env, "SMRTI_DECISIONS_TONE_MIN_CONFIDENCE", DEFAULT_TONE_MIN_CONFIDENCE),
+            tone_damping=_float(env, "SMRTI_DECISIONS_TONE_DAMPING", DEFAULT_TONE_DAMPING),
         )

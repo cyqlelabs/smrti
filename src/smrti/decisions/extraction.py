@@ -1,13 +1,15 @@
-"""Decisions on the write path: routing, supersession, entity identity.
+"""Decisions on the write path: routing, supersession, entity identity, tone.
 
-Three judgements, each a bounded question the deterministic pipeline could
+Four judgements, each a bounded question the deterministic pipeline could
 not ask. None of them stores or deletes anything: the routing gate decides
 whether the LLM is *called*, never whether the episode is kept (it always
 is — a false negative must not erase the only record of what was said);
 the supersession check decides whether an older claim is *marked* replaced,
 and under the line both claims stay; the entity check decides whether an
 uncertain match is *accepted*, and under the line a provisional duplicate
-is made rather than an identity link nothing justified.
+is made rather than an identity link nothing justified; the tone check
+decides whether an *estimated* valence is damped, and under the line the
+estimate stands.
 
 Every function returns ``None`` when the task is off or the provider could
 not answer, and a verdict with ``applied=False`` in shadow mode. Callers
@@ -20,7 +22,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .engine import DecisionEngine
-from .policies import TASK_ENTITY, TASK_ROUTING, TASK_SUPERSESSION
+from .policies import TASK_ENTITY, TASK_ROUTING, TASK_SUPERSESSION, TASK_TONE
 from .provider import Choice, Noul
 
 logger = logging.getLogger("smrti.decisions.extraction")
@@ -289,5 +291,119 @@ def verify_entity(
         result=verdict.label, applied=True,
         summary={"mention": name, "type": entity_type, "raw_label": answer.choice,
                  "chosen": chosen.get("label") if chosen else None, "offered": len(candidates)},
+    )
+    return verdict
+
+
+# ── tone verification ─────────────────────────────────────────────────────
+
+
+TONE_THING = "thing"
+TONE_SPEAKER = "speaker"
+
+# Only an estimate at or under this is asked about. Nothing in the engine
+# turns on a tone milder than −0.3 — the claim writer lowers tone only under
+# −0.3, the salience shift starts at −0.5, the pruning floor at −0.7 — and
+# nothing at all turns on a positive one, so a verdict on either would
+# change nothing, and a write is what pays for the ask.
+TONE_ASK_FROM = 0.3
+
+# The metadata key a damped estimate is filed under on the atom: what the
+# estimator read, what the model called it, and how sure it was. Decision
+# confidence lives here and in the audit record, never in the truth value.
+TONE_DECISION = "tone_decision"
+
+# Two options, not three. Measured on the multilingual Laya checkpoint
+# against the 29 stored sentences in Spanish, English and German of the
+# `bench/decisions` tone set: a three-way choice with an "incidental" option
+# never answered above 0.31 confidence — the model spread its mass over the
+# long rubrics and no line was ever crossed — and called an apology a
+# verdict. This pair puts every failure, bug, rule and preference on
+# ``thing`` (0.65–0.99 probability, none ever on ``speaker``) and apologies
+# on ``speaker`` at 0.52–0.61 confidence; "Thanks, that worked!" sits just
+# under the 0.4 line at 0.39. What it does not catch is the curt imperative
+# ("cerra el navegador" is about a thing, if not a verdict on one), which
+# sits near 50/50 under every wording tried; that is the estimate the line
+# keeps, on purpose. The state carries no hint of the estimate's sign: with
+# one, "Odio cuando el WAF bloquea el scraper" — a preference — went to
+# ``speaker`` at 0.02, and without one nothing did.
+TONE_CRITERIA = {
+    TONE_THING: "It reports a failure, error, harm, danger or rule about the thing described.",
+    TONE_SPEAKER: "It expresses the speaker's frustration, thanks, apology or impatience in the moment.",
+}
+TONE_QUESTION = Choice(
+    "Is the negative tone of the text about the thing it describes, or the speaker's own mood?",
+    TONE_CRITERIA,
+)
+
+
+@dataclass(frozen=True)
+class ToneVerdict:
+    label: str
+    confidence: float
+    applied: bool
+    estimate: float
+    valence: float
+
+    @property
+    def damped(self) -> bool:
+        """Whether the caller stores something milder than the estimate."""
+        return self.applied and self.valence != self.estimate
+
+
+def judge_tone(
+    engine: DecisionEngine,
+    *,
+    text: str,
+    estimate: float,
+    source: str,
+    kind: str,
+    tenant_id: str,
+    space: str,
+) -> ToneVerdict | None:
+    """Whose is the tone the sentiment estimator read off *text*?
+
+    The estimator scores the mood of the words, and stored conversation is
+    full of mood that is nobody's verdict on anything: in one Factor graph a
+    curt "cerra el navegador" scored −0.55, an apology −0.64, and a report
+    that a request timed out −1.0, which is under the line that hands a
+    memory a pruning floor for life. An apology is the speaker's moment, not
+    a property of what the memory records, and the estimator cannot tell the
+    two apart because both are written in the same charged words.
+
+    This asks. A confident ``speaker`` verdict shrinks the estimate by the
+    policy's ``tone_damping``; ``thing``, an unsure answer, or no answer at
+    all keeps it, since damping a real warning is the destructive direction.
+    The result is still an estimate — nothing here sets ``VALENCE_STATED`` —
+    and only ever milder than the one that came in: a stated valence is never
+    offered to this function, so a decision can take a pruning floor away
+    from an apology but cannot hand one to anything.
+    """
+    if estimate > -TONE_ASK_FROM or not engine.enabled(TASK_TONE):
+        return None
+    state = {
+        "text": text[:MESSAGE_CHARS],
+        "author": "assistant" if source == "agent" else "user",
+        "kind": kind,
+    }
+    outcome = engine.decide(TASK_TONE, state, {"tone": TONE_QUESTION}, tenant_id=tenant_id, space=space)
+    if outcome is None:
+        return None
+    answer = outcome.decisions.choice("tone")
+    if answer is None:
+        return None
+    confident = answer.confidence >= engine.policy.tone_min_confidence
+    label = answer.choice if confident else TONE_THING
+    valence = estimate
+    if label == TONE_SPEAKER and outcome.applied:
+        valence = round(estimate * engine.policy.tone_damping, 3)
+    verdict = ToneVerdict(
+        label=label, confidence=answer.confidence, applied=outcome.applied,
+        estimate=estimate, valence=valence,
+    )
+    engine.conclude(
+        TASK_TONE, outcome, tenant_id=tenant_id, space=space, result=label, applied=True,
+        summary={"text": text[:200], "author": state["author"], "kind": kind,
+                 "estimate": round(estimate, 3), "valence": valence, "raw_label": answer.choice},
     )
     return verdict

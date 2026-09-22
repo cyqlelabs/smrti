@@ -158,7 +158,7 @@ One consolidation epoch: revise pending evidence, decay attention and confidence
 
 ### Semantic decisions
 
-At four points a rule cannot tell what a sentence means. Instead of a generative LLM call, the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice among options, a score) and never writes prose. It runs as an int8 ONNX graph — no PyTorch, about 560MB resident. Every task is active by default; a task can run in `shadow` (ask and record, apply nothing) or be turned `off`. Any failure or timeout falls back to the deterministic path.
+At five points a rule cannot tell what a sentence means. Instead of a generative LLM call, the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice among options, a score) and never writes prose. It runs as an int8 ONNX graph — no PyTorch, about 560MB resident. Every task is active by default; a task can run in `shadow` (ask and record, apply nothing) or be turned `off`. Any failure or timeout falls back to the deterministic path.
 
 The runtime installs with Smrti; the weights do not. The first decision fetches them once (250MB, checked against a checksum) into `~/.smrti/decision-model`, or reuses `~/.factor/decision-model` when [Factor](https://github.com/cyqlelabs/factor) already holds a copy. Fetch and load run on their own thread, so recall answers from the deterministic path until the model is ready. `SMRTI_DECISIONS_MODEL` points at a directory you unpacked yourself; `SMRTI_DECISIONS_URL` asks a server that already holds the model (Factor's EdgeJev on loopback, or any `POST /v1/systemone`) and loads nothing here — one copy of 560 MB is what a small machine can hold, not two; `SMRTI_DECISIONS=off` downloads nothing at all.
 
@@ -168,6 +168,7 @@ The runtime installs with Smrti; the weights do not. The first decision fetches 
 | `rerank`       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience. |
 | `supersession` | Whether a new claim replaces an older one. Ambiguity keeps both.                                                                     |
 | `entity`       | Which existing atom an uncertain mention names. Under the confidence line, a duplicate is made rather than a wrong merge.            |
+| `tone`         | Whose an *estimated* negative valence is: about the thing the memory describes, or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned. |
 
 A decision never restores a forgotten atom, confers permanence, changes tenant or space, or mints a critical warning. Its confidence is logged, never written into a truth value.
 
@@ -178,7 +179,7 @@ export SMRTI_DECISIONS_MODEL=/models/laya-int8  # a directory you unpacked; no d
 export SMRTI_DECISIONS_THREADS=2                # cap the cores inference may hold
 ```
 
-`GET /decisions` lists every decision, `/metrics` counts them as `smrti_decisions_total`, and `make bench-decisions` scores the routing gate. Thresholds are in the [Configuration Reference](#configuration-reference).
+`GET /decisions` lists every decision, `/metrics` counts them as `smrti_decisions_total`, `make bench-decisions` scores the routing gate and `make bench-tone` the tone check. Thresholds are in the [Configuration Reference](#configuration-reference).
 
 ## Server Modes
 
@@ -366,7 +367,7 @@ To get the knowledge graph from `serve rest` or `serve mcp`, point `SMRTI_EXTRAC
 | Variable                                      | Default                   | Purpose                                                                       |
 | --------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------- |
 | `SMRTI_DECISIONS`                             | `active`                  | Mode for every decision task: `off`, `shadow` (ask and record, apply nothing), `active` |
-| `SMRTI_DECISIONS_ROUTING` / `_RERANK` / `_SUPERSESSION` / `_ENTITY` | `SMRTI_DECISIONS` | Per-task mode override                                             |
+| `SMRTI_DECISIONS_ROUTING` / `_RERANK` / `_SUPERSESSION` / `_ENTITY` / `_TONE` | `SMRTI_DECISIONS` | Per-task mode override                                    |
 | `SMRTI_DECISIONS_MODEL`                       | Factor's copy, else `~/.smrti/decision-model` | Model directory to load; unset, the weights are fetched there on first use |
 | `SMRTI_DECISIONS_URL`                         | unset                     | A server already holding the model (EdgeJev's `POST /v1/systemone`, e.g. Factor's on `http://127.0.0.1:8731`); set, nothing is loaded here |
 | `SMRTI_DECISIONS_DEVICE`                      | auto                      | Execution provider passed to the ONNX runtime; unset lets it choose            |
@@ -381,6 +382,8 @@ To get the knowledge graph from `serve rest` or `serve mcp`, point `SMRTI_EXTRAC
 | `SMRTI_DECISIONS_SUPERSESSION_MIN_CONFIDENCE` | `0.6`                     | Choice confidence a supersession verdict needs before the older claim is marked replaced |
 | `SMRTI_DECISIONS_ENTITY_MIN_CONFIDENCE`       | `0.6`                     | Choice confidence an entity verdict needs before an uncertain match is accepted |
 | `SMRTI_DECISIONS_ENTITY_CANDIDATES`           | `5`                       | Matches each resolution tier offers for verification                          |
+| `SMRTI_DECISIONS_TONE_MIN_CONFIDENCE`         | `0.4`                     | Choice confidence a tone verdict needs before an estimated valence is damped; under it the estimate stands. Measured: `make bench-tone` |
+| `SMRTI_DECISIONS_TONE_DAMPING`                | `0.25`                    | What an estimated valence is multiplied by when the tone is judged the speaker's mood rather than the memory's; under every line the engine draws through a tone |
 
 ### Ignoring Automated Messages
 

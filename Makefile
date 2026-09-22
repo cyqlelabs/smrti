@@ -2,7 +2,7 @@ DATASET ?= data/longmemeval_s.json
 HALUMEM ?= data/HaluMem-Medium.jsonl
 BENCH_ARGS ?=
 
-.PHONY: test datasets bench bench-baseline bench-halumem bench-decisions bench-all
+.PHONY: test datasets bench bench-baseline bench-halumem bench-decisions bench-tone bench-all
 
 test:
 	pytest tests/ -q
@@ -33,5 +33,8 @@ bench-halumem:
 # calls by skipping valuable updates is a regression, so both are reported.
 bench-decisions:
 	PYTHONPATH=. python -m bench.decisions.run $(BENCH_ARGS)
+
+bench-tone:
+	PYTHONPATH=. python -m bench.decisions.tone $(BENCH_ARGS)
 
 bench-all: bench bench-halumem

@@ -1,0 +1,208 @@
+{
+  "description": "Labeled stored sentences for the tone check. `label` is whose the negative tone the sentiment estimator would read off the text is: `thing` means it is about what the text describes — a failure, bug, rule or preference — and the estimate must be kept; `speaker` means it is the speaker's own moment — an apology, thanks, a request, a question, a complaint, an acknowledgement — and may be damped. `kind` names what is at stake so a figure exists per kind. The Spanish sentences are, lightly paraphrased, the ones a Factor graph held at valence −0.37 to −1.0 with no valence stated.",
+  "items": [
+    {
+      "text": "cerra el navegador",
+      "author": "user",
+      "label": "speaker",
+      "kind": "request",
+      "lang": "es"
+    },
+    {
+      "text": "Disculpa por la frustración causada",
+      "author": "assistant",
+      "label": "speaker",
+      "kind": "apology",
+      "lang": "es"
+    },
+    {
+      "text": "¿Y por qué afirmaste que seguía con timeouts?",
+      "author": "user",
+      "label": "speaker",
+      "kind": "complaint",
+      "lang": "es"
+    },
+    {
+      "text": "¿¿¿?",
+      "author": "user",
+      "label": "speaker",
+      "kind": "complaint",
+      "lang": "es"
+    },
+    {
+      "text": "Error mío: me bloqueé intentando hacerlo manual",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "failure",
+      "lang": "es"
+    },
+    {
+      "text": "El remember falló con timeout pero recall sí funcionó. Conexión intermitente bajo carga",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "failure",
+      "lang": "es"
+    },
+    {
+      "text": "Estos bloqueos no deben volver a suceder. Cada mañana el reporte debe llegar completo",
+      "author": "user",
+      "label": "thing",
+      "kind": "rule",
+      "lang": "es"
+    },
+    {
+      "text": "El scraper viejo usaba urllib que Argenprop bloquea con AWS WAF",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "failure",
+      "lang": "es"
+    },
+    {
+      "text": "Bug de EmailMessage.set_content() creaba text/plain en vez de HTML",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "bug",
+      "lang": "es"
+    },
+    {
+      "text": "Background job de Webtorrent falló",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "failure",
+      "lang": "es"
+    },
+    {
+      "text": "No afirmar problemas sin verificarlos primero",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "rule",
+      "lang": "es"
+    },
+    {
+      "text": "Thanks, that worked!",
+      "author": "user",
+      "label": "speaker",
+      "kind": "thanks",
+      "lang": "en"
+    },
+    {
+      "text": "Ugh, just close the browser already",
+      "author": "user",
+      "label": "speaker",
+      "kind": "request",
+      "lang": "en"
+    },
+    {
+      "text": "Never deploy on Fridays without a backup; the last one wiped production",
+      "author": "user",
+      "label": "thing",
+      "kind": "rule",
+      "lang": "en"
+    },
+    {
+      "text": "The old scraper used urllib, which the site's WAF blocks",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "failure",
+      "lang": "en"
+    },
+    {
+      "text": "Sorry about the confusion earlier",
+      "author": "assistant",
+      "label": "speaker",
+      "kind": "apology",
+      "lang": "en"
+    },
+    {
+      "text": "Was macht der Fehler schon wieder?!",
+      "author": "user",
+      "label": "speaker",
+      "kind": "complaint",
+      "lang": "de"
+    },
+    {
+      "text": "Das Backup-Skript löscht die falsche Partition, wenn der Pfad ein Leerzeichen enthält",
+      "author": "user",
+      "label": "thing",
+      "kind": "bug",
+      "lang": "de"
+    },
+    {
+      "text": "abrí la terminal",
+      "author": "user",
+      "label": "speaker",
+      "kind": "request",
+      "lang": "es"
+    },
+    {
+      "text": "mandame el reporte de hoy",
+      "author": "user",
+      "label": "speaker",
+      "kind": "request",
+      "lang": "es"
+    },
+    {
+      "text": "gracias, funcionó",
+      "author": "user",
+      "label": "speaker",
+      "kind": "thanks",
+      "lang": "es"
+    },
+    {
+      "text": "¿qué hora es?",
+      "author": "user",
+      "label": "speaker",
+      "kind": "question",
+      "lang": "es"
+    },
+    {
+      "text": "close the browser",
+      "author": "user",
+      "label": "speaker",
+      "kind": "request",
+      "lang": "en"
+    },
+    {
+      "text": "Sí, dale, hacelo así",
+      "author": "user",
+      "label": "speaker",
+      "kind": "ack",
+      "lang": "es"
+    },
+    {
+      "text": "se cayó el servidor",
+      "author": "user",
+      "label": "thing",
+      "kind": "failure",
+      "lang": "es"
+    },
+    {
+      "text": "the deploy failed",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "failure",
+      "lang": "en"
+    },
+    {
+      "text": "El cron no corrió esta mañana y el reporte no llegó",
+      "author": "user",
+      "label": "thing",
+      "kind": "failure",
+      "lang": "es"
+    },
+    {
+      "text": "Odio cuando el WAF bloquea el scraper",
+      "author": "user",
+      "label": "thing",
+      "kind": "preference",
+      "lang": "es"
+    },
+    {
+      "text": "El usuario prefiere respuestas cortas",
+      "author": "assistant",
+      "label": "thing",
+      "kind": "preference",
+      "lang": "es"
+    }
+  ]
+}

@@ -34,7 +34,11 @@ from smrti.decisions.extraction import (
     ROUTE_DEFAULT,
     ROUTE_LLM,
     ROUTE_SKIP,
+    TONE_ASK_FROM,
+    TONE_SPEAKER,
+    TONE_THING,
     decide_route,
+    judge_tone,
     verify_entity,
     verify_supersession,
 )
@@ -354,12 +358,15 @@ def test_thresholds_and_laya_settings_come_from_the_environment():
         "SMRTI_DECISIONS_DEVICE": "cpu",
         "SMRTI_DECISIONS_TIMEOUT": "2.5",
         "SMRTI_DECISIONS_RERANK_SHORTLIST": "30", "SMRTI_DECISIONS_ROUTING_SKIP": "0.1",
+        "SMRTI_DECISIONS_TONE_MIN_CONFIDENCE": "0.8", "SMRTI_DECISIONS_TONE_DAMPING": "0",
     })
     assert policy.model == "/models/laya"
     assert policy.device == "cpu"
     assert policy.timeout == 2.5
     assert policy.rerank_shortlist == 30
     assert policy.routing_skip == 0.1
+    assert policy.tone_min_confidence == 0.8
+    assert policy.tone_damping == 0
 
 
 # ── engine ───────────────────────────────────────────────────────────────────
@@ -586,6 +593,59 @@ def test_entity_verification_prefers_a_duplicate_when_unsure():
     assert verify_entity(DecisionEngine(_policy(), None), **_entity_args()) is None
     assert verify_entity(DecisionEngine(_policy(entity="active"), _choice_provider("none", 1.0)),
                          **{**_entity_args(), "candidates": []}) is None
+
+
+def _tone_args(estimate=-0.9, source="user"):
+    return dict(text="disculpa por la frustración causada", estimate=estimate, source=source,
+                kind="episode", tenant_id="t", space="s")
+
+
+def test_a_speaker_verdict_damps_the_estimate_and_a_thing_verdict_keeps_it():
+    engine = DecisionEngine(_policy(tone="active"), _choice_provider(TONE_SPEAKER, 0.9))
+    verdict = judge_tone(engine, **_tone_args())
+    assert verdict.damped and verdict.label == TONE_SPEAKER
+    assert verdict.valence == pytest.approx(-0.9 * engine.policy.tone_damping)
+    assert verdict.estimate == -0.9
+    engine = DecisionEngine(_policy(tone="active"), _choice_provider(TONE_THING, 0.9))
+    verdict = judge_tone(engine, **_tone_args())
+    assert not verdict.damped and verdict.valence == -0.9
+    # the provider sees the text and who wrote it, never the number
+    state = engine.provider.calls[0]["state"]
+    assert state == {"text": "disculpa por la frustración causada", "author": "user", "kind": "episode"}
+    assert judge_tone(engine, **_tone_args(source="agent")) is not None
+    assert engine.provider.calls[1]["state"]["author"] == "assistant"
+
+
+def test_an_unsure_tone_verdict_keeps_the_estimate():
+    engine = DecisionEngine(_policy(tone="active"), _choice_provider(TONE_SPEAKER, 0.3))
+    verdict = judge_tone(engine, **_tone_args())
+    assert verdict.label == TONE_THING and not verdict.damped and verdict.valence == -0.9
+    assert audit.get_all()[0]["summary"]["raw_label"] == TONE_SPEAKER
+
+
+def test_a_mild_or_positive_estimate_is_never_asked_about():
+    provider = _choice_provider(TONE_SPEAKER, 0.9)
+    engine = DecisionEngine(_policy(tone="active"), provider)
+    assert judge_tone(engine, **_tone_args(estimate=-(TONE_ASK_FROM - 0.01))) is None
+    assert judge_tone(engine, **_tone_args(estimate=0.0)) is None
+    assert judge_tone(engine, **_tone_args(estimate=0.9)) is None
+    assert provider.calls == []
+    assert judge_tone(engine, **_tone_args(estimate=-TONE_ASK_FROM)) is not None
+
+
+def test_tone_in_shadow_records_the_verdict_and_changes_nothing():
+    engine = DecisionEngine(_policy(tone="shadow"), _choice_provider(TONE_SPEAKER, 0.9))
+    verdict = judge_tone(engine, **_tone_args())
+    assert verdict.label == TONE_SPEAKER and not verdict.applied and not verdict.damped
+    assert verdict.valence == -0.9
+    record = audit.get_all()[0]
+    assert record["mode"] == "shadow" and not record["applied"] and record["outcome"] == TONE_SPEAKER
+
+
+def test_tone_is_none_when_off():
+    provider = _choice_provider(TONE_SPEAKER, 0.9)
+    assert judge_tone(DecisionEngine(_policy(), provider), **_tone_args()) is None
+    assert provider.calls == []
 
 
 def test_audit_records_are_newest_first_and_clear_keeps_the_counters():

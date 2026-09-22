@@ -83,10 +83,15 @@ _engine_lock = threading.Lock()
 
 
 def build_engine(policy: DecisionPolicy) -> DecisionEngine:
-    """An engine for *policy*, with a local Laya provider when any task is
-    configured and no provider otherwise."""
+    """An engine for *policy*: the server ``SMRTI_DECISIONS_URL`` names when
+    there is one, a local Laya provider otherwise, and no provider when no
+    task is configured."""
     provider = None
-    if policy.any_enabled:
+    if policy.any_enabled and policy.url:
+        from .remote import RemoteProvider
+
+        provider = RemoteProvider(policy.url)
+    elif policy.any_enabled:
         from .laya import DEFAULT_MODEL, LayaProvider
 
         provider = LayaProvider(

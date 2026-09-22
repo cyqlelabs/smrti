@@ -160,7 +160,7 @@ One consolidation epoch: revise pending evidence, decay attention and confidence
 
 At four points a rule cannot tell what a sentence means. Instead of a generative LLM call, the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice among options, a score) and never writes prose. It runs as an int8 ONNX graph — no PyTorch, about 560MB resident. Every task is active by default; a task can run in `shadow` (ask and record, apply nothing) or be turned `off`. Any failure or timeout falls back to the deterministic path.
 
-The runtime installs with Smrti; the weights do not. The first decision fetches them once (250MB, checked against a checksum) into `~/.smrti/decision-model`, or reuses `~/.factor/decision-model` when [Factor](https://github.com/cyqlelabs/factor) already holds a copy. Fetch and load run on their own thread, so recall answers from the deterministic path until the model is ready. `SMRTI_DECISIONS_MODEL` points at a directory you unpacked yourself; `SMRTI_DECISIONS=off` downloads nothing at all.
+The runtime installs with Smrti; the weights do not. The first decision fetches them once (250MB, checked against a checksum) into `~/.smrti/decision-model`, or reuses `~/.factor/decision-model` when [Factor](https://github.com/cyqlelabs/factor) already holds a copy. Fetch and load run on their own thread, so recall answers from the deterministic path until the model is ready. `SMRTI_DECISIONS_MODEL` points at a directory you unpacked yourself; `SMRTI_DECISIONS_URL` asks a server that already holds the model (Factor's EdgeJev on loopback, or any `POST /v1/systemone`) and loads nothing here — one copy of 560 MB is what a small machine can hold, not two; `SMRTI_DECISIONS=off` downloads nothing at all.
 
 | Task           | Decides                                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -359,7 +359,7 @@ To get the knowledge graph from `serve rest` or `serve mcp`, point `SMRTI_EXTRAC
 | `SMRTI_EXTRACT_THINKING` | `disabled`                 | `disabled` / `auto` / `enabled`; `disabled` is faster and avoids token-budget exhaustion on thinking models |
 | `SMRTI_EXTRACT_TIMEOUT`  | `60`                       | Extraction request timeout in seconds                            |
 | `SMRTI_NER_MODEL`        | `lmo3/gliner2-multi-v1-onnx` | GLiNER2 ONNX model for local zero-shot NER                     |
-| `SMRTI_TEMPORAL`         | `1`                        | Resolve relative dates against the write time (0 = store text verbatim); one NER pass per write |
+| `SMRTI_TEMPORAL`         | `1`                        | Resolve relative dates against the write time (0 = store text verbatim); one NER pass per write, never in `llm` mode, where the extraction model resolves dates itself |
 
 **Semantic decisions (all modes, see [above](#semantic-decisions)):**
 
@@ -368,6 +368,7 @@ To get the knowledge graph from `serve rest` or `serve mcp`, point `SMRTI_EXTRAC
 | `SMRTI_DECISIONS`                             | `active`                  | Mode for every decision task: `off`, `shadow` (ask and record, apply nothing), `active` |
 | `SMRTI_DECISIONS_ROUTING` / `_RERANK` / `_SUPERSESSION` / `_ENTITY` | `SMRTI_DECISIONS` | Per-task mode override                                             |
 | `SMRTI_DECISIONS_MODEL`                       | Factor's copy, else `~/.smrti/decision-model` | Model directory to load; unset, the weights are fetched there on first use |
+| `SMRTI_DECISIONS_URL`                         | unset                     | A server already holding the model (EdgeJev's `POST /v1/systemone`, e.g. Factor's on `http://127.0.0.1:8731`); set, nothing is loaded here |
 | `SMRTI_DECISIONS_DEVICE`                      | auto                      | Execution provider passed to the ONNX runtime; unset lets it choose            |
 | `SMRTI_DECISIONS_THREADS`                     | runtime default           | Cores one decision may hold; cap it on a machine that has two of them          |
 | `SMRTI_DECISIONS_TIMEOUT`                     | `30`                      | Deadline per local decision in seconds; on expiry the deterministic path answers |

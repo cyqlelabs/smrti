@@ -10,7 +10,9 @@ import time
 import types
 from contextlib import contextmanager
 
+import httpx
 import pytest
+from unittest.mock import patch
 
 from smrti.decisions import (
     Choice,
@@ -1430,3 +1432,113 @@ def test_the_archive_cannot_write_outside_its_directory(tmp_path):
         with pytest.raises(ValueError, match="outside the archive"):
             model_source._extract(tar, directory)
     assert not (tmp_path / "escaped").exists()
+
+
+# ── the remote provider ──────────────────────────────────────────────────────
+
+
+def _remote(handler, **kwargs):
+    from smrti.decisions.remote import RemoteProvider
+
+    return RemoteProvider(
+        "http://127.0.0.1:8731/",
+        transport=httpx.MockTransport(handler),
+        async_transport=httpx.MockTransport(handler),
+        **kwargs,
+    )
+
+
+def _serve(calls: list):
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        calls.append((request.url.path, body))
+        return httpx.Response(200, json={**_reply(body["questions"]), "model": "laya-int8"})
+
+    return handler
+
+
+def test_the_remote_provider_speaks_the_systemone_route_one_question_at_a_time():
+    calls: list = []
+    provider = _remote(_serve(calls))
+    assert provider.base_url == "http://127.0.0.1:8731"
+    decisions = provider.ask(
+        "the deploy pipeline is owned by oslo",
+        {"durable": Noul("is it durable?"), "which": Choice("pick", {"a": "first", "b": "second"})},
+        timeout=5.0,
+    )
+    assert [path for path, _ in calls] == ["/v1/systemone", "/v1/systemone"]
+    assert [list(body["questions"]) for _, body in calls] == [["durable"], ["which"]]
+    assert all(body["model"] == "laya" and body["state"] == "the deploy pipeline is owned by oslo" for _, body in calls)
+    assert decisions.noul("durable") == 0.8
+    assert decisions.choice("which").choice == "a"
+    assert decisions.input_tokens == 84  # 42 a call, two calls
+    assert decisions.model == provider.model == "laya-int8"  # what the server loaded, not what was asked
+    provider.close()
+
+
+def test_the_remote_provider_async_path_shares_the_contract():
+    calls: list = []
+    provider = _remote(_serve(calls))
+    decisions = asyncio.run(provider.ask_async({"text": "hola"}, {"q": Noul("x")}, timeout=5.0))
+    assert decisions.noul("q") == 0.8 and len(calls) == 1
+    asyncio.run(provider.aclose())
+
+
+@pytest.mark.parametrize("status", [400, 503])
+def test_a_server_that_refuses_or_is_loading_is_unavailable(status):
+    provider = _remote(lambda request: httpx.Response(status, json={"error": {"message": "still loading"}}))
+    with pytest.raises(DecisionUnavailable, match=f"HTTP {status}"):
+        provider.ask("s", {"q": Noul("x")}, timeout=5.0)
+    provider.close()
+
+
+def test_a_server_that_is_down_is_unavailable_not_an_error():
+    def refuse(request):
+        raise httpx.ConnectError("connection refused", request=request)
+
+    provider = _remote(refuse)
+    with pytest.raises(DecisionUnavailable, match="unreachable"):
+        provider.ask("s", {"q": Noul("x")}, timeout=5.0)
+    with pytest.raises(DecisionUnavailable, match="unreachable"):
+        asyncio.run(provider.ask_async("s", {"q": Noul("x")}, timeout=5.0))
+    provider.close()
+
+
+def test_a_reply_that_is_not_json_or_not_an_object_is_unavailable():
+    provider = _remote(lambda request: httpx.Response(200, content=b"<html>"))
+    with pytest.raises(DecisionUnavailable, match="not JSON"):
+        provider.ask("s", {"q": Noul("x")}, timeout=5.0)
+    provider = _remote(lambda request: httpx.Response(200, json=[1, 2]))
+    with pytest.raises(DecisionUnavailable, match="not an object"):
+        provider.ask("s", {"q": Noul("x")}, timeout=5.0)
+
+
+def test_the_remote_provider_stops_asking_once_the_deadline_has_passed():
+    clock = iter([0.0, 0.0, 10.0])  # started, first remaining, second remaining
+    provider = _remote(_serve([]))
+    with patch("smrti.decisions.remote.time.monotonic", side_effect=lambda: next(clock, 10.0)):
+        with pytest.raises(DecisionUnavailable, match="before the deadline"):
+            provider.ask("s", {"a": Noul("x"), "b": Noul("y")}, timeout=5.0)
+    with pytest.raises(DecisionUnavailable, match="expired"):
+        provider.ask("s", {"a": Noul("x")}, timeout=0)
+    with pytest.raises(ValueError):
+        provider.ask("s", {"a": Noul("x")}, timeout="soon")
+    with pytest.raises(ValueError, match="at least one question"):
+        provider.ask("s", {}, timeout=5.0)
+    provider.close()
+
+
+def test_a_decision_url_builds_the_remote_provider_and_loads_nothing_here():
+    from smrti.decisions.remote import RemoteProvider
+
+    engine = build_engine(DecisionPolicy.from_env({
+        "SMRTI_DECISIONS": "active",
+        "SMRTI_DECISIONS_URL": "http://127.0.0.1:8731/ ",
+        "SMRTI_DECISIONS_MODEL": "/models/laya",
+    }))
+    assert isinstance(engine.provider, RemoteProvider)
+    assert engine.provider.base_url == "http://127.0.0.1:8731"
+    assert engine.provider_name == "edgejev"
+    engine.provider.close()
+    # Off is off, whatever server is named.
+    assert build_engine(DecisionPolicy.from_env({"SMRTI_DECISIONS": "off", "SMRTI_DECISIONS_URL": "http://x"})).provider is None

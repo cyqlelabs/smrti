@@ -118,6 +118,9 @@ class DecisionPolicy:
     modes: dict[str, str] = field(default_factory=lambda: {task: MODE_ACTIVE for task in TASKS})
     model: str = ""
     device: str = ""
+    # A server already holding the model, asked over HTTP instead of loading
+    # a copy here; empty means load locally.
+    url: str = ""
     timeout: float = DEFAULT_TIMEOUT
     cooldown: float = DEFAULT_COOLDOWN
     cache_size: int = DEFAULT_CACHE_SIZE
@@ -165,6 +168,7 @@ class DecisionPolicy:
         return cls(
             modes=modes,
             model=env.get("SMRTI_DECISIONS_MODEL", "").strip(),
+            url=env.get("SMRTI_DECISIONS_URL", "").strip(),
             device=env.get("SMRTI_DECISIONS_DEVICE", "").strip(),
             timeout=_float(env, "SMRTI_DECISIONS_TIMEOUT", DEFAULT_TIMEOUT),
             cooldown=_float(env, "SMRTI_DECISIONS_COOLDOWN", DEFAULT_COOLDOWN),

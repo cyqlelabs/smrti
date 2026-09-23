@@ -38,9 +38,9 @@ task's deadline; the candidates judged are applied and the rest keep the
 salience share :func:`rerank` always gave a candidate outside the judged
 set. ``rerank_shortlist`` is the ceiling, the deadline is the budget, and
 stopping on it is a plan rather than a failure: no cooldown opens. Every
-candidate is presented as ``c0``, so the engine caches it by what it says
-rather than by where it ranked, and a recall that meets it again pays
-nothing for it.
+candidate is presented as ``c0`` and carries no version stamp, so the
+engine caches it by what it says rather than by where it ranked or when
+it was last boosted, and a recall that meets it again pays nothing for it.
 
 Filtering is separate from reranking and off by default. A candidate under
 ``rerank_min_evidence`` is dropped only when that line is set, and a stated
@@ -195,13 +195,11 @@ def _walk(
         remaining = deadline - time.monotonic()
         if outcomes and remaining < slowest * _COST_MARGIN:
             return outcomes, STOP_BUDGET
-        state = {
-            "question": query,
-            "candidates": [_candidate_state(_REF, r)],
-            # The candidate's version is part of the state so the cache key
-            # changes when it does.
-            "versions": [r.atom.updated_at or ""],
-        }
+        # No version stamp: every recall boosts what it returns and rewrites
+        # ``updated_at`` as it does, so a key carrying it never hit twice.
+        # The state holds every field the answer is judged on, so it is its
+        # own version.
+        state = {"question": query, "candidates": [_candidate_state(_REF, r)]}
         started = time.monotonic()
         outcome = engine.decide(
             TASK_RERANK, state, questions, tenant_id=tenant_id, space=space, timeout=max(remaining, 0.001)

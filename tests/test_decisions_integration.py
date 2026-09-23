@@ -222,12 +222,14 @@ def test_a_spent_budget_keeps_the_judged_prefix_and_opens_no_cooldown(tmp_path):
 
 def test_judged_candidates_are_cached_one_by_one(tmp_path):
     """A recall that meets the same candidates again pays nothing for them,
-    whichever rank they hold this time."""
+    whichever rank they hold this time — and however often they were
+    boosted in between, since every recall rewrites ``updated_at``."""
     provider = _evidence_provider("oslo")
     mem = _mem(tmp_path, _engine(provider, rerank="active"))
     _three_memories(mem)
     mem.recall("who owns the deploy pipeline on jenkins")
     assert len(provider.calls) == 3
+    mem.db.execute("UPDATE atoms SET updated_at = '2030-01-01 00:00:00'")
     mem.recall("who owns the deploy pipeline on jenkins")
     assert len(provider.calls) == 3
     assert audit.get_all()[0]["cached"]

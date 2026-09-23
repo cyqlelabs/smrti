@@ -140,6 +140,11 @@ class RecallRequest(BaseModel):
     min_confidence: Optional[float] = None
     space: Optional[SpaceName] = None
     read_spaces: Optional[list[SpaceName]] = Field(default=None, max_length=32)
+    # Both off is a read that leaves no trace: no attention boost on what
+    # came back and no evidence judgement over it — a warm-up, or a caller
+    # that reranks and attends for itself.
+    boost: bool = True
+    rerank: bool = True
 
     @field_validator("query")
     @classmethod

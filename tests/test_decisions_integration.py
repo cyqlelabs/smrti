@@ -284,6 +284,21 @@ def test_the_recall_tool_carries_the_evidence_field(tmp_path):
     assert handle_tool(off, "smrti_recall", {"query": "deploy pipeline"})["memories"][0]["evidence"] is None
 
 
+def test_the_recall_tool_can_read_without_a_trace(tmp_path):
+    """``boost: false, rerank: false`` is a read and nothing else: no
+    attention moves and the judge is not asked — what a warm-up wants."""
+    provider = _evidence_provider("oslo")
+    mem = _mem(tmp_path, _engine(provider, rerank="active"))
+    ids = [_three_memories(mem)]
+    memories = handle_tool(mem, "smrti_recall", {"query": "deploy pipeline", "boost": False, "rerank": False})["memories"]
+    assert memories and all(m["evidence"] is None for m in memories)
+    assert provider.calls == []
+    assert all(r["sti"] == 0.0 for r in mem.db.fetchall("SELECT sti FROM atoms WHERE type = 'episode'"))
+    handle_tool(mem, "smrti_recall", {"query": "deploy pipeline"})
+    assert provider.calls
+    assert any(r["sti"] > 0.0 for r in mem.db.fetchall("SELECT sti FROM atoms WHERE type = 'episode'"))
+
+
 # ── extraction routing ───────────────────────────────────────────────────────
 
 

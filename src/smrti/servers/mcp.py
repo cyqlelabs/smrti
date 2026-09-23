@@ -91,6 +91,8 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             top_k=args.get("top_k", 10),
             min_confidence=args.get("min_confidence"),
             read_spaces=args.get("read_spaces") or None,
+            boost=args.get("boost", True),
+            rerank=args.get("rerank", True),
         )
         return {
             "memories": [

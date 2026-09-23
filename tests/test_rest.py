@@ -84,6 +84,12 @@ def test_recall_with_min_confidence(client):
     assert resp.status_code == 200
 
 
+def test_recall_can_read_without_boosting_or_judging(client):
+    resp = client.post("/recall", json={"query": "test", "boost": False, "rerank": False})
+    assert resp.status_code == 200
+    assert "memories" in resp.json()
+
+
 # ── /reflect ──────────────────────────────────────────────────────────────────
 
 def test_reflect_runs(client):

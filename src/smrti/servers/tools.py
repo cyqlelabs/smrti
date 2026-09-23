@@ -41,6 +41,8 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
                 "query": {"type": "string", "description": "What to recall"},
                 "top_k": {"type": "integer", "default": 10},
                 "min_confidence": {"type": "number", "description": "Confidence floor for results; omit for the personality's min_confidence_to_surface"},
+                "boost": {"type": "boolean", "default": True, "description": "Raise the attention of what is returned; false to read without leaving a trace"},
+                "rerank": {"type": "boolean", "default": True, "description": "Judge the candidates as evidence with the decision model; false for the local ranking alone"},
                 "read_spaces": {
                     "type": "array",
                     "items": {"type": "string"},

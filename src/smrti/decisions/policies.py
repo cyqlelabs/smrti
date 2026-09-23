@@ -53,10 +53,10 @@ TASKS = (TASK_ROUTING, TASK_RERANK, TASK_SUPERSESSION, TASK_ENTITY, TASK_TONE)
 DEFAULT_ROUTING_SKIP = 0.2
 DEFAULT_ROUTING_FORCE = 0.75
 
-# Reranking: how many of the salience-ranked candidates are judged (one
-# request), how much of the final order the judgement decides against the
-# local salience rank, and the evidence score under which a candidate is
-# dropped — zero, which is "rerank first, filter later": a cutoff comes in
+# Reranking: how many of the salience-ranked candidates may be judged (one
+# candidate per call, as many as fit inside the timeout), how much of the
+# final order the judgement decides against the local salience rank, and
+# the evidence score under which a candidate is dropped — zero, which is "rerank first, filter later": a cutoff comes in
 # only once false exclusions have been measured.
 DEFAULT_RERANK_SHORTLIST = 20
 DEFAULT_RERANK_WEIGHT = 0.5

@@ -3,7 +3,7 @@
 Local retrieval decides who is a candidate: the vector and lexical
 searches, the graph expansion and the personality-weighted salience score
 stay the first stage, and nothing enters the shortlist that they did not
-rank. The provider is then asked, for each of the top candidates, four
+rank. The provider is then asked, about one candidate at a time, four
 yes/no questions about the candidate *as evidence for this question* —
 things similarity cannot see, because "is about the same thing" and
 "answers it" are different properties:
@@ -21,6 +21,27 @@ cut to top_k as before. Only what survives that cut is boosted, which is
 the attention boundary the reranker needs: a candidate the provider judged
 and the cut discarded was never read.
 
+One candidate per call, and the clock decides how many. The shortlist used
+to travel whole, every question carrying all twenty candidates: measured
+against the real checkpoint that is 1024 tokens a call, the model's whole
+window, 1.7 s each and 80 calls a recall, so every rerank ran out its
+deadline and the cooldown after it silenced every other task for a minute.
+Worse than slow, it did not rank — past the window the candidate asked
+about was not in the state at all, and the answers for all twenty sat
+between 0.70 and 0.94. Alone with the question a candidate is ~200 tokens
+and 130 ms, and the same model tells 0.28 from 0.82. Asking the four
+questions in one call is out for the reason ``laya.MAX_QUESTIONS_PER_CALL``
+gives: measured, it is slower than four calls and moves the answers by up
+to 0.6. So the shortlist is walked in salience order, one candidate and
+four calls at a time, until the next candidate would not fit inside the
+task's deadline; the candidates judged are applied and the rest keep the
+salience share :func:`rerank` always gave a candidate outside the judged
+set. ``rerank_shortlist`` is the ceiling, the deadline is the budget, and
+stopping on it is a plan rather than a failure: no cooldown opens. Every
+candidate is presented as ``c0``, so the engine caches it by what it says
+rather than by where it ranked, and a recall that meets it again pays
+nothing for it.
+
 Filtering is separate from reranking and off by default. A candidate under
 ``rerank_min_evidence`` is dropped only when that line is set, and a stated
 critical warning is never dropped: the one memory the engine promises to
@@ -29,15 +50,16 @@ deliver is not the reranker's to lose.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any, Callable
 
 from smrti.core.models import AtomType, RecallResult
 from smrti.core.provenance import SOURCE_AGENT
 from smrti.retrieval.classify import is_critical_warning
 
-from .engine import DecisionEngine
+from .engine import DecisionEngine, DecisionOutcome
 from .policies import TASK_RERANK
-from .provider import Noul
+from .provider import Decisions, Noul
 
 logger = logging.getLogger("smrti.decisions.retrieval")
 
@@ -55,6 +77,22 @@ CANDIDATE_TEXT_CHARS = 400
 _W_CONTRADICTS = 0.9
 _W_LINK = 0.6
 _HISTORICAL_DISCOUNT = 0.4
+
+# The reference every candidate is presented under: the model sees one
+# candidate per call, and a name that does not change with rank is what
+# lets the engine's cache recognise the candidate the next time.
+_REF = "c0"
+
+# How much longer than the slowest candidate so far the next one is allowed
+# to need before the walk stops. A candidate that would outrun the deadline
+# is a provider timeout, and a timeout opens the cooldown for every task;
+# the margin keeps the ordinary variance between calls from reading as one.
+_COST_MARGIN = 1.25
+
+# Why the walk ended, in the audit summary.
+STOP_COMPLETE = "complete"
+STOP_BUDGET = "budget"
+STOP_UNAVAILABLE = "unavailable"
 
 Judge = Callable[[str, list[RecallResult]], list[RecallResult]]
 
@@ -138,6 +176,44 @@ def rerank(results: list[RecallResult], evidence: dict[str, float], weight: floa
     return sorted(results, key=lambda r: (-score(r), -r.salience, r.atom.id))
 
 
+def _walk(
+    engine: DecisionEngine,
+    query: str,
+    shortlist: list[RecallResult],
+    *,
+    tenant_id: str,
+    space: str,
+) -> tuple[list[DecisionOutcome], str]:
+    """Judge the shortlist in order, one candidate per call, for as long as
+    the task's deadline holds: the outcomes for the candidates judged, in
+    order, and why the walk ended."""
+    questions = evidence_questions([_REF])
+    deadline = time.monotonic() + engine.policy.timeout
+    slowest = 0.0
+    outcomes: list[DecisionOutcome] = []
+    for r in shortlist:
+        remaining = deadline - time.monotonic()
+        if outcomes and remaining < slowest * _COST_MARGIN:
+            return outcomes, STOP_BUDGET
+        state = {
+            "question": query,
+            "candidates": [_candidate_state(_REF, r)],
+            # The candidate's version is part of the state so the cache key
+            # changes when it does.
+            "versions": [r.atom.updated_at or ""],
+        }
+        started = time.monotonic()
+        outcome = engine.decide(
+            TASK_RERANK, state, questions, tenant_id=tenant_id, space=space, timeout=max(remaining, 0.001)
+        )
+        if outcome is None:
+            return outcomes, STOP_UNAVAILABLE
+        if not outcome.cached:
+            slowest = max(slowest, time.monotonic() - started)
+        outcomes.append(outcome)
+    return outcomes, STOP_COMPLETE
+
+
 def judge_evidence(
     engine: DecisionEngine,
     query: str,
@@ -157,43 +233,46 @@ def judge_evidence(
         return results
     policy = engine.policy
     shortlist = results[: max(1, policy.rerank_shortlist)]
-    refs = [f"c{i}" for i in range(len(shortlist))]
-    state = {
-        "tenant": tenant_id,
-        "space": space,
-        "question": query,
-        "candidates": [_candidate_state(ref, r) for ref, r in zip(refs, shortlist)],
-        # The candidate versions are part of the state so the cache key
-        # changes when one of them does.
-        "versions": [r.atom.updated_at or "" for r in shortlist],
-    }
-    outcome = engine.decide(
-        TASK_RERANK, state, evidence_questions(refs), tenant_id=tenant_id, space=space
-    )
-    if outcome is None:
+    outcomes, stopped = _walk(engine, query, shortlist, tenant_id=tenant_id, space=space)
+    if not outcomes:
         return results
 
-    decisions = outcome.decisions
+    judged = shortlist[: len(outcomes)]
     evidence: dict[str, float] = {}
-    for ref, r in zip(refs, shortlist):
+    answers: dict[str, Any] = {}
+    for i, (r, outcome) in enumerate(zip(judged, outcomes)):
+        d = outcome.decisions
         score = fold_evidence(
-            decisions.noul(f"{ref}_direct"),
-            decisions.noul(f"{ref}_link"),
-            decisions.noul(f"{ref}_historical"),
-            decisions.noul(f"{ref}_contradicts"),
+            d.noul(f"{_REF}_direct"),
+            d.noul(f"{_REF}_link"),
+            d.noul(f"{_REF}_historical"),
+            d.noul(f"{_REF}_contradicts"),
         )
         evidence[r.atom.id] = score
         r.evidence = score
+        for key, answer in d.answers.items():
+            answers[f"c{i}" + key[len(_REF):]] = answer
+    combined = DecisionOutcome(
+        decisions=Decisions(
+            answers=answers,
+            model=next((o.decisions.model for o in outcomes if o.decisions.model), ""),
+            input_tokens=sum(o.decisions.input_tokens for o in outcomes),
+            output_tokens=sum(o.decisions.output_tokens for o in outcomes),
+            latency_ms=sum(o.decisions.latency_ms for o in outcomes),
+        ),
+        mode=outcomes[0].mode,
+        cached=all(o.cached for o in outcomes),
+    )
 
     reordered = rerank(results, evidence, policy.rerank_weight)
     dropped: list[str] = []
     if policy.rerank_min_evidence > 0.0:
         kept = []
         for r in reordered:
-            judged = evidence.get(r.atom.id)
+            judged_score = evidence.get(r.atom.id)
             if (
-                judged is not None
-                and judged < policy.rerank_min_evidence
+                judged_score is not None
+                and judged_score < policy.rerank_min_evidence
                 and not is_critical_warning(r.atom)
             ):
                 dropped.append(r.atom.id)
@@ -204,19 +283,21 @@ def judge_evidence(
     before = [r.atom.id for r in results[:5]]
     after = [r.atom.id for r in reordered[:5]]
     engine.conclude(
-        TASK_RERANK, outcome, tenant_id=tenant_id, space=space,
+        TASK_RERANK, combined, tenant_id=tenant_id, space=space,
         result="reordered" if before != after or dropped else "unchanged",
         applied=True,
         summary={
             "query": query[:200],
-            "judged": len(shortlist),
+            "judged": len(judged),
+            "shortlist": len(shortlist),
+            "stopped": stopped,
             "dropped": len(dropped),
             "top_before": before,
             "top_after": after,
             "sufficiency": round(max(evidence.values(), default=0.0), 3),
         },
     )
-    return reordered if outcome.applied else results
+    return reordered if combined.applied else results
 
 
 def make_judge(engine: DecisionEngine, tenant_id: str, space: str) -> Judge | None:

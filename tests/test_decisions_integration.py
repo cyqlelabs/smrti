@@ -170,6 +170,72 @@ def test_the_evidence_cutoff_never_drops_a_stated_warning(tmp_path):
     assert audit.get_all()[0]["summary"]["dropped"] == 2
 
 
+def test_the_judge_asks_about_one_candidate_at_a_time(tmp_path):
+    """Every call carries one candidate, presented as c0, with its four
+    questions: the state stays small enough to answer in tens of
+    milliseconds, and the model reads the candidate it is asked about
+    instead of a shortlist truncated at its context window."""
+    provider = _evidence_provider("oslo")
+    mem = _mem(tmp_path, _engine(provider, rerank="active"))
+    answer_id = _three_memories(mem)
+    results = mem.recall("who owns the deploy pipeline on jenkins")
+    assert results[0].atom.id == answer_id
+    assert len(provider.calls) == 3
+    for call in provider.calls:
+        assert [c["ref"] for c in call["state"]["candidates"]] == ["c0"]
+        assert set(call["questions"]) == {"c0_direct", "c0_link", "c0_historical", "c0_contradicts"}
+        assert "tenant" not in call["state"] and "space" not in call["state"]
+    record = audit.get_all()[0]
+    assert set(record["answers"]) >= {"c0_direct", "c1_direct", "c2_direct"}
+    assert record["summary"]["judged"] == 3 and record["summary"]["stopped"] == "complete"
+
+
+def test_a_spent_budget_keeps_the_judged_prefix_and_opens_no_cooldown(tmp_path):
+    """The clock decides how many candidates are judged. What was judged is
+    applied, the rest keep their salience share, and stopping on purpose is
+    not a provider failure: the next decision is still asked."""
+    import time as _time
+
+    inner = _evidence_provider("oslo")
+
+    def slow(key, question, state):
+        _time.sleep(0.03)
+        if "_" not in key:
+            return {"type": "noul", "noul": 0.5}
+        return inner._answer(key, question, state)
+
+    provider = StaticProvider(slow)
+    policy = DecisionPolicy(modes={task: MODE_OFF for task in TASKS}, timeout=0.2).with_modes(rerank="active")
+    engine = DecisionEngine(policy, provider)
+    mem = _mem(tmp_path, engine)
+    _three_memories(mem)
+    results = mem.recall("who owns the deploy pipeline on jenkins")
+    judged = [r for r in results if r.evidence is not None]
+    assert 1 <= len(judged) < 3
+    record = audit.get_all()[0]
+    assert record["task"] == "rerank" and record["outcome"] != "unavailable"
+    assert record["summary"]["judged"] == len(judged) and record["summary"]["stopped"] == "budget"
+    calls = len(provider.calls)
+    assert engine.decide("rerank", {"v": 1}, {"q": Noul("?")}, tenant_id="t", space="s") is not None
+    assert len(provider.calls) == calls + 1
+
+
+def test_judged_candidates_are_cached_one_by_one(tmp_path):
+    """A recall that meets the same candidates again pays nothing for them,
+    whichever rank they hold this time."""
+    provider = _evidence_provider("oslo")
+    mem = _mem(tmp_path, _engine(provider, rerank="active"))
+    _three_memories(mem)
+    mem.recall("who owns the deploy pipeline on jenkins")
+    assert len(provider.calls) == 3
+    mem.recall("who owns the deploy pipeline on jenkins")
+    assert len(provider.calls) == 3
+    assert audit.get_all()[0]["cached"]
+    mem.remember("the deploy pipeline on jenkins is documented in the wiki")
+    assert len(mem.recall("who owns the deploy pipeline on jenkins")) == 4
+    assert len(provider.calls) == 4  # only the newcomer was asked about
+
+
 def test_forgetting_does_not_ask_the_judge(tmp_path):
     provider = _evidence_provider("oslo")
     mem = _mem(tmp_path, _engine(provider, rerank="active"))

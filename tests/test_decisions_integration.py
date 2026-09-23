@@ -225,14 +225,24 @@ def test_judged_candidates_are_cached_one_by_one(tmp_path):
     whichever rank they hold this time — and however often they were
     boosted in between, since every recall rewrites ``updated_at``."""
     provider = _evidence_provider("oslo")
+    plain_ask = provider.ask
+
+    def metered(state, questions, *, timeout):
+        decisions = plain_ask(state, questions, timeout=timeout)
+        decisions.input_tokens, decisions.latency_ms = 10, 5.0
+        return decisions
+
+    provider.ask = metered
     mem = _mem(tmp_path, _engine(provider, rerank="active"))
     _three_memories(mem)
     mem.recall("who owns the deploy pipeline on jenkins")
     assert len(provider.calls) == 3
+    assert audit.get_all()[0]["input_tokens"] == 30 and audit.get_all()[0]["latency_ms"] == 15.0
     mem.db.execute("UPDATE atoms SET updated_at = '2030-01-01 00:00:00'")
     mem.recall("who owns the deploy pipeline on jenkins")
     assert len(provider.calls) == 3
-    assert audit.get_all()[0]["cached"]
+    record = audit.get_all()[0]  # a hit cost this recall nothing, and says so
+    assert record["cached"] and record["latency_ms"] == 0.0 and record["input_tokens"] == 0
     mem.remember("the deploy pipeline on jenkins is documented in the wiki")
     assert len(mem.recall("who owns the deploy pipeline on jenkins")) == 4
     assert len(provider.calls) == 4  # only the newcomer was asked about

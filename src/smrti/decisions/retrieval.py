@@ -254,9 +254,11 @@ def judge_evidence(
         decisions=Decisions(
             answers=answers,
             model=next((o.decisions.model for o in outcomes if o.decisions.model), ""),
-            input_tokens=sum(o.decisions.input_tokens for o in outcomes),
-            output_tokens=sum(o.decisions.output_tokens for o in outcomes),
-            latency_ms=sum(o.decisions.latency_ms for o in outcomes),
+            # A cache hit cost this recall nothing: its tokens were counted
+            # and its latency paid by the recall that asked.
+            input_tokens=sum(o.decisions.input_tokens for o in outcomes if not o.cached),
+            output_tokens=sum(o.decisions.output_tokens for o in outcomes if not o.cached),
+            latency_ms=sum(o.decisions.latency_ms for o in outcomes if not o.cached),
         ),
         mode=outcomes[0].mode,
         cached=all(o.cached for o in outcomes),

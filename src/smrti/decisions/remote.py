@@ -24,7 +24,8 @@ from typing import Any, Mapping
 
 import httpx
 
-from .laya import MAX_QUESTIONS_PER_CALL, _tokens
+from .laya import MAX_QUESTIONS_PER_CALL
+from .local import _tokens
 from .provider import DecisionUnavailable, Decisions, Question, State, parse_response, questions_payload
 
 # The one route a decision travels.

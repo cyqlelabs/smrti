@@ -31,6 +31,7 @@ import tarfile
 import tempfile
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 logger = logging.getLogger("smrti.decisions.model")
 
@@ -44,6 +45,15 @@ MODEL_URL = f"https://github.com/cyqlelabs/factor/releases/download/{MODEL_TAG}/
 # What the artifact is, once unpacked.
 CONFIG_NAME = "edgejev.json"
 DEFAULT_GRAPH = "model.onnx"
+
+# The student (:mod:`smrti.decisions.student`): Laya's answers to the
+# registry's questions distilled into a 6-layer encoder, for the machines
+# that cannot run Laya. Published from Smrti's own releases; the tag moves
+# when the trainer is re-run.
+STUDENT_TAG = "model-student-v1"
+STUDENT_ASSET = "student-minilm-int8.tar.gz"
+STUDENT_SHA256 = ""
+STUDENT_URL = f"https://github.com/cyqlelabs/smrti/releases/download/{STUDENT_TAG}/{STUDENT_ASSET}"
 
 # Bounds what will be written to disk from that URL. The artifact is about
 # 250 MB; an order of magnitude past it is not the model.
@@ -64,6 +74,10 @@ def _factor_model() -> Path:
 def own_model_dir() -> Path:
     """Smrti's own copy, whether or not it is there yet."""
     return _home() / "decision-model"
+
+
+def own_student_dir() -> Path:
+    return _home() / "student-model"
 
 
 def is_ready(directory: Path | str) -> bool:
@@ -114,19 +128,45 @@ def resolve(download: bool = True) -> Path:
     return own
 
 
-def fetch(destination: Path, url: str = MODEL_URL, sha256: str = MODEL_SHA256) -> Path:
+def resolve_student(download: bool = True) -> Path:
+    """The student directory to load: ``SMRTI_DECISIONS_MODEL`` when it
+    holds a student, else Smrti's own, fetched on first use."""
+    from .student.runtime import is_ready as student_ready
+
+    explicit = os.environ.get("SMRTI_DECISIONS_MODEL", "").strip()
+    if explicit and student_ready(explicit):
+        return Path(explicit)
+    own = own_student_dir()
+    if student_ready(own):
+        return own
+    if not download:
+        raise FileNotFoundError(f"no student model at {own}")
+    if not STUDENT_SHA256:
+        raise FileNotFoundError("no student model has been published yet")
+    fetch(own, STUDENT_URL, STUDENT_SHA256, ready=student_ready)
+    return own
+
+
+def fetch(
+    destination: Path,
+    url: str = MODEL_URL,
+    sha256: str = MODEL_SHA256,
+    *,
+    ready: Callable[[Path], bool] = is_ready,
+) -> Path:
     """Download the artifact, check it, and unpack it into *destination*.
 
     Nothing is unpacked before the checksum matches, and the unpacked
     directory is renamed into place rather than filled in place: an
     interrupted fetch must not leave something that reads as installed.
+    *ready* says what a complete unpack looks like.
     """
     destination = Path(destination)
     destination.parent.mkdir(parents=True, exist_ok=True)
-    logger.info("fetching the decision model (about 250 MB) from %s", url)
+    logger.info("fetching the decision model from %s", url)
 
     with tempfile.TemporaryDirectory(dir=destination.parent) as scratch:
-        archive = Path(scratch) / MODEL_ASSET
+        archive = Path(scratch) / url.rsplit("/", 1)[-1]
         digest = hashlib.sha256()
         with urllib.request.urlopen(url, timeout=DOWNLOAD_TIMEOUT) as response, archive.open("wb") as out:
             read = 0
@@ -146,8 +186,8 @@ def fetch(destination: Path, url: str = MODEL_URL, sha256: str = MODEL_SHA256) -
         unpacked.mkdir()
         with tarfile.open(archive) as tar:
             _extract(tar, unpacked)
-        if not is_ready(unpacked):
-            raise ValueError(f"the decision model unpacked without {CONFIG_NAME}")
+        if not ready(unpacked):
+            raise ValueError("the decision model unpacked incomplete")
         if destination.exists():
             shutil.rmtree(destination)
         shutil.move(str(unpacked), str(destination))
@@ -165,13 +205,13 @@ def _extract(tar: tarfile.TarFile, directory: Path) -> None:
         if member.isdir():
             continue
         if not member.isfile():
-            raise ValueError(f"{MODEL_ASSET} carries {member.name!r}, which is not a file")
+            raise ValueError(f"the archive carries {member.name!r}, which is not a file")
         target = (root / member.name).resolve()
         if not target.is_relative_to(root):
-            raise ValueError(f"{MODEL_ASSET} carries an entry outside the archive: {member.name!r}")
+            raise ValueError(f"the archive carries an entry outside the archive: {member.name!r}")
         target.parent.mkdir(parents=True, exist_ok=True)
         source = tar.extractfile(member)
         if source is None:
-            raise ValueError(f"{MODEL_ASSET} carries an unreadable entry: {member.name!r}")
+            raise ValueError(f"the archive carries an unreadable entry: {member.name!r}")
         with source, target.open("wb") as out:
             shutil.copyfileobj(source, out, length=1 << 20)

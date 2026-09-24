@@ -44,7 +44,7 @@ _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
 
 _RUN_DIR = Path(os.path.expanduser(os.environ.get("SMRTI_RUN_DIR", "~/.smrti/run")))
 
-_SERVER_MODES = ("rest", "viz", "proxy", "town")
+_SERVER_MODES = ("rest", "viz", "proxy", "town", "decisions")
 
 
 @contextlib.contextmanager
@@ -292,6 +292,28 @@ def serve_proxy(
     typer.echo(f"Upstream: {effective_upstream}")
     with _pidfile("proxy", port):
         run_proxy_server(host=host, port=port)
+
+
+@serve_app.command("decisions")
+def serve_decisions(
+    host: str = typer.Option("127.0.0.1", help="Host"),
+    port: int = typer.Option(8731, help="Port"),
+    threads: int = typer.Option(0, help="Cores the model may hold; 0 for all"),
+    model: Optional[str] = typer.Option(None, help="Student model directory  [env: SMRTI_DECISIONS_MODEL]"),
+) -> None:
+    """Serve the student decision model on the /v1/systemone contract.
+
+    Factor adopts whatever answers on its decision port, and Smrti asks it
+    through SMRTI_DECISIONS_URL, so this stands in for the EdgeJev server on
+    a machine that cannot run Laya.
+    """
+    from smrti.decisions.model import resolve_student
+    from smrti.decisions.student.serve import run_student_server
+
+    directory = model or str(resolve_student())
+    typer.echo(f"Starting Smrti student decisions on http://{host}:{port}/v1/systemone ({directory})")
+    with _pidfile("decisions", port):
+        run_student_server(directory, host=host, port=port, threads=threads or None)
 
 
 @serve_app.command("town")

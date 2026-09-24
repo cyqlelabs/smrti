@@ -52,7 +52,7 @@ DEFAULT_GRAPH = "model.onnx"
 # when the trainer is re-run.
 STUDENT_TAG = "model-student-v1"
 STUDENT_ASSET = "student-minilm-int8.tar.gz"
-STUDENT_SHA256 = ""
+STUDENT_SHA256 = "6a220d06339164c99e1add780afef0e303e6559b08a14463ee16651498fde283"
 STUDENT_URL = f"https://github.com/cyqlelabs/smrti/releases/download/{STUDENT_TAG}/{STUDENT_ASSET}"
 
 # Bounds what will be written to disk from that URL. The artifact is about

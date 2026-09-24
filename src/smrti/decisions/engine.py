@@ -31,7 +31,7 @@ from typing import Any, Mapping
 
 from . import audit
 from .policies import MODE_ACTIVE, MODE_OFF, DecisionPolicy
-from .provider import DecisionProvider, DecisionUnavailable, Decisions, Question, State
+from .provider import DecisionProvider, DecisionUnavailable, DecisionUnsupported, Decisions, Question, State
 
 logger = logging.getLogger("smrti.decisions")
 
@@ -221,6 +221,11 @@ class DecisionEngine:
             decisions = self.provider.ask(
                 state, questions, timeout=self.policy.timeout if timeout is None else timeout
             )
+        except DecisionUnsupported as exc:
+            # The provider is fine; this question is not one it answers.
+            self._record(task, mode, tenant_id, space, outcome="unsupported", applied=False, error=str(exc))
+            self._mirror(task, tenant_id, state, questions, None, str(exc), started)
+            return None
         except DecisionUnavailable as exc:
             self._note(False)
             self._record(task, mode, tenant_id, space, outcome="unavailable", applied=False, error=str(exc))
@@ -264,6 +269,10 @@ class DecisionEngine:
             decisions = await self.provider.ask_async(
                 state, questions, timeout=self.policy.timeout if timeout is None else timeout
             )
+        except DecisionUnsupported as exc:
+            self._record(task, mode, tenant_id, space, outcome="unsupported", applied=False, error=str(exc))
+            self._mirror(task, tenant_id, state, questions, None, str(exc), started)
+            return None
         except DecisionUnavailable as exc:
             self._note(False)
             self._record(task, mode, tenant_id, space, outcome="unavailable", applied=False, error=str(exc))

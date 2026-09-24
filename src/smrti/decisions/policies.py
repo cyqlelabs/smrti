@@ -105,6 +105,21 @@ DEFAULT_COOLDOWN = 60.0
 DEFAULT_CACHE_SIZE = 256
 
 
+ENGINE_AUTO = "auto"
+ENGINE_LAYA = "laya"
+ENGINE_STUDENT = "student"
+ENGINES = (ENGINE_AUTO, ENGINE_LAYA, ENGINE_STUDENT)
+
+
+def _engine(value: str | None) -> str:
+    if value is None or value.strip() == "":
+        return ENGINE_AUTO
+    engine = value.strip().lower()
+    if engine not in ENGINES:
+        raise ValueError(f"SMRTI_DECISIONS_ENGINE must be one of {', '.join(ENGINES)}; got {value!r}")
+    return engine
+
+
 def _mode(value: str | None, fallback: str, name: str) -> str:
     if value is None or value.strip() == "":
         return fallback
@@ -142,6 +157,10 @@ class DecisionPolicy:
     # A server already holding the model, asked over HTTP instead of loading
     # a copy here; empty means load locally.
     url: str = ""
+    # Which local model answers when no server is named: ``laya``,
+    # ``student``, or ``auto`` — the student where the machine cannot run
+    # Laya (see :mod:`smrti.decisions.student.hardware`).
+    engine: str = ENGINE_AUTO
     timeout: float = DEFAULT_TIMEOUT
     cooldown: float = DEFAULT_COOLDOWN
     cache_size: int = DEFAULT_CACHE_SIZE
@@ -193,6 +212,7 @@ class DecisionPolicy:
             model=env.get("SMRTI_DECISIONS_MODEL", "").strip(),
             url=env.get("SMRTI_DECISIONS_URL", "").strip(),
             device=env.get("SMRTI_DECISIONS_DEVICE", "").strip(),
+            engine=_engine(env.get("SMRTI_DECISIONS_ENGINE")),
             timeout=_float(env, "SMRTI_DECISIONS_TIMEOUT", DEFAULT_TIMEOUT),
             cooldown=_float(env, "SMRTI_DECISIONS_COOLDOWN", DEFAULT_COOLDOWN),
             cache_size=_int(env, "SMRTI_DECISIONS_CACHE", DEFAULT_CACHE_SIZE),

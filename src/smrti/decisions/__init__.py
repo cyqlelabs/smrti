@@ -87,22 +87,41 @@ _engine: DecisionEngine | None = None
 _engine_lock = threading.Lock()
 
 
+def _local_provider(policy: DecisionPolicy) -> DecisionProvider:
+    from .policies import ENGINE_LAYA, ENGINE_STUDENT
+
+    engine = policy.engine
+    if engine not in (ENGINE_LAYA, ENGINE_STUDENT):
+        from .student.hardware import prefers_student
+
+        student, why = prefers_student()
+        engine = ENGINE_STUDENT if student else ENGINE_LAYA
+        if student:
+            logger.info("decisions run on the student model: %s", why)
+    if engine == ENGINE_STUDENT:
+        from .student.provider import StudentProvider
+        from .student.runtime import is_ready as student_ready
+
+        # SMRTI_DECISIONS_MODEL may name the Laya directory; the student
+        # takes it only when it holds a student.
+        return StudentProvider(model=policy.model if policy.model and student_ready(policy.model) else "")
+    from .laya import DEFAULT_MODEL, LayaProvider
+
+    return LayaProvider(model=policy.model or DEFAULT_MODEL, device=policy.device or None)
+
+
 def build_engine(policy: DecisionPolicy) -> DecisionEngine:
     """An engine for *policy*: the server ``SMRTI_DECISIONS_URL`` names when
-    there is one, a local Laya provider otherwise, and no provider when no
-    task is configured."""
+    there is one, a local provider otherwise — Laya, or the student where
+    the machine cannot run Laya — and no provider when no task is
+    configured."""
     provider = None
     if policy.any_enabled and policy.url:
         from .remote import RemoteProvider
 
         provider = RemoteProvider(policy.url)
     elif policy.any_enabled:
-        from .laya import DEFAULT_MODEL, LayaProvider
-
-        provider = LayaProvider(
-            model=policy.model or DEFAULT_MODEL,
-            device=policy.device or None,
-        )
+        provider = _local_provider(policy)
     return DecisionEngine(policy, provider)
 
 

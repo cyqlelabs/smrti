@@ -24,8 +24,11 @@ from typing import Any, Mapping
 
 import httpx
 
-from .laya import MAX_QUESTIONS_PER_CALL, _tokens
-from .provider import DecisionUnavailable, Decisions, Question, State, parse_response, questions_payload
+from .laya import MAX_QUESTIONS_PER_CALL
+from .local import _tokens
+from .provider import DecisionUnavailable, DecisionUnsupported, Decisions, Question, State, parse_response, questions_payload
+
+from .student.serve import UNSUPPORTED
 
 # The one route a decision travels.
 REQUEST_PATH = "/v1/systemone"
@@ -47,6 +50,7 @@ class RemoteProvider:
         self.model = MODEL_NAME
         self._client = httpx.Client(base_url=self.base_url, transport=transport)
         self._async = httpx.AsyncClient(base_url=self.base_url, transport=async_transport)
+        self._questions_per_call: int | None = None
 
     @staticmethod
     def _deadline(timeout: float | None) -> float:
@@ -64,16 +68,34 @@ class RemoteProvider:
     def _body(state: State, chunk: Mapping[str, Question]) -> dict[str, Any]:
         return {"model": MODEL_NAME, "state": state, "questions": questions_payload(chunk)}
 
-    @staticmethod
-    def _chunks(questions: Mapping[str, Question]) -> list[dict[str, Question]]:
+    def _per_call(self) -> int:
+        """How many questions ride one call: one for Laya (see ``laya``),
+        every one for a student, which answers a whole head in one pass and
+        would otherwise pay that pass per question. Asked of ``/health``
+        once; a server that does not say is taken for Laya."""
+        if self._questions_per_call is None:
+            per = MAX_QUESTIONS_PER_CALL
+            try:
+                health = self._client.get("/health", timeout=5.0).json()
+                if isinstance(health, Mapping) and health.get("backend") == "student":
+                    per = 256
+            except (httpx.HTTPError, ValueError):
+                pass
+            self._questions_per_call = per
+        return self._questions_per_call
+
+    def _chunks(self, questions: Mapping[str, Question]) -> list[dict[str, Question]]:
         if not questions:
             raise ValueError("a decision needs at least one question")
         items = list(questions.items())
-        return [dict(items[i : i + MAX_QUESTIONS_PER_CALL]) for i in range(0, len(items), MAX_QUESTIONS_PER_CALL)]
+        per = self._per_call()
+        return [dict(items[i : i + per]) for i in range(0, len(items), per)]
 
     @staticmethod
     def _reply(response: httpx.Response) -> Mapping[str, Any]:
         if response.status_code >= 400:
+            if response.status_code == 400 and UNSUPPORTED in response.text:
+                raise DecisionUnsupported(f"the decision server does not answer this question: {response.text[:200]}")
             raise DecisionUnavailable(
                 f"the decision server answered HTTP {response.status_code}: {response.text[:200]}"
             )

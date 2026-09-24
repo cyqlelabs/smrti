@@ -2,7 +2,7 @@ DATASET ?= data/longmemeval_s.json
 HALUMEM ?= data/HaluMem-Medium.jsonl
 BENCH_ARGS ?=
 
-.PHONY: test datasets bench bench-baseline bench-halumem bench-decisions bench-tone bench-all
+.PHONY: test datasets bench bench-baseline bench-halumem bench-decisions bench-tone bench-all distill distill-env distill-corpus distill-label distill-train distill-export distill-evaluate
 
 test:
 	pytest tests/ -q
@@ -38,3 +38,30 @@ bench-tone:
 	PYTHONPATH=. python -m bench.decisions.tone $(BENCH_ARGS)
 
 bench-all: bench bench-halumem
+
+# Distilling Laya into the student decision model (bench/decisions/distill).
+# `distill-env` builds the CUDA environment the trainer runs in; corpus and
+# labelling run in the ordinary one against the teacher at SMRTI_DECISIONS_URL.
+DISTILL_PY ?= $(HOME)/.venvs/smrti-distill/bin/python
+
+distill-env:
+	uv venv -q $(HOME)/.venvs/smrti-distill --python 3.12
+	uv pip install -q --python $(DISTILL_PY) "torch==2.9.1+cu126" --index-url https://download.pytorch.org/whl/cu126
+	uv pip install -q --python $(DISTILL_PY) "transformers>=4.45,<5" onnx onnxruntime onnxscript -e .
+
+distill-corpus:
+	PYTHONPATH=. python -m bench.decisions.distill corpus $(DISTILL_ARGS)
+
+distill-label:
+	PYTHONPATH=. python -m bench.decisions.distill label $(DISTILL_ARGS)
+
+distill-train:
+	PYTHONPATH=. $(DISTILL_PY) -m bench.decisions.distill train $(DISTILL_ARGS)
+
+distill-export:
+	PYTHONPATH=. $(DISTILL_PY) -m bench.decisions.distill export $(DISTILL_ARGS)
+
+distill-evaluate:
+	PYTHONPATH=. python -m bench.decisions.distill evaluate $(DISTILL_ARGS)
+
+distill: distill-corpus distill-label distill-train distill-export distill-evaluate

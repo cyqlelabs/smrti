@@ -1,19 +1,20 @@
 """Whether this machine should run the student rather than Laya.
 
-Laya needs about a gigabyte free and, in practice, a CPU with AVX2: without
+Laya needs a gigabyte to load and, in practice, a CPU with AVX2: without
 it onnxruntime's int8 kernels fall to SSE2 paths, and a 2011 dual core was
 measured at 30–48 s per decision against deadlines of 4–5 s. The student
 is a fraction of that at some cost in accuracy, so the choice is made on
-what the machine can run, once, from what the kernel reports.
+what the machine is, once, from what the kernel reports — the CPU's
+flags and the memory it was built with, not how much happens to be free
+at the moment of the first decision.
 """
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
-# Under this much available memory Laya's graph would push the machine into
-# swap; Factor's own supervisor refuses to start it below the same line.
-LAYA_MIN_AVAILABLE_MB = 1024
+# A machine with less than this can hold Laya's graph beside an agent only
+# by swapping; the box this exists for has 3.5 GB.
+LAYA_MIN_TOTAL_MB = 4096
 
 
 def cpu_flags(path: str = "/proc/cpuinfo") -> set[str]:
@@ -26,10 +27,10 @@ def cpu_flags(path: str = "/proc/cpuinfo") -> set[str]:
     return set()
 
 
-def available_mb(path: str = "/proc/meminfo") -> int | None:
+def total_mb(path: str = "/proc/meminfo") -> int | None:
     try:
         for line in Path(path).read_text().splitlines():
-            if line.startswith("MemAvailable:"):
+            if line.startswith("MemTotal:"):
                 return int(line.split()[1]) // 1024
     except (OSError, ValueError, IndexError):
         pass
@@ -42,9 +43,7 @@ def prefers_student() -> tuple[bool, str]:
     flags = cpu_flags()
     if flags and "avx2" not in flags:
         return True, "the CPU has no AVX2, which Laya's int8 kernels need"
-    have = available_mb()
-    if have is not None and have < LAYA_MIN_AVAILABLE_MB:
-        return True, f"{have} MB available, under the {LAYA_MIN_AVAILABLE_MB} MB Laya needs"
-    if os.environ.get("SMRTI_DECISIONS_ENGINE", "").strip().lower() == "student":
-        return True, "SMRTI_DECISIONS_ENGINE=student"
+    total = total_mb()
+    if total is not None and total < LAYA_MIN_TOTAL_MB:
+        return True, f"{total} MB of memory, under the {LAYA_MIN_TOTAL_MB} MB Laya needs beside an agent"
     return False, ""

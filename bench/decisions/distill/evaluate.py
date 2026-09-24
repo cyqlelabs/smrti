@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import numpy as np
 import subprocess
 import sys
 import time
@@ -17,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from smrti.decisions.student import registry
-from smrti.decisions.student.runtime import Student
+from smrti.decisions.student.runtime import Student, _confidence
 
 from .corpus import STATES
 from .label import LABELS, read_rows
@@ -35,15 +36,19 @@ def held_out_agreement(student_dir: Path, tasks: list[str], limit: int = 2000) -
         rows = [r for r in read_rows(LABELS / f"{task}.jsonl") if is_held_out(r["id"]) and r["id"] in states][:limit]
         agree = total = 0
         abs_err = 0.0
+        # Agreement where the teacher was sure enough to act on — Laya's
+        # entropy confidence at the engines' lowest bar (0.4) — which is
+        # the share that changes what an engine does.
+        sure_agree = sure_total = 0
         by_lang: dict[str, list[float]] = defaultdict(lambda: [0, 0])
         started = time.monotonic()
         for r in rows:
             answer = student.predict(states[r["id"]]["state"], {
-                name: q.payload() for name, q in spec.questions.items()
-            } if spec.kind != registry.NOULS else {k: q.payload() for k, q in spec.questions.items()})["answers"]
+                spec.question_name(name): q.payload() for name, q in spec.questions.items()
+            })["answers"]
             if spec.kind == registry.NOULS:
                 for key in spec.keys:
-                    p, t = answer[key]["noul"], r["targets"][key]
+                    p, t = answer[spec.question_name(key)]["noul"], r["targets"][key]
                     ok = (p > 0.5) == (t > 0.5)
                     agree += ok
                     total += 1
@@ -57,11 +62,16 @@ def held_out_agreement(student_dir: Path, tasks: list[str], limit: int = 2000) -
                 ok = choice == teacher
                 agree += ok
                 total += 1
+                if _confidence(np.array(list(r["targets"].values()))) >= 0.4:
+                    sure_agree += ok
+                    sure_total += 1
                 abs_err += sum(abs(answer[name]["probabilities"][k] - r["targets"][k]) for k in spec.keys) / spec.width
                 by_lang[r["lang"]][0] += ok
                 by_lang[r["lang"]][1] += 1
         report[task] = {
             "n": len(rows), "agreement": round(agree / total, 4) if total else None,
+            "agreement_when_teacher_sure": round(sure_agree / sure_total, 4) if sure_total else None,
+            "teacher_sure": sure_total,
             "mean_abs_error": round(abs_err / total, 4) if total else None,
             "ms_per_state": round(1000 * (time.monotonic() - started) / max(len(rows), 1), 1),
             "by_lang": {l: round(a / t, 3) for l, (a, t) in sorted(by_lang.items()) if t},

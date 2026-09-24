@@ -52,12 +52,13 @@ def _targets(provider: RemoteProvider, spec: registry.TaskSpec, state: Any) -> d
         return out
     name, q = next(iter(spec.questions.items()))
     answer = provider.ask(state, {name: q}, timeout=TIMEOUT)[name]
-    if isinstance(q, Choice):
-        dist = {k: float(answer.probabilities.get(k, 0.0)) for k in spec.keys}
-    else:
-        assert isinstance(q, Score)
-        dist = {k: float(answer.probabilities.get(k, 0.0)) for k in spec.keys}
-    total = sum(dist.values()) or 1.0
+    assert isinstance(q, (Choice, Score))
+    dist = {k: float(answer.probabilities.get(k, 0.0)) for k in spec.keys}
+    total = sum(dist.values())
+    if total <= 0:
+        # A reply without a distribution still names its choice.
+        chosen = answer.choice if isinstance(q, Choice) else str(int(round(answer.score)))
+        return {k: 1.0 if k == chosen else 0.0 for k in spec.keys}
     return {k: v / total for k, v in dist.items()}
 
 

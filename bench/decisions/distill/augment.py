@@ -35,7 +35,7 @@ logger = logging.getLogger("distill.augment")
 MODEL = os.environ.get("SMRTI_DISTILL_LLM", "google/gemini-2.5-flash-lite")
 URL = os.environ.get("SMRTI_DISTILL_LLM_URL", "https://openrouter.ai/api/v1/chat/completions")
 CACHE = Path(DATA) / "distill" / "cache"
-CONCURRENCY = 6
+CONCURRENCY = int(os.environ.get("SMRTI_DISTILL_LLM_CONCURRENCY", "12"))
 
 
 def _key() -> str:
@@ -176,7 +176,7 @@ def synth(kind: str, lang: str, n: int, *, seed: int = 0) -> list[dict[str, Any]
     spec = _KINDS[kind]
     prompts = []
     rng = random.Random(f"{kind}/{lang}/{seed}")
-    for k, per in enumerate(_batches(n)):
+    for k, per in enumerate(_batches(n, spec.get("per", 25))):
         hint = rng.choice(spec["angles"])
         prompts.append((
             f"{spec['prompt']}\n\nLanguage: {_LANG[lang]}. Write {per} items, varied in topic, length and "
@@ -250,6 +250,7 @@ _KINDS: dict[str, dict[str, Any]] = {
                   "unblock it.",
         "fields": "task, repeated_call, result",
         "required": ("task", "repeated_call", "result"),
+        "per": 12,
         "angles": ["websites and forms", "files and shell commands", "email and messaging", "background jobs",
                    "APIs and credentials", "devices on the local network"],
     },
@@ -267,6 +268,9 @@ _KINDS: dict[str, dict[str, Any]] = {
                   "as a skill; most should be one-off errands.",
         "fields": "task, trajectory, reply",
         "required": ("task", "trajectory", "reply"),
+        # A trajectory is a page of text; a batch of twenty-five is a
+        # four-minute answer, and a dropped connection loses all of it.
+        "per": 6,
         "angles": ["email and reports", "web scraping", "file edits and scripts", "system maintenance",
                    "shopping and bookings", "home automation", "research questions"],
     },

@@ -16,7 +16,7 @@ from typing import Any, Mapping
 
 import numpy as np
 
-from ..provider import Choice, DecisionUnavailable, Noul, Question, Score
+from ..provider import Choice, DecisionUnavailable, DecisionUnsupported, Noul, Question, Score
 from . import registry
 
 CONFIG_NAME = "student.json"
@@ -84,6 +84,17 @@ def _softmax(x: np.ndarray) -> np.ndarray:
     return e / e.sum()
 
 
+def _confidence(probs: np.ndarray) -> float:
+    """Laya's confidence for a choice, so the thresholds the engines were
+    calibrated on transfer: one minus the normalised entropy of the
+    distribution. A two-way split of 0.86/0.14 is 0.4, the tone line."""
+    k = len(probs)
+    if k < 2:
+        return 1.0
+    entropy = -float((probs * np.log(np.clip(probs, 1e-12, 1.0))).sum())
+    return float(np.clip(1.0 - entropy / math.log(k), 0.0, 1.0))
+
+
 class Student:
     """A loaded student: tokenizer, graph, heads."""
 
@@ -139,13 +150,14 @@ class Student:
         name = next(iter(m.names))
         dist = {k: round(float(p), 4) for k, p in zip(keys, probs)}
         top = int(np.argmax(probs))
+        confidence = round(_confidence(probs), 4)
         if m.spec.kind == registry.CHOICE:
             answers[name] = {"type": "choice", "choice": keys[top], "probabilities": dist,
-                             "confidence": round(float(probs[top]), 4)}
+                             "confidence": confidence}
         else:
             expected = float((np.arange(len(probs)) * probs).sum())
             answers[name] = {"type": "score", "score": round(expected, 4), "probabilities": dist,
-                             "confidence": round(float(probs[top]), 4)}
+                             "confidence": confidence}
         return answers, tokens
 
     def predict(self, state: Any, questions_payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -156,7 +168,7 @@ class Student:
         try:
             matches = registry.match(questions)
         except LookupError as exc:
-            raise DecisionUnavailable(f"the student cannot answer this: {exc}") from exc
+            raise DecisionUnsupported(f"the student cannot answer this: {exc}") from exc
         answers: dict[str, Any] = {}
         tokens = 0
         for m in matches:

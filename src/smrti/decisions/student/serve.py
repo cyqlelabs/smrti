@@ -14,17 +14,29 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from ..provider import DecisionUnavailable
+from ..provider import DecisionUnavailable, DecisionUnsupported
 from .runtime import HEAD_MAX_LEN, MAX_LEN, Student
 
 logger = logging.getLogger("smrti.decisions.student.serve")
 
 REQUEST_PATH = "/v1/systemone"
+# The error type a refusal carries, so a client tells "not one of my
+# questions" from a bad request.
+UNSUPPORTED = "unsupported_question"
+# A request is a state under the window and a few questions; anything past
+# this is not one, and is refused before it is read into memory.
+MAX_BODY = 1 << 20
+# How long a caller may hold a handler thread without sending, and how long
+# a request waits for the one graph before it is told to try later: a
+# caller that has already given up on its deadline must not be served.
+CLIENT_TIMEOUT = 30.0
+QUEUE_TIMEOUT = 20.0
 
 
 def _handler(student: Student, lock: threading.Lock) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
+        timeout = CLIENT_TIMEOUT
 
         def log_message(self, *_args: Any) -> None:
             pass
@@ -37,7 +49,7 @@ def _handler(student: Student, lock: threading.Lock) -> type[BaseHTTPRequestHand
             self.end_headers()
             try:
                 self.wfile.write(data)
-            except BrokenPipeError:
+            except (BrokenPipeError, ConnectionResetError):
                 # The caller gave up on its deadline; nothing to tell it.
                 pass
 
@@ -58,12 +70,24 @@ def _handler(student: Student, lock: threading.Lock) -> type[BaseHTTPRequestHand
                 return
             try:
                 n = int(self.headers.get("Content-Length") or 0)
+                if not 0 <= n <= MAX_BODY:
+                    raise ValueError(f"the request body must be 0 to {MAX_BODY} bytes")
                 body = json.loads(self.rfile.read(n) or b"{}")
+                if not isinstance(body, dict):
+                    raise ValueError("the request body must be a JSON object")
                 state, questions = body.get("state"), body.get("questions")
                 if state is None or not isinstance(questions, dict) or not questions:
                     raise ValueError("a request needs a state and a questions object")
-                with lock:
+                if not lock.acquire(timeout=QUEUE_TIMEOUT):
+                    self._send(503, {"error": {"message": "the student is busy", "type": "server_busy"}})
+                    return
+                try:
                     out = student.predict(state, questions)
+                finally:
+                    lock.release()
+            except DecisionUnsupported as exc:
+                self._send(400, {"error": {"message": str(exc)[:400], "type": UNSUPPORTED}})
+                return
             except (ValueError, DecisionUnavailable) as exc:
                 self._send(400, {"error": {"message": str(exc)[:400], "type": "invalid_request_error"}})
                 return

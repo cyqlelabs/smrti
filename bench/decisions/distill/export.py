@@ -50,11 +50,17 @@ def export(checkpoint: Path = OUT / "checkpoint", out: Path = OUT / "student", *
             opset_version=17, dynamo=False,
         )
     onnx.checker.check_model(str(fp32))
-    quantize_dynamic(str(fp32), str(out / "model.onnx"), weight_type=QuantType.QInt8)
-    fp32.unlink()
+    quantize_dynamic(str(fp32), str(out / "model.onnx"), weight_type=QuantType.QInt8, per_channel=True)
     tokenizer.backend_tokenizer.save(str(out / "tokenizer.json"))
     (out / CONFIG_NAME).write_text(json.dumps(meta, indent=2, ensure_ascii=False))
     assert is_ready(out)
+    # The fp32 graph beside it, as its own student directory, so what the
+    # quantization cost can be measured with the same evaluator.
+    full = out.parent / "student-fp32"
+    full.mkdir(exist_ok=True)
+    fp32.replace(full / "model.onnx")
+    for name in ("tokenizer.json", CONFIG_NAME):
+        shutil.copy(out / name, full / name)
 
     # The artifact answers like the checkpoint: same argmax, probabilities
     # within quantization noise, on a handful of texts.

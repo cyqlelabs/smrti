@@ -164,11 +164,25 @@ def build_tone(scale: float) -> list[State]:
     """Sentences the sentiment estimator would flag, since only those reach
     the tone check: every negative-enough sentence of the corpora, and the
     generated pairs that make the distinction hard."""
+    import numpy as np
     from smrti.core.embed import get_embedding_provider
-    from smrti.extraction.sentiment import estimate_valence
+    from smrti.extraction import sentiment
 
     rng = _rng("tone")
     embed = get_embedding_provider()
+    neg, pos = (np.asarray(v) for v in sentiment._ensure_anchors(embed))
+    neg /= np.linalg.norm(neg, axis=1, keepdims=True)
+    pos /= np.linalg.norm(pos, axis=1, keepdims=True)
+
+    def valences(vecs: list[list[float]]) -> np.ndarray:
+        """``sentiment.estimate_valence`` over a batch, from its vectors:
+        the mean cosine to each anchor set, the difference scaled by three,
+        zero inside the dead zone."""
+        m = np.asarray(vecs)
+        m /= np.linalg.norm(m, axis=1, keepdims=True)
+        diff = (m @ pos.T).mean(1) - (m @ neg.T).mean(1)
+        scaled = np.clip(diff * 3.0, -1.0, 1.0)
+        return np.where(np.abs(diff) < 0.03, 0.0, scaled)
     pool: list[Turn] = []
     for s in list(sources.longmemeval_sessions(sources.longmemeval()).values()) + sources.halumem_sessions(sources.halumem()):
         for t in s.turns:
@@ -181,8 +195,8 @@ def build_tone(scale: float) -> list[State]:
     texts = [t.text for t in pool]
     for i in range(0, len(texts), 256):
         vecs = embed.embed_batch(texts[i : i + 256])
-        for t, _v in zip(pool[i : i + 256], vecs):
-            if estimate_valence(t.text, embed) <= -0.3:
+        for t, v in zip(pool[i : i + 256], valences(vecs)):
+            if v <= -0.3:
                 negative.append(t)
     logger.info("tone: %d of %d sentences read negative", len(negative), len(pool))
     out = [State("tone", {"text": t.text[:2000], "author": "assistant" if t.role == "assistant" else "user",

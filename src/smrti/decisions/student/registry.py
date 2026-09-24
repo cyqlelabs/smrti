@@ -41,8 +41,13 @@ class TaskSpec:
     # For noul groups, how a request's question name maps to a group key —
     # rerank asks ``c0_direct`` for candidate ``c0``.
     name_pattern: str = r"^(?P<key>[a-z_]+)$"
+    # The reverse: the request name the engine uses for a group key.
+    name_format: str = "{key}"
     # The state keys the trainer must produce, for the corpus builder.
     state_keys: tuple[str, ...] = field(default_factory=tuple)
+
+    def question_name(self, key: str) -> str:
+        return self.name_format.format(key=key)
 
     @property
     def keys(self) -> tuple[str, ...]:
@@ -84,7 +89,7 @@ def _smrti_questions() -> dict[str, TaskSpec]:
             state_keys=("message", "author", "known_context"),
         ),
         "rerank": TaskSpec(
-            "rerank", NOULS, rerank, name_pattern=r"^c\d+_(?P<key>[a-z]+)$",
+            "rerank", NOULS, rerank, name_pattern=r"^c\d+_(?P<key>[a-z]+)$", name_format="c0_{key}",
             state_keys=("question", "candidates"),
         ),
         "tone": TaskSpec(
@@ -216,6 +221,10 @@ def match(questions: Mapping[str, Question]) -> list[Match]:
             }
             if not names:
                 continue
+            if len(set(names.values())) < len(names):
+                # Two candidates in one request would share one reading of
+                # the state and get one answer; Smrti asks per candidate.
+                raise LookupError(f"{spec.name} answers one candidate per request, got {sorted(names)}")
             for name, key in names.items():
                 _warn_wording(spec, unmatched[name], spec.questions[key])
                 del unmatched[name]

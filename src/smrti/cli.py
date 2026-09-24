@@ -310,7 +310,10 @@ def serve_decisions(
     from smrti.decisions.model import resolve_student
     from smrti.decisions.student.serve import run_student_server
 
-    directory = model or str(resolve_student())
+    try:
+        directory = model or str(resolve_student())
+    except (FileNotFoundError, ValueError) as exc:
+        raise typer.BadParameter(str(exc)) from exc
     typer.echo(f"Starting Smrti student decisions on http://{host}:{port}/v1/systemone ({directory})")
     with _pidfile("decisions", port):
         run_student_server(directory, host=host, port=port, threads=threads or None)

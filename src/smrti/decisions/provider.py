@@ -39,6 +39,13 @@ class DecisionUnavailable(Exception):
     """
 
 
+class DecisionUnsupported(DecisionUnavailable):
+    """The provider answers, but not this question: a head the student was
+    not trained for. The caller falls back the same way, and the engine
+    files it without opening the cooldown a failing provider earns — the
+    provider is fine, and the next question is probably one it answers."""
+
+
 @dataclass(frozen=True)
 class Noul:
     """A yes/no proposition; the answer is the probability that it holds.

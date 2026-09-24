@@ -100,8 +100,11 @@ def _local_provider(policy: DecisionPolicy) -> DecisionProvider:
             logger.info("decisions run on the student model: %s", why)
     if engine == ENGINE_STUDENT:
         from .student.provider import StudentProvider
+        from .student.runtime import is_ready as student_ready
 
-        return StudentProvider(model=policy.model)
+        # SMRTI_DECISIONS_MODEL may name the Laya directory; the student
+        # takes it only when it holds a student.
+        return StudentProvider(model=policy.model if policy.model and student_ready(policy.model) else "")
     from .laya import DEFAULT_MODEL, LayaProvider
 
     return LayaProvider(model=policy.model or DEFAULT_MODEL, device=policy.device or None)

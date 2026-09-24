@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import threading
+import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
 
@@ -12,7 +13,7 @@ import pytest
 from smrti.decisions import build_engine
 from smrti.decisions.extraction import ROUTING_QUESTIONS, TONE_QUESTION
 from smrti.decisions.policies import DecisionPolicy
-from smrti.decisions.provider import Choice, DecisionUnavailable, Noul
+from smrti.decisions.provider import Choice, DecisionUnavailable, DecisionUnsupported, Noul
 from smrti.decisions.remote import RemoteProvider
 from smrti.decisions.retrieval import evidence_questions
 from smrti.decisions.student import hardware, registry
@@ -76,7 +77,7 @@ class _Stub:
         try:
             matches = registry.match(questions)
         except LookupError as exc:
-            raise DecisionUnavailable(str(exc)) from exc
+            raise DecisionUnsupported(str(exc)) from exc
         answers = {}
         for m in matches:
             if m.spec.kind == registry.NOULS:
@@ -119,7 +120,7 @@ def test_the_server_answers_the_systemone_contract_the_remote_provider_speaks(se
 
 def test_the_server_refuses_a_question_outside_the_registry_so_the_caller_falls_back(server):
     provider = RemoteProvider(server)
-    with pytest.raises(DecisionUnavailable, match="HTTP 400"):
+    with pytest.raises(DecisionUnsupported, match="does not answer this question"):
         provider.ask("s", {"whatever": Noul("is it?")}, timeout=5.0)
     provider.close()
 
@@ -150,10 +151,44 @@ def test_hardware_reads_the_kernel(tmp_path, monkeypatch):
     assert "avx2" not in hardware.cpu_flags(str(cpu))
     mem = tmp_path / "meminfo"
     mem.write_text("MemTotal: 3620000 kB\nMemAvailable: 512000 kB\n")
-    assert hardware.available_mb(str(mem)) == 500
+    assert hardware.total_mb(str(mem)) == 3535
     monkeypatch.setattr(hardware, "cpu_flags", lambda: {"avx2", "sse4_2"})
-    monkeypatch.setattr(hardware, "available_mb", lambda: 8000)
-    monkeypatch.delenv("SMRTI_DECISIONS_ENGINE", raising=False)
+    monkeypatch.setattr(hardware, "total_mb", lambda: 16000)
     assert hardware.prefers_student() == (False, "")
-    monkeypatch.setattr(hardware, "available_mb", lambda: 700)
+    monkeypatch.setattr(hardware, "total_mb", lambda: 3535)
     assert hardware.prefers_student()[0]
+
+
+# ── refusals ───────────────────────────────────────────────────────────────
+
+
+def test_two_candidates_in_one_request_are_refused():
+    with pytest.raises(LookupError, match="one candidate per request"):
+        registry.match({**evidence_questions(["c0"]), **evidence_questions(["c1"])})
+
+
+def test_an_unsupported_question_opens_no_cooldown(server):
+    from smrti.decisions import DecisionEngine
+    from smrti.decisions.policies import DecisionPolicy
+
+    engine = DecisionEngine(DecisionPolicy.from_env({"SMRTI_DECISIONS_URL": server}), RemoteProvider(server))
+    assert engine.decide("entity", "s", {"identity": Choice("which?", {"c0": "a", "none": "b"})},
+                         tenant_id="t", space="s") is None
+    # The next question, one the student answers, is asked rather than
+    # skipped for a cooldown.
+    outcome = engine.decide("routing", {"message": "hola"}, ROUTING_QUESTIONS, tenant_id="t", space="s")
+    assert outcome is not None and outcome.decisions.noul("durable") == 0.8
+
+
+def test_the_remote_provider_sends_a_student_a_whole_head_at_once(server):
+    provider = RemoteProvider(server)
+    provider.ask({"message": "hola"}, ROUTING_QUESTIONS, timeout=5.0)
+    assert provider._per_call() == 256
+    provider.close()
+
+
+def test_the_server_refuses_a_body_that_is_not_an_object(server):
+    req = urllib.request.Request(server + "/v1/systemone", data=b"[1, 2]", headers={"Content-Type": "application/json"})
+    with pytest.raises(urllib.error.HTTPError) as err:
+        urllib.request.urlopen(req)
+    assert err.value.code == 400 and b"JSON object" in err.value.read()

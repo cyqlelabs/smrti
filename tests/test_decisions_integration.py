@@ -747,6 +747,7 @@ def test_the_decision_log_endpoints_and_metrics(client):
     assert records[0]["task"] == "rerank" and records[0]["outcome"] == "reordered"
     body = client.get("/metrics").text
     assert 'smrti_decisions_mode{task="rerank"} 0' in body
+    assert 'smrti_decisions_mode{task="tone"} 0' in body
     assert 'smrti_decisions_total{task="rerank",mode="shadow",outcome="reordered"} 1' in body
     assert client.delete("/decisions").json() == {"status": "ok"}
     assert client.get("/decisions").json() == []

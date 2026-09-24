@@ -123,9 +123,16 @@ class RemoteProvider:
                     REQUEST_PATH, json=self._body(state, chunk), timeout=self._remaining(stop_at)
                 )
             except httpx.HTTPError as exc:
-                raise DecisionUnavailable(f"the decision server at {self.base_url} is unreachable: {exc}") from exc
+                raise self._unreachable(exc) from exc
             pieces.append(self._reply(response))
         return parse_response(self._merge(pieces), questions, latency_ms=(time.monotonic() - started) * 1000)
+
+    def _unreachable(self, exc: httpx.HTTPError) -> DecisionUnavailable:
+        # httpx raises some transport errors with an empty message (a reset
+        # mid-response is one), and "unreachable: " says nothing.
+        return DecisionUnavailable(
+            f"the decision server at {self.base_url} is unreachable: {str(exc) or type(exc).__name__}"
+        )
 
     async def ask_async(
         self, state: State, questions: Mapping[str, Question], *, timeout: float | None = None
@@ -140,7 +147,7 @@ class RemoteProvider:
                     REQUEST_PATH, json=self._body(state, chunk), timeout=self._remaining(stop_at)
                 )
             except httpx.HTTPError as exc:
-                raise DecisionUnavailable(f"the decision server at {self.base_url} is unreachable: {exc}") from exc
+                raise self._unreachable(exc) from exc
             pieces.append(self._reply(response))
         return parse_response(self._merge(pieces), questions, latency_ms=(time.monotonic() - started) * 1000)
 

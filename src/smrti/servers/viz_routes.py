@@ -329,11 +329,12 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         # decisions made since the process started, by task, mode and outcome
         from smrti.decisions import audit as _audit
         from smrti.decisions import get_decisions as _get_decisions
+        from smrti.decisions.policies import TASKS as _TASKS
 
         engine = _get_decisions()
         lines.append("# HELP smrti_decisions_mode The mode each decision task runs under (0 off, 1 shadow, 2 active).")
         lines.append("# TYPE smrti_decisions_mode gauge")
-        for task in ("routing", "rerank", "supersession", "entity"):
+        for task in _TASKS:
             level = {"off": 0, "shadow": 1, "active": 2}.get(engine.mode(task), 0)
             lines.append(f'smrti_decisions_mode{{task="{task}"}} {level}')
         counts = _audit.counters()

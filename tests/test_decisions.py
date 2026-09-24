@@ -1567,6 +1567,16 @@ def test_a_server_that_is_down_is_unavailable_not_an_error():
     provider.close()
 
 
+def test_a_transport_error_with_no_message_is_named_by_its_type():
+    def reset(request):
+        raise httpx.ReadError("", request=request)
+
+    provider = _remote(reset)
+    with pytest.raises(DecisionUnavailable, match="unreachable: ReadError"):
+        provider.ask("s", {"q": Noul("x")}, timeout=5.0)
+    provider.close()
+
+
 def test_a_reply_that_is_not_json_or_not_an_object_is_unavailable():
     provider = _remote(lambda request: httpx.Response(200, content=b"<html>"))
     with pytest.raises(DecisionUnavailable, match="not JSON"):

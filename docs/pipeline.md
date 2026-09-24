@@ -23,7 +23,7 @@ flowchart TD
 
     subgraph RECEIVE ["  ① Receive  "]
         GATE["🔌 Interface\nMCP · REST · Proxy"]
-        SENTIMENT["💜 Emotional Tone\nAuto-detected valence\n& intensity"]
+        SENTIMENT["💜 Emotional Tone\nAuto-detected valence & intensity\na speaker's mood is damped"]
         WHEN["🗓️ Temporal Resolution\n'mañana' → 2026-08-27\nresolved against the write time"]
     end
 
@@ -88,7 +88,7 @@ flowchart TD
     ATOMS -->|"on recall"| KNN & BM25
     KNN & BM25 --> FUSE
     FUSE --> EXPAND --> SALIENCE --> DIVERSE
-    SALIENCE -.->|"shortlist"| JUDGE -.-> DIVERSE
+    SALIENCE -.->|"shortlist, one at a time\nwithin the deadline"| JUDGE -.-> DIVERSE
     DIVERSE --> CRITICAL & ANTIPATTERN & CONTEXT_OUT
     CRITICAL & ANTIPATTERN & CONTEXT_OUT --> RESPOND
 

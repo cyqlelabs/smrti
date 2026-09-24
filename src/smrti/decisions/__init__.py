@@ -13,7 +13,9 @@ put in shadow or disabled independently, and falls back to the deterministic
 path on any failure.
 
 The provider is the local multilingual Laya model
-(``smrti.decisions.laya``); the interface in ``provider.py`` keeps callers
+(``smrti.decisions.laya``), the distilled student where the machine cannot
+run Laya (``smrti.decisions.student``), or a server already holding either
+(``smrti.decisions.remote``); the interface in ``provider.py`` keeps callers
 independent of the model runtime.
 
 What a decision may never do: restore a forgotten atom, confer permanence,

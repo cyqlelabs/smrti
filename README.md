@@ -103,14 +103,15 @@ The constructor also takes `tenant_id`, `write_space`, `read_spaces`, `ignore_pa
 smrti init --db ~/.smrti/memory.db --personality balanced   # create a database
 smrti status                                                # inspect it
 
-smrti serve mcp     # MCP stdio server (Claude, etc.)
-smrti serve rest    # REST API on :8420
-smrti serve viz     # REST API + memory visualizer in the browser
-smrti serve proxy   # OpenAI-compatible proxy on :8421
-smrti serve town    # city-builder simulation demo on :8430
+smrti serve mcp        # MCP stdio server (Claude, etc.)
+smrti serve rest       # REST API on :8420
+smrti serve viz        # REST API + memory visualizer in the browser
+smrti serve proxy      # OpenAI-compatible proxy on :8421
+smrti serve town       # city-builder simulation demo on :8430
+smrti serve decisions  # student decision model on :8731 (see Semantic decisions)
 
-smrti stop          # gracefully stop all servers started by `smrti serve`
-smrti stop rest     # stop one mode (rest, viz, proxy, town); --port to narrow further
+smrti stop             # gracefully stop all servers started by `smrti serve`
+smrti stop rest        # stop one mode (rest, viz, proxy, town, decisions); --port to narrow further
 ```
 
 ## How It Works
@@ -140,7 +141,7 @@ Similarity multiplies the standing terms, so a memory that is not about the ques
 - `agent_source_trust` discounts an agent-authored memory's standing, never its similarity.
 - Episodes repeating one already chosen from the same minutes share `max(2, top_k // 6)` slots; beliefs keep up to two.
 - Results below the personality's `min_confidence_to_surface` are excluded unless you pass `min_confidence`; forgotten memories never return.
-- The core [decision engine](#semantic-decisions) judges the top candidates as evidence for the question and blends that judgement with salience; each result then carries an `evidence` score. Pass `rerank=False` to skip the judgement. Only what is returned gets the access boost; `attend(atom_ids)` boosts what an external reranker kept out of a wider `recall(boost=False)`.
+- The core [decision engine](#semantic-decisions) judges the top candidates as evidence for the question and blends that judgement with salience; each result then carries an `evidence` score. Pass `rerank=False` to skip the judgement. Only what is returned gets the access boost; `attend(atom_ids)` boosts what an external reranker kept out of a wider `recall(boost=False)`. The REST and MCP `recall` take both flags.
 
 Each result carries a `severity`: `critical_warning` (a valence you stated, on anything but a bare concept), `known_antipattern` (a belief whose probability fell below 0.3, where a superseded preference or constraint lands), or `context`.
 
@@ -160,7 +161,9 @@ One consolidation epoch: revise pending evidence, decay attention and confidence
 
 At five points a rule cannot tell what a sentence means. Instead of a generative LLM call, the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice among options, a score) and never writes prose. It runs as an int8 ONNX graph — no PyTorch, about 560MB resident. Every task is active by default; a task can run in `shadow` (ask and record, apply nothing) or be turned `off`. Any failure or timeout falls back to the deterministic path.
 
-The runtime installs with Smrti; the weights do not. The first decision fetches them once (250MB, checked against a checksum) into `~/.smrti/decision-model`, or reuses `~/.factor/decision-model` when [Factor](https://github.com/cyqlelabs/factor) already holds a copy. Fetch and load run on their own thread, so recall answers from the deterministic path until the model is ready. `SMRTI_DECISIONS_MODEL` points at a directory you unpacked yourself; `SMRTI_DECISIONS_URL` asks a server that already holds the model (Factor's EdgeJev on loopback, or any `POST /v1/systemone`) and loads nothing here — one copy of 560 MB is what a small machine can hold, not two; `SMRTI_DECISIONS=off` downloads nothing at all.
+The runtime installs with Smrti; the weights do not. The first decision fetches them once (250MB, checked against a checksum) into `~/.smrti/decision-model`, or reuses `~/.factor/decision-model` when [Factor](https://github.com/cyqlelabs/factor) already holds a copy. Fetch and load run on their own thread, so recall answers from the deterministic path until the model is ready. `SMRTI_DECISIONS_MODEL` points at a directory you unpacked yourself; `SMRTI_DECISIONS_URL` asks a server that already holds the model (Factor's EdgeJev on loopback, `smrti serve decisions`, or any `POST /v1/systemone`) and loads nothing here — one copy of 560 MB is what a small machine can hold, not two; `SMRTI_DECISIONS=off` downloads nothing at all.
+
+Laya needs AVX2. Without it, a 2011 dual-core took 30 to 48 seconds per decision against a 5-second deadline. So on a CPU without AVX2, or a machine with less than 4 GB of memory, a smaller student model answers instead: a 6-layer multilingual encoder trained on Laya's answers, fetched once (93 MB) into `~/.smrti/student-model`. It answers in 0.1 to 2.3 seconds on that same dual-core and agrees with Laya on 75–94% of Smrti's questions. It cannot judge `entity`, because the candidates change with every call, so entity matches there take the deterministic path. `SMRTI_DECISIONS_ENGINE` forces either model. `smrti serve decisions` serves the student on `:8731` so Factor and several Smrti processes can share one copy through `SMRTI_DECISIONS_URL`.
 
 | Task           | Decides                                                                                                                              |
 | -------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
@@ -176,10 +179,11 @@ A decision never restores a forgotten atom, confers permanence, changes tenant o
 export SMRTI_DECISIONS=off                      # deterministic only
 export SMRTI_DECISIONS_RERANK=shadow            # per task: off | shadow | active
 export SMRTI_DECISIONS_MODEL=/models/laya-int8  # a directory you unpacked; no download
+export SMRTI_DECISIONS_ENGINE=student           # auto | laya | student
 export SMRTI_DECISIONS_THREADS=2                # cap the cores inference may hold
 ```
 
-`GET /decisions` lists every decision, `/metrics` counts them as `smrti_decisions_total`, `make bench-decisions` scores the routing gate and `make bench-tone` the tone check. Thresholds are in the [Configuration Reference](#configuration-reference).
+`GET /decisions` lists every decision, `/metrics` counts them as `smrti_decisions_total`, `make bench-decisions` scores the routing gate, `make bench-tone` the tone check, and `make distill` retrains the student. Thresholds are in the [Configuration Reference](#configuration-reference).
 
 ## Server Modes
 
@@ -210,7 +214,7 @@ claude mcp add smrti -- smrti serve mcp
 | Tool                  | Description                                                                                       |
 | --------------------- | ------------------------------------------------------------------------------------------------- |
 | `smrti_remember`      | Store an episode, goal, or belief (use `type=belief` + `evidence` to assert a probabilistic fact) |
-| `smrti_recall`        | Vector and BM25 search fused, ranked by salience, each result classified by severity              |
+| `smrti_recall`        | Vector and BM25 search fused, ranked by salience, each result classified by severity; `boost=false` and `rerank=false` read without the access boost or the evidence judgement |
 | `smrti_reflect`       | Run a consolidation epoch                                                                         |
 | `smrti_forget`        | Stop memories matching a query from surfacing; the next epoch may prune them                      |
 | `smrti_status`        | Memory statistics and the tenant's spaces                                                         |
@@ -317,7 +321,7 @@ All server modes read the same environment variables. Everything works with zero
 | Variable                 | Default              | Purpose                                            |
 | ------------------------ | -------------------- | -------------------------------------------------- |
 | `SMRTI_DB`               | `~/.smrti/memory.db` | Database file path                                 |
-| `SMRTI_HOME`             | `~/.smrti`           | Where the decision model is unpacked               |
+| `SMRTI_HOME`             | `~/.smrti`           | Where the decision models are unpacked             |
 | `SMRTI_PERSONALITY`      | `balanced`           | Personality preset                                 |
 | `SMRTI_TENANT_ID`        | `default`            | Tenant partition (hard isolation)                  |
 | `SMRTI_SPACE`            | `default`            | Write space                                        |
@@ -368,14 +372,15 @@ To get the knowledge graph from `serve rest` or `serve mcp`, point `SMRTI_EXTRAC
 | --------------------------------------------- | ------------------------- | ----------------------------------------------------------------------------- |
 | `SMRTI_DECISIONS`                             | `active`                  | Mode for every decision task: `off`, `shadow` (ask and record, apply nothing), `active` |
 | `SMRTI_DECISIONS_ROUTING` / `_RERANK` / `_SUPERSESSION` / `_ENTITY` / `_TONE` | `SMRTI_DECISIONS` | Per-task mode override                                    |
-| `SMRTI_DECISIONS_MODEL`                       | Factor's copy, else `~/.smrti/decision-model` | Model directory to load; unset, the weights are fetched there on first use |
+| `SMRTI_DECISIONS_ENGINE`                      | `auto`                    | Local model: `laya`, `student`, or `auto` (the student on a CPU without AVX2 or under 4 GB of memory) |
+| `SMRTI_DECISIONS_MODEL`                       | Laya: Factor's copy, else `~/.smrti/decision-model`; student: `~/.smrti/student-model` | Model directory to load; unset, the weights are fetched there on first use |
 | `SMRTI_DECISIONS_URL`                         | unset                     | A server already holding the model (EdgeJev's `POST /v1/systemone`, e.g. Factor's on `http://127.0.0.1:8731`); set, nothing is loaded here |
-| `SMRTI_DECISIONS_DEVICE`                      | auto                      | Execution provider passed to the ONNX runtime; unset lets it choose            |
+| `SMRTI_DECISIONS_DEVICE`                      | auto                      | Execution provider passed to Laya's ONNX runtime; unset lets it choose         |
 | `SMRTI_DECISIONS_THREADS`                     | runtime default           | Cores one decision may hold; cap it on a machine that has two of them          |
-| `SMRTI_DECISIONS_TIMEOUT`                     | `30`                      | Deadline per local decision in seconds; on expiry the deterministic path answers |
+| `SMRTI_DECISIONS_TIMEOUT`                     | `5`                       | Deadline per decision in seconds, and the budget for a whole rerank; on expiry the deterministic path answers |
 | `SMRTI_DECISIONS_COOLDOWN`                    | `60`                      | Seconds the engine stops asking a provider that just failed, so an unavailable model costs one deadline per window instead of one per recall |
 | `SMRTI_DECISIONS_CACHE`                       | `256`                     | Answers kept in the LRU cache; a state names the atoms it was built from, so it invalidates itself (0 = no cache) |
-| `SMRTI_DECISIONS_RERANK_SHORTLIST`            | `20`                      | Candidates judged per recall (one request)                                    |
+| `SMRTI_DECISIONS_RERANK_SHORTLIST`            | `20`                      | Most candidates judged per recall, one call each; judging stops when the next would overrun the deadline |
 | `SMRTI_DECISIONS_RERANK_WEIGHT`               | `0.5`                     | Share of the final order the evidence judgement decides against salience      |
 | `SMRTI_DECISIONS_RERANK_MIN_EVIDENCE`         | `0`                       | Drop judged candidates under this evidence score (0 = rerank only, never filter); a stated warning is never dropped |
 | `SMRTI_DECISIONS_ROUTING_SKIP` / `_FORCE`     | `0.2` / `0.75`            | Lines under which every routing judgement means "skip the LLM", and over which a durable fact or correction forces it |
@@ -533,7 +538,7 @@ graph TD
 
     subgraph Decisions
         DEC["engine · policies · audit<br/><small>core · active by default</small>"]
-        LAYA["laya · model<br/><small>multilingual int8 ONNX · local typed judgements</small>"]
+        LAYA["laya · student · remote<br/><small>multilingual int8 ONNX · local or served · typed judgements</small>"]
     end
 
     subgraph Storage

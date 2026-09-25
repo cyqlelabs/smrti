@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -31,6 +32,21 @@ MAX_BODY = 1 << 20
 # caller that has already given up on its deadline must not be served.
 CLIENT_TIMEOUT = 30.0
 QUEUE_TIMEOUT = 20.0
+
+
+def _hung_up(sock: socket.socket) -> bool:
+    """Whether the caller closed its side while the request waited: a peek
+    that returns nothing is EOF. One that would block is a caller still
+    there, and so is an error, since the answer is written to the socket
+    next and a dead one fails there anyway."""
+    patience = sock.gettimeout()
+    sock.settimeout(0)
+    try:
+        return sock.recv(1, socket.MSG_PEEK) == b""
+    except OSError:
+        return False
+    finally:
+        sock.settimeout(patience)
 
 
 def _handler(student: Student, lock: threading.Lock) -> type[BaseHTTPRequestHandler]:
@@ -82,6 +98,12 @@ def _handler(student: Student, lock: threading.Lock) -> type[BaseHTTPRequestHand
                     self._send(503, {"error": {"message": "the student is busy", "type": "server_busy"}})
                     return
                 try:
+                    if _hung_up(self.connection):
+                        # The caller's deadline passed in the queue. Running
+                        # the graph for it now would answer nobody and hold
+                        # the caller behind it past its deadline too, which
+                        # is how one slow request became a queue of them.
+                        return
                     out = student.predict(state, questions)
                 finally:
                     lock.release()

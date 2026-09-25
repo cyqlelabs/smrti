@@ -3,7 +3,9 @@ in-process provider, and the engine choice."""
 from __future__ import annotations
 
 import json
+import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 from http.server import ThreadingHTTPServer
@@ -13,7 +15,7 @@ import pytest
 from smrti.decisions import build_engine
 from smrti.decisions.extraction import ROUTING_QUESTIONS, TONE_QUESTION
 from smrti.decisions.policies import DecisionPolicy
-from smrti.decisions.provider import Choice, DecisionUnavailable, DecisionUnsupported, Noul
+from smrti.decisions.provider import Choice, DecisionUnavailable, DecisionUnsupported, Noul, questions_payload
 from smrti.decisions.remote import RemoteProvider
 from smrti.decisions.retrieval import evidence_questions
 from smrti.decisions.student import hardware, registry
@@ -185,6 +187,59 @@ def test_the_remote_provider_sends_a_student_a_whole_head_at_once(server):
     provider.ask({"message": "hola"}, ROUTING_QUESTIONS, timeout=5.0)
     assert provider._per_call() == 256
     provider.close()
+
+
+def test_a_failed_probe_is_not_remembered_as_laya():
+    # The provider asks /health once to learn whether a whole head may ride
+    # one call. A probe that fails — the student still loading — must not
+    # settle the question for the provider's lifetime.
+    placeholder = socket.socket()
+    placeholder.bind(("127.0.0.1", 0))
+    port = placeholder.getsockname()[1]
+    placeholder.close()
+    provider = RemoteProvider(f"http://127.0.0.1:{port}")
+    assert provider._per_call() == 1
+    srv = ThreadingHTTPServer(("127.0.0.1", port), _handler(_Stub(), threading.Lock()))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        assert provider._per_call() == 256
+    finally:
+        provider.close()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_a_request_whose_caller_hung_up_in_the_queue_is_not_run():
+    calls = []
+
+    class Counting(_Stub):
+        def predict(self, state, questions):
+            calls.append(state)
+            return super().predict(state, questions)
+
+    lock = threading.Lock()
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _handler(Counting(), lock))
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        body = json.dumps({"state": {"message": "hola", "author": "user", "known_context": ""},
+                           "questions": questions_payload(ROUTING_QUESTIONS)}).encode()
+        request = (b"POST /v1/systemone HTTP/1.1\r\nHost: x\r\nContent-Type: application/json\r\n"
+                   b"Content-Length: " + str(len(body)).encode() + b"\r\n\r\n" + body)
+        with lock:  # the graph is busy
+            gone = socket.create_connection(srv.server_address)
+            gone.sendall(request)
+            time.sleep(0.2)  # let the handler read the body and block on the lock
+            gone.close()
+            waiting = socket.create_connection(srv.server_address)
+            waiting.sendall(request)
+            time.sleep(0.2)
+        answer = waiting.recv(1 << 16)
+        waiting.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+    assert answer.startswith(b"HTTP/1.1 200")
+    assert len(calls) == 1
 
 
 def test_the_server_refuses_a_body_that_is_not_an_object(server):

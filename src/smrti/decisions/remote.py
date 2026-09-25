@@ -74,13 +74,16 @@ class RemoteProvider:
         would otherwise pay that pass per question. Asked of ``/health``
         once; a server that does not say is taken for Laya."""
         if self._questions_per_call is None:
-            per = MAX_QUESTIONS_PER_CALL
             try:
                 health = self._client.get("/health", timeout=5.0).json()
-                if isinstance(health, Mapping) and health.get("backend") == "student":
-                    per = 256
             except (httpx.HTTPError, ValueError):
-                pass
+                # Not an answer, so not remembered: a student that was still
+                # loading on the first call would otherwise be asked one
+                # question per call for the life of the provider.
+                return MAX_QUESTIONS_PER_CALL
+            per = MAX_QUESTIONS_PER_CALL
+            if isinstance(health, Mapping) and health.get("backend") == "student":
+                per = 256
             self._questions_per_call = per
         return self._questions_per_call
 

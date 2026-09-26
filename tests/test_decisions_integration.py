@@ -774,3 +774,36 @@ def test_in_llm_mode_the_skip_route_touches_no_tagger(tmp_path):
     full.assert_not_awaited()
     assert _mentions(mem, episode_id) == []
     assert _row(mem, episode_id) is not None  # the episode itself stays
+
+
+def test_a_candidate_that_outruns_its_slice_ends_the_walk_on_budget(tmp_path):
+    """The walk's last candidate running out of what was left of the
+    deadline is the budget spent: the judged prefix is applied, the walk
+    says so, and no cooldown silences the next task."""
+    from smrti.decisions.provider import DecisionTimeout
+
+    inner = _evidence_provider("oslo")
+    plain_ask = inner.ask
+    seen = {"calls": 0}
+
+    def flaky(state, questions, *, timeout):
+        seen["calls"] += 1
+        if seen["calls"] == 2:
+            raise DecisionTimeout("the decision server at http://x is unreachable: timed out")
+        return plain_ask(state, questions, timeout=timeout)
+
+    inner.ask = flaky
+    engine = _engine(inner, rerank="active")
+    mem = _mem(tmp_path, engine)
+    _three_memories(mem)
+    results = mem.recall("who owns the deploy pipeline on jenkins")
+    judged = [r for r in results if r.evidence is not None]
+    assert len(judged) == 1
+    assert not engine.offline
+    records = audit.get_all()
+    walk = next(r for r in records if r["task"] == "rerank" and r.get("summary"))
+    assert walk["outcome"] != "unavailable" and walk["summary"]["judged"] == 1
+    assert walk["summary"]["stopped"] == "budget"
+    assert any(r["outcome"] == "budget" for r in records)
+    engine.provider = StaticProvider(lambda key, question, state: {"type": "noul", "noul": 0.5})
+    assert engine.decide("rerank", {"v": 1}, {"q": Noul("?")}, tenant_id="t", space="s") is not None

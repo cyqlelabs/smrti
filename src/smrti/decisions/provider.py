@@ -39,6 +39,14 @@ class DecisionUnavailable(Exception):
     """
 
 
+class DecisionTimeout(DecisionUnavailable):
+    """The provider did not answer inside the time it was given. On its own
+    it is unavailability like any other; what makes it worth its own name
+    is a caller that handed the provider a slice of a larger budget and
+    wants to know that the slice ran out rather than that the server did.
+    See ``DecisionEngine.decide(partial=...)``."""
+
+
 class DecisionUnsupported(DecisionUnavailable):
     """The provider answers, but not this question: a head the student was
     not trained for. The caller falls back the same way, and the engine

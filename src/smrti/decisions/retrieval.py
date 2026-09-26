@@ -201,11 +201,15 @@ def _walk(
         # own version.
         state = {"question": query, "candidates": [_candidate_state(_REF, r)]}
         started = time.monotonic()
+        # The first candidate is asked with the whole budget, so its timeout
+        # is the provider's; every one after it holds a slice, and running
+        # out of a slice is this walk's budget spent, not a server down.
         outcome = engine.decide(
-            TASK_RERANK, state, questions, tenant_id=tenant_id, space=space, timeout=max(remaining, 0.001)
+            TASK_RERANK, state, questions, tenant_id=tenant_id, space=space,
+            timeout=max(remaining, 0.001), partial=bool(outcomes),
         )
         if outcome is None:
-            return outcomes, STOP_UNAVAILABLE
+            return outcomes, STOP_UNAVAILABLE if engine.offline or not outcomes else STOP_BUDGET
         if not outcome.cached:
             slowest = max(slowest, time.monotonic() - started)
         outcomes.append(outcome)

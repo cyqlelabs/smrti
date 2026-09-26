@@ -48,6 +48,7 @@ from .policies import (
 from .provider import (
     Choice,
     DecisionProvider,
+    DecisionTimeout,
     DecisionUnavailable,
     Decisions,
     Noul,
@@ -61,6 +62,7 @@ __all__ = [
     "DecisionOutcome",
     "DecisionPolicy",
     "DecisionProvider",
+    "DecisionTimeout",
     "DecisionUnavailable",
     "Decisions",
     "MODE_ACTIVE",

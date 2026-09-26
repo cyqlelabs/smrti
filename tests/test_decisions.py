@@ -18,6 +18,7 @@ from smrti.decisions import (
     Choice,
     DecisionEngine,
     DecisionPolicy,
+    DecisionTimeout,
     DecisionUnavailable,
     Noul,
     Score,
@@ -1615,3 +1616,106 @@ def test_a_decision_url_builds_the_remote_provider_and_loads_nothing_here():
     engine.provider.close()
     # Off is off, whatever server is named.
     assert build_engine(DecisionPolicy.from_env({"SMRTI_DECISIONS": "off", "SMRTI_DECISIONS_URL": "http://x"})).provider is None
+
+
+# ── a slice of a budget running out is not a provider down ──────────────────
+
+
+class _TimesOut:
+    name = "slow"
+
+    def __init__(self):
+        self.calls = 0
+
+    def ask(self, state, questions, *, timeout):
+        self.calls += 1
+        raise DecisionTimeout("the decision server at http://x is unreachable: timed out")
+
+    async def ask_async(self, state, questions, *, timeout):
+        return self.ask(state, questions, timeout=timeout)
+
+
+def test_a_partial_timeout_is_filed_as_budget_and_opens_no_cooldown():
+    """The rerank walks its shortlist on slices of one deadline. The last
+    slice running out says the budget is spent, and the next task — routing,
+    tone, the next recall — is still asked."""
+    provider = _TimesOut()
+    engine = DecisionEngine(DecisionPolicy(cooldown=60.0), provider)
+    assert engine.decide(TASK_RERANK, {"q": 0}, {"n": Noul("?")}, tenant_id="t", space="s", timeout=0.4, partial=True) is None
+    assert not engine.offline
+    assert audit.get_all()[0]["outcome"] == "budget"
+    assert engine.decide(TASK_RERANK, {"q": 1}, {"n": Noul("?")}, tenant_id="t", space="s", timeout=0.4, partial=True) is None
+    assert provider.calls == 2
+
+    # The same timeout with the whole deadline is the provider's failure.
+    assert engine.decide(TASK_RERANK, {"q": 2}, {"n": Noul("?")}, tenant_id="t", space="s") is None
+    assert engine.offline
+    assert audit.get_all()[0]["outcome"] == "unavailable"
+
+
+def test_a_partial_timeout_is_a_budget_on_the_async_path_too():
+    provider = _TimesOut()
+    engine = DecisionEngine(DecisionPolicy(cooldown=60.0), provider)
+    out = asyncio.run(engine.decide_async(TASK_RERANK, {"q": 0}, {"n": Noul("?")}, tenant_id="t", space="s", timeout=0.4, partial=True))
+    assert out is None and not engine.offline
+    assert audit.get_all()[0]["outcome"] == "budget"
+
+
+def test_only_a_timeout_counts_as_a_spent_slice():
+    """A server that refuses the connection mid-walk is down, whatever the
+    caller's budget says."""
+    engine = DecisionEngine(DecisionPolicy(cooldown=60.0), _Unavailable())
+    assert engine.decide(TASK_RERANK, {"q": 0}, {"n": Noul("?")}, tenant_id="t", space="s", timeout=0.4, partial=True) is None
+    assert engine.offline
+    assert audit.get_all()[0]["outcome"] == "unavailable"
+
+
+def test_the_remote_provider_names_a_timeout():
+    def stall(request):
+        raise httpx.ReadTimeout("", request=request)
+
+    provider = _remote(stall)
+    with pytest.raises(DecisionTimeout, match="unreachable: ReadTimeout"):
+        provider.ask("s", {"q": Noul("x")}, timeout=5.0)
+    with pytest.raises(DecisionTimeout):
+        asyncio.run(provider.ask_async("s", {"q": Noul("x")}, timeout=5.0))
+    provider.close()
+
+
+# ── a student answers a fixed list of tasks ──────────────────────────────────
+
+
+def _serve_as(backend: str):
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/health":
+            return httpx.Response(200, json={"ok": True, "backend": backend, "model": backend})
+        body = json.loads(request.content)
+        return httpx.Response(200, json={**_reply(body["questions"]), "model": backend})
+
+    return handler
+
+
+def test_a_student_is_not_asked_the_entity_question_it_has_no_head_for():
+    """The entity question offers a fresh list of candidates every time, so
+    no head could be trained for it; a student refuses it with a 400 that
+    used to cost one round trip and one audit record per mention."""
+    from smrti.decisions.policies import TASK_ENTITY, TASK_ROUTING, TASK_TONE
+
+    student = _remote(_serve_as("student"))
+    assert student.answers(TASK_ENTITY)  # nothing learned yet: nothing refused
+    student.ask({"text": "hola"}, {"q": Noul("x")}, timeout=5.0)
+    assert not student.answers(TASK_ENTITY)
+    assert student.answers(TASK_ROUTING) and student.answers(TASK_TONE)
+    engine = DecisionEngine(DecisionPolicy(), student)
+    assert not engine.enabled(TASK_ENTITY)
+    assert engine.enabled(TASK_ROUTING)
+    student.close()
+
+    laya = _remote(_serve_as("laya"))
+    laya.ask({"text": "hola"}, {"q": Noul("x")}, timeout=5.0)
+    assert laya.answers(TASK_ENTITY)
+    assert DecisionEngine(DecisionPolicy(), laya).enabled(TASK_ENTITY)
+    laya.close()
+
+    # A provider that does not say answers everything, as before.
+    assert DecisionEngine(DecisionPolicy(), _FakeProviderThatAnswers()).enabled(TASK_ENTITY)

@@ -31,7 +31,15 @@ from typing import Any, Mapping
 
 from . import audit
 from .policies import MODE_ACTIVE, MODE_OFF, DecisionPolicy
-from .provider import DecisionProvider, DecisionUnavailable, DecisionUnsupported, Decisions, Question, State
+from .provider import (
+    DecisionProvider,
+    DecisionTimeout,
+    DecisionUnavailable,
+    DecisionUnsupported,
+    Decisions,
+    Question,
+    State,
+)
 
 logger = logging.getLogger("smrti.decisions")
 
@@ -67,6 +75,8 @@ class DecisionEngine:
         # front of every recall. See ``_offline``/``_note``.
         self._retry_at = 0.0
         self._retry_lock = threading.Lock()
+        self._unanswered: set[str] = set()
+        self._unanswered_lock = threading.Lock()
 
     # ── policy passthrough ───────────────────────────────────────────────
 
@@ -76,7 +86,31 @@ class DecisionEngine:
         return self.policy.mode(task)
 
     def enabled(self, task: str) -> bool:
-        return self.mode(task) != MODE_OFF
+        return self.mode(task) != MODE_OFF and self._answers(task)
+
+    def _answers(self, task: str) -> bool:
+        """Whether the provider has a head for the task. Most answer
+        everything; a student names its list, and a task off it is decided
+        the way it was before decisions existed — said once, since the
+        alternative is a refused request per mention."""
+        answers = getattr(self.provider, "answers", None)
+        if answers is None:
+            return True
+        try:
+            if answers(task):
+                return True
+        except Exception:  # a provider's own probe failing is not a verdict
+            return True
+        with self._unanswered_lock:
+            if task not in self._unanswered:
+                self._unanswered.add(task)
+                logger.info("the %s model answers no %s question; deciding it the old way", self.provider_name, task)
+        return False
+
+    @property
+    def offline(self) -> bool:
+        """Whether the provider is inside its cooldown after a failure."""
+        return self._offline()
 
     def active(self, task: str) -> bool:
         return self.mode(task) == MODE_ACTIVE
@@ -199,11 +233,20 @@ class DecisionEngine:
         tenant_id: str,
         space: str,
         timeout: float | None = None,
+        partial: bool = False,
     ) -> DecisionOutcome | None:
         """Ask the provider the task's questions about *state*.
 
         ``None`` when the task is off or nothing could be decided. The
         caller files the outcome it drew through :meth:`conclude`.
+
+        *partial* says *timeout* is what is left of a budget the caller is
+        spending across several calls, after the provider has already
+        answered inside it: the rerank walking its shortlist. A provider
+        that runs out of that slice is a budget spent, filed as such, and
+        not a provider down — which is what a timeout otherwise says, and
+        it opened the cooldown that silenced every other task for a minute
+        at the end of one walk in three.
         """
         mode = self.mode(task)
         if mode == MODE_OFF or self.provider is None:
@@ -227,10 +270,7 @@ class DecisionEngine:
             self._mirror(task, tenant_id, state, questions, None, str(exc), started)
             return None
         except DecisionUnavailable as exc:
-            self._note(False)
-            self._record(task, mode, tenant_id, space, outcome="unavailable", applied=False, error=str(exc))
-            self._mirror(task, tenant_id, state, questions, None, str(exc), started)
-            logger.warning("decision %s unavailable: %s", task, exc)
+            self._unavailable(exc, task, mode, tenant_id, space, state, questions, started, partial)
             return None
         except Exception as exc:  # a provider bug is not the engine's failure to bear
             self._note(False)
@@ -243,6 +283,20 @@ class DecisionEngine:
         self._mirror(task, tenant_id, state, questions, decisions, None, started)
         return DecisionOutcome(decisions=decisions, mode=mode)
 
+    def _unavailable(
+        self, exc: DecisionUnavailable, task: str, mode: str, tenant_id: str, space: str,
+        state: State, questions: Mapping[str, Question], started: float, partial: bool,
+    ) -> None:
+        if partial and isinstance(exc, DecisionTimeout):
+            self._record(task, mode, tenant_id, space, outcome="budget", applied=False, error=str(exc))
+            self._mirror(task, tenant_id, state, questions, None, str(exc), started)
+            logger.debug("decision %s ran out of its slice of the budget: %s", task, exc)
+            return
+        self._note(False)
+        self._record(task, mode, tenant_id, space, outcome="unavailable", applied=False, error=str(exc))
+        self._mirror(task, tenant_id, state, questions, None, str(exc), started)
+        logger.warning("decision %s unavailable: %s", task, exc)
+
     async def decide_async(
         self,
         task: str,
@@ -252,6 +306,7 @@ class DecisionEngine:
         tenant_id: str,
         space: str,
         timeout: float | None = None,
+        partial: bool = False,
     ) -> DecisionOutcome | None:
         mode = self.mode(task)
         if mode == MODE_OFF or self.provider is None:
@@ -274,10 +329,7 @@ class DecisionEngine:
             self._mirror(task, tenant_id, state, questions, None, str(exc), started)
             return None
         except DecisionUnavailable as exc:
-            self._note(False)
-            self._record(task, mode, tenant_id, space, outcome="unavailable", applied=False, error=str(exc))
-            self._mirror(task, tenant_id, state, questions, None, str(exc), started)
-            logger.warning("decision %s unavailable: %s", task, exc)
+            self._unavailable(exc, task, mode, tenant_id, space, state, questions, started, partial)
             return None
         except Exception as exc:
             self._note(False)

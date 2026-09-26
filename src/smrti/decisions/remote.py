@@ -26,7 +26,16 @@ import httpx
 
 from .laya import MAX_QUESTIONS_PER_CALL
 from .local import _tokens
-from .provider import DecisionUnavailable, DecisionUnsupported, Decisions, Question, State, parse_response, questions_payload
+from .provider import (
+    DecisionTimeout,
+    DecisionUnavailable,
+    DecisionUnsupported,
+    Decisions,
+    Question,
+    State,
+    parse_response,
+    questions_payload,
+)
 
 from .student.serve import UNSUPPORTED
 
@@ -51,6 +60,9 @@ class RemoteProvider:
         self._client = httpx.Client(base_url=self.base_url, transport=transport)
         self._async = httpx.AsyncClient(base_url=self.base_url, transport=async_transport)
         self._questions_per_call: int | None = None
+        # What the server said it is, once it has said: "student" has heads
+        # for a fixed list of tasks and a 400 for everything else.
+        self._backend: str | None = None
 
     @staticmethod
     def _deadline(timeout: float | None) -> float:
@@ -82,10 +94,30 @@ class RemoteProvider:
                 # question per call for the life of the provider.
                 return MAX_QUESTIONS_PER_CALL
             per = MAX_QUESTIONS_PER_CALL
-            if isinstance(health, Mapping) and health.get("backend") == "student":
-                per = 256
+            if isinstance(health, Mapping):
+                backend = health.get("backend")
+                self._backend = str(backend) if backend else None
+                if backend == "student":
+                    per = 256
             self._questions_per_call = per
         return self._questions_per_call
+
+    def answers(self, task: str) -> bool:
+        """Whether the server has a head for *task* at all. A student is
+        trained on a fixed list of questions and refuses the rest with a
+        400, and the entity question — a fresh list of candidates every
+        time — is not on it, so asking was one round trip and one audit
+        record per mention for an answer that was never coming. Laya, or a
+        server that has not said what it is yet, is taken to answer
+        everything: this reads what the first call learned rather than
+        probing, since a probe here would cost a hung server's deadline on
+        every check. The first question of any task teaches it, so at most
+        one entity mention per provider pays the refused round trip."""
+        if self._backend != "student":
+            return True
+        from .student.registry import tasks
+
+        return task in tasks()
 
     def _chunks(self, questions: Mapping[str, Question]) -> list[dict[str, Question]]:
         if not questions:
@@ -134,7 +166,7 @@ class RemoteProvider:
     def _remaining(stop_at: float) -> float:
         left = stop_at - time.monotonic()
         if left <= 0:
-            raise DecisionUnavailable("the decision server did not answer every question before the deadline")
+            raise DecisionTimeout("the decision server did not answer every question before the deadline")
         return left
 
     def ask(self, state: State, questions: Mapping[str, Question], *, timeout: float | None = None) -> Decisions:
@@ -155,9 +187,10 @@ class RemoteProvider:
     def _unreachable(self, exc: httpx.HTTPError) -> DecisionUnavailable:
         # httpx raises some transport errors with an empty message (a reset
         # mid-response is one), and "unreachable: " says nothing.
-        return DecisionUnavailable(
-            f"the decision server at {self.base_url} is unreachable: {str(exc) or type(exc).__name__}"
-        )
+        message = f"the decision server at {self.base_url} is unreachable: {str(exc) or type(exc).__name__}"
+        if isinstance(exc, httpx.TimeoutException):
+            return DecisionTimeout(message)
+        return DecisionUnavailable(message)
 
     async def ask_async(
         self, state: State, questions: Mapping[str, Question], *, timeout: float | None = None

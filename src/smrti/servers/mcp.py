@@ -152,6 +152,7 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             evidence=args.get("evidence"),
             valence=args.get("valence"),
             intensity=args.get("intensity"),
+            source=args.get("source", "user"),
         )
         return {"status": "ok", "atom_id": atom_id, "space": mem.write_space}
 

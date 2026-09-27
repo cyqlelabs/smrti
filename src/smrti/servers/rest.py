@@ -160,7 +160,15 @@ class BelieveRequest(BaseModel):
     evidence: Optional[str] = None
     valence: Optional[float] = None
     intensity: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    source: str = "user"
     space: Optional[SpaceName] = None
+
+    @field_validator("source")
+    @classmethod
+    def _known_source(cls, v: str) -> str:
+        if v not in ("user", "agent"):
+            raise ValueError("source must be 'user' or 'agent'")
+        return v
 
 
 class ForgetRequest(BaseModel):

@@ -281,6 +281,27 @@ def test_remember_without_source_stays_backward_compatible(client, mem_instance)
     assert json.loads(row["metadata"]) == {}
 
 
+def test_believe_accepts_agent_source(client, mem_instance):
+    """A belief the agent asserts about its own work must not carry user standing."""
+    resp = client.post(
+        "/believe",
+        json={"statement": "Streams play once the proxy is dropped.", "probability": 0.9,
+              "evidence": "verified 26/09", "source": "agent"},
+    )
+    assert resp.status_code == 200
+    row = mem_instance.db.fetchone(
+        "SELECT metadata FROM atoms WHERE id = ?", (resp.json()["atom_id"],)
+    )
+    assert json.loads(row["metadata"])["source"] == "agent"
+
+
+def test_believe_rejects_unknown_source(client):
+    resp = client.post(
+        "/believe", json={"statement": "x", "probability": 0.5, "source": "somebody-else"}
+    )
+    assert resp.status_code == 422
+
+
 def test_remember_rejects_unknown_source(client):
     resp = client.post("/remember", json={"content": "x", "source": "somebody-else"})
     assert resp.status_code == 422

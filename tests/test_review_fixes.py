@@ -245,6 +245,10 @@ def test_a_stated_tone_makes_the_user_turn_a_critical_warning(mem):
 def test_unspaced_scripts_are_cut_into_bigrams():
     assert words("東京に住んでいます") == ["東京", "京に", "に住", "住ん", "んで", "でい", "いま", "ます"]
     assert words("iPhone15を買った") == ["iphone15", "を買", "買っ", "った"]
+    # A lone ideograph is its own piece, and what follows a run inside one
+    # \w token (digits, Latin) is kept whole.
+    assert words("東京2026年") == ["東京", "2026", "年"]
+    assert words("東京tower") == ["東京", "tower"]
     assert words("Café déjà vu") == ["café", "déjà", "vu"]  # spaced scripts are untouched
     same = word_set("私は東京に住んでいます")
     assert coverage(same, same) == 1.0  # a restatement is now comparable

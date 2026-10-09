@@ -104,12 +104,17 @@ def build_parser(prog: str, config_path: str, baseline_path: str) -> argparse.Ar
     # association step help retrieval or evict the evidence.
     parser.add_argument("--epochs", type=int, default=0, help="reflect() passes to run over each history before querying it")
     parser.add_argument("--top-k", dest="top_k", type=int, default=None, help="override the locked top_k (the proxy injects 5, the MCP tool 10)")
-    # The evidence reranker (smrti.decisions, task ``rerank``) judges the
-    # retrieval shortlist through local Laya. It is active by default, just as
-    # it is in the core; the flag selects shadow or deterministic-only runs.
+    # The decision layer (smrti.decisions) reranks the shortlist and judges
+    # tone at ingest. It is active by default in the engine, but the gate
+    # measures the deterministic retrieval half: the recorded baselines were
+    # taken before decisions existed, a run with them on needs a 250MB model
+    # fetched first, and a gate whose number moves with a model download is
+    # one nobody can reproduce. So the default run turns every task off and
+    # keeps the fingerprint the baselines were recorded under; shadow and
+    # active are measured under their own fingerprints.
     parser.add_argument(
-        "--decisions", default="active", choices=("off", "shadow", "active"),
-        help="run the core local evidence reranker in this mode (default: active)",
+        "--decisions", default="off", choices=("off", "shadow", "active"),
+        help="run every local decision task in this mode (default: off, which is what the baselines measure)",
     )
     return parser
 
@@ -117,8 +122,11 @@ def build_parser(prog: str, config_path: str, baseline_path: str) -> argparse.Ar
 def apply_run_modes(args, config: dict) -> None:
     """Fold run modes into the config the fingerprint is taken from.
 
-    Local decisions are part of the default engine, and runs in different
-    decision modes are not comparable.
+    Each mode joins the fingerprint only when it departs from the default,
+    so the default run still gates against the recorded baseline and a run
+    under any other mode is reported on its own. Runs in different decision
+    modes are not comparable, which is why a mode other than ``off`` is part
+    of the fingerprint.
     """
     epochs = getattr(args, "epochs", 0) or 0
     if epochs > 0:
@@ -126,22 +134,28 @@ def apply_run_modes(args, config: dict) -> None:
     top_k = getattr(args, "top_k", None)
     if top_k:
         config["top_k"] = top_k
-    decisions = getattr(args, "decisions", "active") or "active"
-    config["decisions"] = decisions
+    decisions = getattr(args, "decisions", "off") or "off"
+    if decisions != "off":
+        config["decisions"] = decisions
     apply_decisions_mode(decisions)
 
 
 def apply_decisions_mode(mode: str) -> None:
-    """Point the shared decision engine's rerank task at *mode*.
+    """Point every task of the shared decision engine at *mode*.
 
-    Set through the environment the engine is built from, and the shared
-    engine dropped so the next instance rebuilds it — the harness makes its
-    Smrti instances after this, one per question, and each takes the
-    shared engine.
+    Set through the environment the engine is built from (``SMRTI_DECISIONS``,
+    with any per-task override dropped so a stray one in the operator's shell
+    cannot make the run measure something its fingerprint does not say), and
+    the shared engine dropped so the next instance rebuilds it — the harness
+    makes its Smrti instances after this, one per question, and each takes
+    the shared engine.
     """
     from smrti.decisions import reset_decisions
+    from smrti.decisions.policies import TASKS
 
-    os.environ["SMRTI_DECISIONS_RERANK"] = mode
+    os.environ["SMRTI_DECISIONS"] = mode
+    for task in TASKS:
+        os.environ.pop(f"SMRTI_DECISIONS_{task.upper()}", None)
     reset_decisions(None)
 
 

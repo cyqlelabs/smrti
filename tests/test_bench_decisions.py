@@ -74,26 +74,44 @@ def test_a_short_replay_is_refused(tmp_path):
 def test_the_decisions_mode_enters_the_fingerprint(monkeypatch):
     from smrti.decisions import get_decisions, reset_decisions
 
-    monkeypatch.delenv("SMRTI_DECISIONS_RERANK", raising=False)
+    monkeypatch.setenv("SMRTI_DECISIONS_RERANK", "active")  # a stray override in the shell
     base = {"dataset": "x", "top_k": 50}
-    disabled = dict(base)
-    apply_run_modes(argparse.Namespace(epochs=0, top_k=None, decisions="off"), disabled)
-    assert disabled["decisions"] == "off"
-    assert config_hash(disabled) != config_hash(base)
-    assert get_decisions().policy.mode("rerank") == "off"
 
+    # The default run measures the deterministic path under the fingerprint
+    # the baselines were recorded with, whatever the shell says.
     defaulted = dict(base)
     apply_run_modes(argparse.Namespace(epochs=0, top_k=None), defaulted)
-    assert defaulted["decisions"] == "active"
-    assert get_decisions().policy.mode("rerank") == "active"
+    assert "decisions" not in defaulted
+    assert config_hash(defaulted) == config_hash(base)
+    assert all(get_decisions().policy.mode(t) == "off" for t in ("rerank", "tone", "routing"))
 
-    shadowed = dict(base)
-    apply_run_modes(argparse.Namespace(epochs=0, top_k=None, decisions="shadow"), shadowed)
-    assert shadowed["decisions"] == "shadow"
-    assert config_hash(shadowed) != config_hash(base)
-    assert get_decisions().policy.mode("rerank") == "shadow"
-    os.environ.pop("SMRTI_DECISIONS_RERANK", None)
+    disabled = dict(base)
+    apply_run_modes(argparse.Namespace(epochs=0, top_k=None, decisions="off"), disabled)
+    assert config_hash(disabled) == config_hash(base)
+
+    for mode in ("active", "shadow"):
+        run = dict(base)
+        apply_run_modes(argparse.Namespace(epochs=0, top_k=None, decisions=mode), run)
+        assert run["decisions"] == mode
+        assert config_hash(run) != config_hash(base)
+        assert get_decisions().policy.mode("rerank") == mode
+        assert get_decisions().policy.mode("tone") == mode
+    os.environ["SMRTI_DECISIONS"] = "off"
     reset_decisions(None)
+
+
+def test_the_default_run_matches_the_recorded_baselines():
+    """The gate is only a gate if its default run can be compared."""
+    from bench.harness import load_json
+
+    root = os.path.join(os.path.dirname(__file__), "..", "bench")
+    for bench in ("longmemeval", "halumem"):
+        config = load_json(os.path.join(root, bench, "config.json"))
+        config.pop("tolerance", None)
+        config["extraction"] = False
+        apply_run_modes(argparse.Namespace(epochs=0, top_k=None), config)
+        recorded = load_json(os.path.join(root, bench, "baseline.json"))["config_hash"]
+        assert config_hash(config) == recorded, bench
 
 
 # ── the tone set ─────────────────────────────────────────────────────────────

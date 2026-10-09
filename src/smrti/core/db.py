@@ -12,6 +12,7 @@ import sqlite_vec
 
 from smrti.core.models import STRUCTURAL_RELATIONS
 from smrti.core.provenance import ATOM_FORGOTTEN
+from smrti.retrieval.text import lexical_text
 
 _registry: dict[str, "Database"] = {}
 _registry_lock = threading.Lock()
@@ -81,6 +82,12 @@ _FTS_SCHEMA_SQL = """CREATE VIRTUAL TABLE IF NOT EXISTS atoms_fts USING fts5(
 )"""
 
 
+# What the index rows hold. Version 2 writes unspaced-script runs (Chinese,
+# Japanese) as space-separated bigrams, see ``retrieval.text.lexical_text``;
+# an index written in another format is rebuilt on open.
+_FTS_FORMAT = "2"
+
+
 def stable_rowid(atom_id: str) -> int:
     """The rowid an atom's index rows are filed under, in both index tables.
 
@@ -112,7 +119,7 @@ def fts_write(db: "Database", atom_id: str, label: str, content: str | None) -> 
         ("DELETE FROM atoms_fts WHERE rowid = ?", (rowid,)),
         (
             "INSERT INTO atoms_fts (rowid, atom_id, label, content) VALUES (?, ?, ?, ?)",
-            (rowid, atom_id, label, content or ""),
+            (rowid, atom_id, lexical_text(label), lexical_text(content or "")),
         ),
     ]
 
@@ -456,21 +463,38 @@ class Database:
         this code writes atoms and no lexical rows, and after such a writer has
         touched the database a one-time migration would already have run — so
         the check is re-made every open, and repairs whatever drifted.
+
+        The index is also rebuilt when it was written in another format
+        (``_FTS_FORMAT``, kept in ``smrti_meta``): a database indexed before
+        unspaced scripts were segmented holds each Japanese or Chinese
+        sentence as one token, which no query term can match.
         """
         conn = self._write_conn
         try:
             conn.execute(_FTS_SCHEMA_SQL)
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS smrti_meta (key TEXT PRIMARY KEY, value TEXT)"
+            )
             conn.commit()
         except sqlite3.OperationalError:
             self.fts_enabled = False
             return
         self.fts_enabled = True
+        row = conn.execute("SELECT value FROM smrti_meta WHERE key = 'fts_format'").fetchone()
+        current_format = row is not None and row["value"] == _FTS_FORMAT
         if (
             conn.execute(
                 "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'atoms'"
             ).fetchone()
             is None
         ):
+            # A new database: everything it will hold is written by this build.
+            if not current_format:
+                conn.execute(
+                    "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES ('fts_format', ?)",
+                    (_FTS_FORMAT,),
+                )
+                conn.commit()
             return
         # Forgotten atoms are out of the index on purpose — ``forget()`` drops
         # their rows — so they are not counted as missing from it.
@@ -478,7 +502,7 @@ class Database:
         stored = conn.execute(
             f"SELECT COUNT(*) AS n FROM atoms WHERE type != 'relation' AND NOT {ATOM_FORGOTTEN}"
         ).fetchone()["n"]
-        if indexed >= stored:
+        if indexed >= stored and current_format:
             return
         rows = conn.execute(
             f"SELECT id, label, content FROM atoms WHERE type != 'relation' AND NOT {ATOM_FORGOTTEN}"
@@ -489,9 +513,14 @@ class Database:
             conn.executemany(
                 "INSERT INTO atoms_fts (rowid, atom_id, label, content) VALUES (?, ?, ?, ?)",
                 [
-                    (stable_rowid(r["id"]), r["id"], r["label"], r["content"] or "")
+                    (stable_rowid(r["id"]), r["id"], lexical_text(r["label"]),
+                     lexical_text(r["content"] or ""))
                     for r in rows
                 ],
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES ('fts_format', ?)",
+                (_FTS_FORMAT,),
             )
             conn.commit()
         except Exception:

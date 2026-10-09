@@ -46,7 +46,8 @@ def test_mild_negative_valence_stays_context():
 
 def test_a_disproven_belief_is_still_an_antipattern():
     got = classify_memory(
-        _result(valence=0.0, stated=False, probability=0.1, confidence=0.9)
+        _result(atom_type=AtomType.BELIEF, valence=0.0, stated=False,
+                probability=0.1, confidence=0.9)
     )
     assert got == "known_antipattern"
 

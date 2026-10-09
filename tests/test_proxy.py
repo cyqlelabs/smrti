@@ -30,9 +30,10 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def _mem_recall_result(content, confidence=0.8, valence=0.0, intensity=0.0, probability=0.8):
+def _mem_recall_result(content, confidence=0.8, valence=0.0, intensity=0.0, probability=0.8,
+                       atom_type=AtomType.EPISODE):
     atom = Atom(
-        type=AtomType.EPISODE,
+        type=atom_type,
         label=content,
         content=content,
         truth=TruthValue(probability=probability, confidence=confidence),
@@ -524,7 +525,8 @@ def test_format_critical_warning():
 
 
 def test_format_known_antipattern():
-    r = _mem_recall_result("This API is reliable", valence=0.0, intensity=0.0, probability=0.1, confidence=0.6)
+    r = _mem_recall_result("This API is reliable", valence=0.0, intensity=0.0, probability=0.1, confidence=0.6,
+                           atom_type=AtomType.BELIEF)
     line, severity = _format_memory(r)
     assert severity == "known_antipattern"
     assert "AVOID" in line

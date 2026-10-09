@@ -59,14 +59,18 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
     },
     {
         "name": "smrti_forget",
-        "description": "Stop the memories matching a query from surfacing: their confidence is sunk below the surfacing floor and they are excluded from recall. Not an immediate hard-delete — the next consolidation epoch may prune them.",
+        "description": "Stop memories from surfacing: their confidence is sunk below the surfacing floor and they are excluded from recall. Forgetting is final; the next consolidation epoch may prune them. Pass `atom_ids` (from a recall you inspected) to forget exactly those memories, or `query` to forget the closest matches — only results clearly about the query are forgotten, never merely the nearest ones.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "What to forget"},
+                "atom_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Exact memory ids to forget, instead of a query",
+                },
                 "reason": {"type": "string"},
             },
-            "required": ["query"],
         },
     },
     {

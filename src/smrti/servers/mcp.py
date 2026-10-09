@@ -157,7 +157,14 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
         return {"status": "ok", "atom_id": atom_id, "space": mem.write_space}
 
     elif name == "smrti_forget":
-        forgotten = mem.forget(query=args["query"], top_k=5)
+        atom_ids = args.get("atom_ids")
+        query = args.get("query")
+        if atom_ids:
+            forgotten = mem.forget(atom_ids=list(atom_ids))
+        elif query and query.strip():
+            forgotten = mem.forget(query=query, top_k=5)
+        else:
+            return {"error": "smrti_forget needs a non-empty query or atom_ids"}
         result = {"status": "ok", "softened": forgotten}
         if args.get("reason"):
             result["reason"] = args["reason"]

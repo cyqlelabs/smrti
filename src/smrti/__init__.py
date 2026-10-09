@@ -39,7 +39,7 @@ from smrti.decisions.extraction import TONE_DECISION, judge_tone
 from smrti.decisions.retrieval import make_judge
 from smrti.extraction.sentiment import estimate_valence
 from smrti.extraction.resolve import EntityResolver
-from smrti.retrieval.fan_out import boost_attention, retrieve
+from smrti.retrieval.fan_out import boost_attention, rank_candidates, retrieve
 from smrti.evolution.epoch import run_epoch
 from smrti.evolution.reinforcement import DEFAULT_WEIGHT as _REINFORCE_WEIGHT, reinforce_atoms
 from smrti.personality.params import PersonalityProfile, load_preset
@@ -54,6 +54,14 @@ from smrti.spaces.emergence import materialize_bridge as _materialize_bridge
 
 # Per-(tenant_id, space) locks so concurrent reflect() calls (background loop +
 # REST /reflect) cannot interleave epochs on the same space.
+# What forget() takes a query match to be. Forgetting is final, so a result
+# is dropped only when it is about the query in its own right (an absolute
+# cosine floor under which this encoder pairs unrelated sentences) and about
+# it nearly as much as the best match is. Erring short costs a second call;
+# erring long costs a memory nobody asked to lose.
+FORGET_MIN_SIMILARITY = 0.35
+FORGET_RELATIVE_MARGIN = 0.85
+
 _reflect_locks: dict[tuple[str, str], threading.Lock] = {}
 _reflect_locks_guard = threading.Lock()
 
@@ -467,8 +475,15 @@ class Smrti:
             self._ops_since_reflect = 0
             return result
 
-    def forget(self, query: str, top_k: int = 5) -> list[str]:
-        """Stop the memories matching *query* from surfacing.
+    def forget(
+        self,
+        query: str | None = None,
+        top_k: int = 5,
+        *,
+        atom_ids: list[str] | None = None,
+        min_similarity: float = FORGET_MIN_SIMILARITY,
+    ) -> list[str]:
+        """Stop the memories matching *query*, or exactly *atom_ids*, from surfacing.
 
         Three things happen to each match in the write space. Its confidence
         is sunk below the surfacing floor, so no floor a caller might pass
@@ -484,16 +499,60 @@ class Smrti:
         the matches runs without the access boost, because forgetting a
         memory must not make it more prominent, which is what it did when
         this method called the ordinary recall.
+
+        Forgetting is final, so a query match has to be a match. ``top_k``
+        is an upper bound, not a quota: a recall always returns its nearest
+        candidates however far they are, and forgetting all of them took
+        whatever else happened to be in the space along with the memory
+        asked about. A result is forgotten only when its similarity to the
+        query is at least ``min_similarity`` and within
+        ``FORGET_RELATIVE_MARGIN`` of the best match's — what is clearly less
+        about the query than the best match is left alone. A caller that
+        wants a particular set gone passes ``atom_ids`` instead (say, the
+        ids of a recall it has inspected); only ids in the write space are
+        touched. Returns the labels of what was forgotten.
         """
+        if atom_ids is not None:
+            self._note_activity()
+            ids = list(dict.fromkeys(atom_ids))
+            if not ids:
+                return []
+            placeholders = ", ".join("?" for _ in ids)
+            rows = self.db.fetchall(
+                f"""SELECT id, label FROM atoms
+                    WHERE id IN ({placeholders}) AND tenant_id = ? AND space = ?""",
+                (*ids, self.tenant_id, self.write_space),
+            )
+            by_id = {row["id"]: row["label"] for row in rows}
+            return self._sink([(i, by_id[i]) for i in ids if i in by_id])
+
+        if not query or not query.strip():
+            raise ValueError("forget() needs a non-empty query or atom_ids")
         self._note_activity()
-        results = self.recall(query=query, top_k=top_k, boost=False, rerank=False)
+        # Ranked on similarity alone: standing says how much the graph
+        # trusts a memory, not whether it is the one being named. Echoes are
+        # kept, since quoting a memory is how one names it, and no judge,
+        # diversity cap or access boost runs.
+        candidates, _, _ = rank_candidates(
+            query, self.tenant_id, self.read_spaces, self.db, self.embed,
+            self.write_space, damp_echoes=False,
+        )
+        local = sorted(
+            (r for r in candidates if r.atom.space == self.write_space),
+            key=lambda r: r.similarity, reverse=True,
+        )[:top_k]
+        if not local:
+            return []
+        line = max(min_similarity, local[0].similarity * FORGET_RELATIVE_MARGIN)
+        return self._sink([(r.atom.id, r.atom.label) for r in local if r.similarity >= line])
+
+    def _sink(self, matches: list[tuple[str, str]]) -> list[str]:
+        """Sink, stamp and unindex each ``(id, label)`` in the write space."""
         # Below the floor by a margin, never merely at it: the decay floor
         # holds an atom that is still at or above the line.
         sunk_to = self._surfacing_floor() * 0.5
         forgotten = []
-        for r in results:
-            if r.atom.space != self.write_space:
-                continue
+        for atom_id, label in matches:
             self.db.execute_batch([
                 (
                     f"""UPDATE atoms SET
@@ -502,12 +561,12 @@ class Smrti:
                                                 '$.forgotten', json('true')),
                             updated_at = datetime('now')
                         WHERE id = ? AND tenant_id = ? AND space = ?""",
-                    (sunk_to, r.atom.id, self.tenant_id, self.write_space),
+                    (sunk_to, atom_id, self.tenant_id, self.write_space),
                 ),
-                *vec_delete([r.atom.id]),
-                *fts_delete(self.db, [r.atom.id]),
+                *vec_delete([atom_id]),
+                *fts_delete(self.db, [atom_id]),
             ])
-            forgotten.append(r.atom.label)
+            forgotten.append(label)
         return forgotten
 
     def set_personality(self, preset_name: str) -> None:

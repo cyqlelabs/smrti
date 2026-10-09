@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 import httpx
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
@@ -149,7 +149,44 @@ async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: lis
     )
 
 
-async def _remember(content: str, tenant_id: str, write_space: str, source: str = "user") -> str:
+def _stated_tone(request: Request) -> tuple[float, float | None] | None:
+    """The tone the client stated for this turn's user message, if any.
+
+    A proxied conversation carries no tone of its own, so the engine
+    estimates one — and an estimate never mints a ``critical_warning``. A
+    client that knows the user is reporting a mistake to avoid ("never run
+    the migration without a backup") says so with ``X-Smrti-Valence`` (and
+    optionally ``X-Smrti-Intensity``); the user turn is then stored with that
+    valence stated, exactly as ``remember(valence=...)`` would store it. The
+    assistant's reply is never given the stated tone. A malformed value is a
+    400 rather than ignored: a warning the client meant to record and the
+    proxy silently dropped is the failure this header exists to prevent.
+    """
+    raw_valence = request.headers.get("x-smrti-valence")
+    raw_intensity = request.headers.get("x-smrti-intensity")
+    if raw_valence is None:
+        if raw_intensity is not None:
+            raise HTTPException(400, "X-Smrti-Intensity requires X-Smrti-Valence")
+        return None
+    try:
+        valence = float(raw_valence)
+        intensity = None if raw_intensity is None else float(raw_intensity)
+    except ValueError:
+        raise HTTPException(400, "X-Smrti-Valence and X-Smrti-Intensity must be numbers")
+    if not -1.0 <= valence <= 1.0:
+        raise HTTPException(400, "X-Smrti-Valence must be in [-1, 1]")
+    if intensity is not None and not 0.0 <= intensity <= 1.0:
+        raise HTTPException(400, "X-Smrti-Intensity must be in [0, 1]")
+    return valence, intensity
+
+
+async def _remember(
+    content: str,
+    tenant_id: str,
+    write_space: str,
+    source: str = "user",
+    tone: tuple[float, float | None] | None = None,
+) -> str:
     mem = get_mem(tenant_id, write_space)
     if mem.is_ignored(content):
         return ""
@@ -161,15 +198,20 @@ async def _remember(content: str, tenant_id: str, write_space: str, source: str 
     )
     if existing:
         return ""
-    # Valence is left to the engine to read from the text. Passing an estimate
-    # in would record it as a tone the caller stated, and a proxied
-    # conversation has no caller saying anything about tone — which is how an
-    # exasperated turn used to come back as a constraint the agent must obey.
+    # Valence is left to the engine to read from the text unless the client
+    # stated one (see _stated_tone). Passing an estimate in would record it
+    # as a tone the caller stated, and a proxied conversation has no caller
+    # saying anything about tone — which is how an exasperated turn used to
+    # come back as a constraint the agent must obey.
     meta = {"source": source} if source != "user" else {}
+    valence, intensity = tone if tone is not None else (None, None)
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
         None,
-        lambda: mem.remember(content, type="episode", probability=0.75, metadata=meta),
+        lambda: mem.remember(
+            content, type="episode", probability=0.75, metadata=meta,
+            valence=valence, intensity=intensity,
+        ),
     )
 
 
@@ -425,11 +467,13 @@ async def _store_exchange(
     write_space: str,
     auth: str = "",
     model: str = "",
+    tone: tuple[float, float | None] | None = None,
 ) -> None:
     """Persist the most recent user message and the assistant reply as episodic memories.
 
     Only the last user message is stored to avoid duplicating conversation history on every
-    request (the full history is passed in messages on every turn).
+    request (the full history is passed in messages on every turn). ``tone`` is the valence
+    the client stated for the user message (see ``_stated_tone``); the reply never takes it.
     """
     last_user = next(
         (m["content"] for m in reversed(messages)
@@ -451,7 +495,11 @@ async def _store_exchange(
     if not to_store:
         return
 
-    episode_ids = await asyncio.gather(*[_remember(c, tenant_id, write_space, source=s) for c, s in to_store])
+    episode_ids = await asyncio.gather(*[
+        _remember(c, tenant_id, write_space, source=s,
+                  **({"tone": tone} if tone is not None and s == "user" else {}))
+        for c, s in to_store
+    ])
 
     if cfg.EXTRACT:
         for eid, (content, source) in zip(episode_ids, to_store):
@@ -503,6 +551,7 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
 
     raw_body: dict = await request.json()
     tenant_id, write_space, read_spaces = _parse_request_identity(request)
+    tone = _stated_tone(request)
 
     pre_inject_messages: list[dict] = raw_body.get("messages", [])
     t0 = time.monotonic()
@@ -537,13 +586,13 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
     if body.get("stream", False):
         return StreamingResponse(
             _stream_proxy(body, post_inject_messages, tenant_id, write_space,
-                          upstream_hdrs, log_entry, t0),
+                          upstream_hdrs, log_entry, t0, tone),
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
         )
 
     return await _non_stream_proxy(body, post_inject_messages, tenant_id, write_space,
-                                   upstream_hdrs, log_entry, t0)
+                                   upstream_hdrs, log_entry, t0, tone)
 
 
 async def _non_stream_proxy(
@@ -554,6 +603,7 @@ async def _non_stream_proxy(
     headers: dict,
     log_entry: dict,
     t0: float,
+    tone: tuple[float, float | None] | None = None,
 ) -> JSONResponse:
     from smrti.call_log import update as _update_log
 
@@ -588,7 +638,7 @@ async def _non_stream_proxy(
 
     auth = headers.get("Authorization", "")
     model = body.get("model", "")
-    _spawn(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model))
+    _spawn(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model, tone))
 
     passthrough_headers = {
         k: v
@@ -606,6 +656,7 @@ async def _stream_proxy(
     headers: dict,
     log_entry: dict,
     t0: float,
+    tone: tuple[float, float | None] | None = None,
 ) -> AsyncIterator[bytes]:
     accumulated: list[str] = []
     auth = headers.get("Authorization", "")
@@ -637,7 +688,7 @@ async def _stream_proxy(
                     from smrti.call_log import update as _update_log
                     _update_log(log_entry)
                     _spawn(
-                        _store_exchange(original_messages, full_text, tenant_id, write_space, auth, model)
+                        _store_exchange(original_messages, full_text, tenant_id, write_space, auth, model, tone)
                     )
                     yield b"data: [DONE]\n\n"
                     return

@@ -75,7 +75,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     Executes in order:
       1. Apply pending evidence to update belief probabilities/confidence
       2. Decay STI, LTI, and confidence for all atoms in this space
-         (user-stated episodes/beliefs hold a confidence floor at the
+         (user-stated episodes/beliefs/goals hold a confidence floor at the
          surfacing threshold so they stay recallable, and one asserted as
          permanent keeps the confidence it was asserted with)
       3. Propagate STI and valence to 1-hop neighbors of active atoms
@@ -203,13 +203,17 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # atom past that line it can never be recalled — and what cannot surface
     # cannot be restated, so no new evidence ever lifts it back. That is the
     # LTI floor's one-way trip again, aimed at visibility instead of
-    # deletion. User-stated episodes and beliefs therefore decay toward the
+    # deletion. User-stated episodes, beliefs and goals therefore decay toward the
     # surfacing line, not zero: direct testimony never stops being grounds
     # for a belief. Like the LTI floor, it only holds an atom still at or
     # above it — forget() sinks memories below on purpose, and a floor that
     # reached down would undo every deliberate forget one epoch later.
-    # Concepts and goals are derived index nodes, not testimony, and keep
-    # decaying freely, as does everything agent-authored.
+    # A goal the user stated is testimony too — "I want to learn Rust" is a
+    # report about the user, and a goal that silently stops surfacing (and
+    # then, with LTI at zero, is pruned around epoch 80 on the default rates)
+    # is one the agent stops working toward without anyone deciding so.
+    # Concepts are derived index nodes, not testimony, and keep decaying
+    # freely, as does everything agent-authored.
     #
     # A belief asserted at PERMANENT_PROBABILITY is not merely exempt from
     # confidence decay: the epoch lifts it back to the confidence it was
@@ -248,7 +252,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
                                              THEN MAX(confidence, probability)
                                          ELSE confidence END
                                      ELSE confidence * (1.0 - ?) END,
-                                CASE WHEN type IN ('episode', 'belief')
+                                CASE WHEN type IN ('episode', 'belief', 'goal')
                                           AND confidence >= ? THEN ?
                                      ELSE 0.0 END),
                updated_at = datetime('now')
@@ -374,7 +378,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         new_connections = discover_connections(tenant_id, space, db, embed_engine)
 
     # 6. Prune atoms below both confidence and LTI floors.
-    # User-authored episodes and beliefs are exempt from direct pruning unless
+    # User-authored episodes, beliefs and goals are exempt from direct pruning unless
     # the caller forgot them; their agent-authored counterparts are not, so a
     # model turn the user never picked up can leave the graph once it has
     # decayed. Relations are never pruned directly — they cascade with their
@@ -384,7 +388,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
            WHERE tenant_id = ? AND space = ?
              AND confidence < ? AND lti < 0.05
              AND type != 'relation'
-             AND (type NOT IN ('episode', 'belief')
+             AND (type NOT IN ('episode', 'belief', 'goal')
                   OR {ATOM_SOURCE} = 'agent'
                   OR {ATOM_FORGOTTEN})""",
         (tenant_id, space, min_conf),

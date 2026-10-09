@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from typing import Annotated, Optional
 
 from fastapi import FastAPI, HTTPException, Query, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from smrti import Smrti
 from smrti.servers import config as cfg
@@ -171,25 +171,27 @@ class BelieveRequest(BaseModel):
         return v
 
 
-class ForgetRequest(BaseModel):
-    query: str
-    reason: Optional[str] = None
-    space: Optional[SpaceName] = None
-
-    @field_validator("query")
-    @classmethod
-    def _non_empty(cls, v: str) -> str:
-        if not v or not v.strip():
-            raise ValueError("query must not be empty or whitespace-only")
-        return v
-
-
 class ReflectRequest(BaseModel):
     space: Optional[SpaceName] = None
 
 
 # An atom id is a UUID; the cap is on the shape, not on the space of names.
 AtomId = Annotated[str, Field(max_length=64)]
+
+
+class ForgetRequest(BaseModel):
+    # Either a query, whose clear matches are forgotten, or the exact ids of
+    # memories a caller recalled and inspected. Ids win when both are given.
+    query: Optional[str] = None
+    atom_ids: Optional[list[AtomId]] = Field(default=None, min_length=1, max_length=64)
+    reason: Optional[str] = None
+    space: Optional[SpaceName] = None
+
+    @model_validator(mode="after")
+    def _names_something(self) -> "ForgetRequest":
+        if not self.atom_ids and (not self.query or not self.query.strip()):
+            raise ValueError("query must not be empty or whitespace-only when no atom_ids are given")
+        return self
 
 
 class ReinforceRequest(BaseModel):

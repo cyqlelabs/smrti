@@ -164,7 +164,7 @@ def _cosine(a: list[float], b: list[float]) -> float:
 
 def _similarity(
     atom, query_vec: list[float], query_tokens: set[str], knn_distances: dict[str, float],
-    db, embed_engine,
+    db, embed_engine, damp_echoes: bool = True,
 ) -> float:
     """How much the candidate is about the query.
 
@@ -178,7 +178,9 @@ def _similarity(
     that kept it unreachable. The epoch files the vector for good.
 
     An episode that echoes the query scores nothing, unless it is a stated
-    warning — see ``_ECHO_OVERLAP``.
+    warning — see ``_ECHO_OVERLAP`` — or the caller is looking for the memory
+    itself rather than an answer (``damp_echoes=False``, which is forget's
+    case: quoting a memory is the natural way to name the one to drop).
     """
     if atom.id in knn_distances:
         similarity = max(0.0, 1.0 - knn_distances[atom.id])
@@ -193,7 +195,8 @@ def _similarity(
             stored = embed_engine.embed(embedding_text(atom))
         similarity = max(0.0, _cosine(query_vec, stored))
     if (
-        atom.type == AtomType.EPISODE
+        damp_echoes
+        and atom.type == AtomType.EPISODE
         and similarity >= _ECHO_MIN_SIMILARITY
         and not is_critical_warning(atom)
         and _is_echo(query_tokens, atom.content or atom.label)
@@ -388,10 +391,14 @@ def rank_candidates(
     embed_engine,
     write_space: str,
     min_confidence: float | None = None,
+    damp_echoes: bool = True,
 ) -> tuple[list[RecallResult], float, float]:
     """Every eligible candidate the query reaches, ranked by salience, with
     the write space's access boost and the surfacing floor that was applied
-    — the first stage of :func:`retrieve`, which makes no write."""
+    — the first stage of :func:`retrieve`, which makes no write.
+
+    ``damp_echoes=False`` keeps an episode that restates the query; see
+    :func:`_similarity`."""
     # One KNN probe is issued per read space, so a repeated name is repeated
     # work — and read_spaces can arrive straight from a request header.
     # Deduplicating in order also keeps the ``space IN (...)`` lists tight.
@@ -521,7 +528,9 @@ def rank_candidates(
     results: list[RecallResult] = []
     for row in atoms_rows:
         atom = atom_from_row(row)
-        similarity = _similarity(atom, query_vec, query_tokens, knn_distances, db, embed_engine)
+        similarity = _similarity(
+            atom, query_vec, query_tokens, knn_distances, db, embed_engine, damp_echoes
+        )
         # The engine already trusts agent-authored content less at decay and
         # prune time; ranking is where that asymmetry reaches the reader. An
         # agent's stored reply competes with the user testimony it was

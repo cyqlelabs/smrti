@@ -32,7 +32,7 @@ Inspired by [AtomSpace](https://github.com/opencog/atomspace): memories are grap
 - **Error-avoidance memory** — severe failures survive pruning and outrank recent trivia at recall; every result comes back classified as `critical_warning`, `known_antipattern`, or `context`.
 - **Knowledge graph** — in the server modes, a GLiNER2 + LLM pipeline extracts entities and typed relations from what you store and resolves pronouns against the graph; no manual schema.
 - **Three integration paths** — MCP server, REST API, or an OpenAI-compatible proxy that adds memory to an existing app by changing one base URL.
-- **Multilingual** — 50+ languages end-to-end: multilingual embeddings, zero-shot NER, language-agnostic sentiment.
+- **Multilingual** — 50+ languages through multilingual embeddings, zero-shot NER, and language-agnostic sentiment. Lexical search and word-overlap checks segment spaced scripts on word boundaries and Chinese and Japanese into character bigrams; other unspaced scripts (Thai, Lao, Khmer, Burmese) are not segmented and are found through embeddings only.
 - **Personality-driven** — six presets (17 hyperparameters) shape what each agent notices, retains, and forgets.
 
 ## Install
@@ -95,7 +95,9 @@ epoch = mem.reflect()
 print(f"Updated {epoch.beliefs_updated} beliefs, pruned {epoch.atoms_pruned} atoms")
 ```
 
-The constructor also takes `tenant_id`, `write_space`, `read_spaces`, `ignore_patterns`, and `temporal` (see [Multi-Tenant / Space Model](#multi-tenant--space-model)). The Python API stores, recalls, forgets, and consolidates; entity extraction and relative-date resolution run in the server modes (pass `temporal=True` for dates here). The embedding model downloads on first use, the NER weights on first extraction.
+The constructor also takes `tenant_id`, `write_space`, `read_spaces`, `ignore_patterns`, and `temporal` (see [Multi-Tenant / Space Model](#multi-tenant--space-model)). The Python API stores, recalls, forgets, and consolidates; entity extraction and relative-date resolution run in the server modes (pass `temporal=True` for dates here).
+
+Three model downloads happen on first use, each once: the embedding model (first `remember`/`recall`), the [decision model](#semantic-decisions) (first decision — 250 MB, or the 93 MB student on small machines; `SMRTI_DECISIONS=off` skips it), and the NER weights (first extraction, server modes only; about 1.1 GB on disk). Plan memory for what you turn on: the decision model holds about 560 MB resident and the NER encoder about 400 MB plus its tokenizer, on top of the embedding model. The total resident size of a server with everything on has not been measured; `SMRTI_DECISIONS=off` and `SMRTI_EXTRACT_MODE=llm` (no local tagger) are the two switches that shrink it most.
 
 ### CLI
 
@@ -143,11 +145,11 @@ Similarity multiplies the standing terms, so a memory that is not about the ques
 - Results below the personality's `min_confidence_to_surface` are excluded unless you pass `min_confidence`; forgotten memories never return.
 - The core [decision engine](#semantic-decisions) judges the top candidates as evidence for the question and blends that judgement with salience; each result then carries an `evidence` score. Pass `rerank=False` to skip the judgement. Only what is returned gets the access boost; `attend(atom_ids)` boosts what an external reranker kept out of a wider `recall(boost=False)`. The REST and MCP `recall` take both flags.
 
-Each result carries a `severity`: `critical_warning` (a valence you stated, on anything but a bare concept), `known_antipattern` (a belief whose probability fell below 0.3, where a superseded preference or constraint lands), or `context`.
+Each result carries a `severity`: `critical_warning` (a valence you stated, on anything but a bare concept), `known_antipattern` (a belief or extracted claim whose probability fell below 0.3, where a superseded preference, constraint or fact lands — episodes, goals and concepts never qualify), or `context`. An *estimated* valence never makes a critical warning, however negative: it scores the mood of the words, not a report of a mistake. To record one, state the valence — `remember(..., valence=-0.9)`, the MCP/REST `valence` field, or the proxy's `X-Smrti-Valence` header.
 
 ### `forget()`
 
-Stops the memories matching a query from surfacing. They are excluded from every recall, no consolidation lifts them back, and the next epoch may prune them. Forgetting is final.
+Stops memories from surfacing. They are excluded from every recall, no consolidation lifts them back, and the next epoch may prune them. Forgetting is final, so a query forgets only clear matches: up to `top_k` (5) results in the write space whose similarity to the query is at least `min_similarity` (0.35) and within 85% of the best match's — never simply the nearest ones. Quoting a memory back finds it. To forget an exact set, recall first and pass the ids: `mem.forget(atom_ids=[...])` (also `atom_ids` on the MCP tool and `POST /forget`).
 
 ### `reinforce()`
 
@@ -155,7 +157,7 @@ Reports that recalled memories were used; a cheap test is that distinctive words
 
 ### `reflect()`
 
-One consolidation epoch: revise pending evidence, decay attention and confidence, propagate both to neighbors, heal orphaned episodes, promote high-STI atoms to long-term importance, resolve contradictions (a superseded claim loses), link similar high-LTI atoms (every tenth epoch), and prune what fell below the floors. The servers run one every `SMRTI_REFLECT_INTERVAL` seconds for each space used in that interval, so idle memory does not age. What you told the agent decays only to the surfacing floor and stays recallable unless you forget it; what it inferred keeps fading, faster for agent-authored atoms.
+One consolidation epoch: revise pending evidence, decay attention and confidence, propagate both to neighbors, heal orphaned episodes, promote high-STI atoms to long-term importance, resolve contradictions (a superseded claim loses), link similar high-LTI atoms (every tenth epoch), and prune what fell below the floors. The servers run one every `SMRTI_REFLECT_INTERVAL` seconds for each space used in that interval, so idle memory does not age. What you told the agent — episodes, beliefs and goals — decays only to the surfacing floor and stays recallable unless you forget it; what it inferred keeps fading, faster for agent-authored atoms. Contradictions are *resolved* here, not detected: the epoch acts on `contradicts` edges, which extraction draws when a new claim supersedes an older one (or which you can draw yourself); it does not compare arbitrary sentences for conflict.
 
 ### Semantic decisions
 
@@ -301,7 +303,7 @@ On every request the proxy:
 
 1. Recalls relevant memories from the read spaces, building the query from recent conversation context (not just the last message)
 2. Injects them into the system prompt in two sections — behavioral constraints (`YOU MUST NOT` / `AVOID`) for `critical_warning` and `known_antipattern` memories, and background context (`Note:`) for the rest — each with a confidence qualifier
-3. Stores the user message and assistant response as episodes (identical episodes are deduplicated per tenant/space)
+3. Stores the user message and assistant response as episodes (identical episodes are deduplicated per tenant/space). The proxy reads tone from the text, and an estimated tone never becomes a `critical_warning`; a client that knows the user is reporting a mistake to avoid sends `X-Smrti-Valence: -0.9` (and optionally `X-Smrti-Intensity`) with that request, and the user message is stored with the valence stated. An out-of-range or non-numeric value is a 400.
 4. Extracts entities and claims into concept nodes and typed relation edges
 
 Works with any OpenAI-compatible upstream — including local llama.cpp, vLLM, or Ollama endpoints.
@@ -589,7 +591,7 @@ pytest tests/ -v
 
 Two harnesses in `bench/` ingest a published dataset as episodes and answer its questions through `recall`. Retrieval and answering are scored separately, so a strong answering model cannot hide a retrieval regression.
 
-Config (2026-08-26): extraction off · no consolidation epochs · `top_k=50` · `deterministic` preset · gemini-3.7-flash answering and judging. This measures retrieval alone, and it predates the current ranking formula; re-run `make bench` before reading the numbers against the current engine.
+Config (2026-08-26): extraction off · no consolidation epochs · decisions off · `top_k=50` · `deterministic` preset · gemini-3.7-flash answering and judging. This measures retrieval alone, and it predates the current ranking formula; re-run `make bench` before reading the numbers against the current engine. The decision layer, active by default in the engine, has not been benchmarked here.
 
 | Benchmark | Scope | Retrieval | Answers | Notes |
 | --------- | ----- | --------- | ------- | ----- |
@@ -606,7 +608,7 @@ make bench-halumem   # fails if the hallucination rate rises
 # add --top-k 5 to measure at the proxy's injection budget (10 for the MCP tool)
 ```
 
-Each benchmark locks its config beside a recorded baseline and refuses to compare across configs; `--epochs` and `--top-k` join the fingerprint when set. Neither is a CI gate: both need the datasets, the embedding model, and a judge key.
+Each benchmark locks its config beside a recorded baseline and refuses to compare across configs; `--epochs` and `--top-k` join the fingerprint when set. The harness runs with every decision task off unless `--decisions shadow|active` is passed, which joins the fingerprint too: the gate measures the deterministic retrieval path the baselines were recorded on, and a decision-mode run needs its own baseline (`--update-baseline` under that mode). Neither is a CI gate: both need the datasets, the embedding model, and a judge key.
 
 **Where it is strong.** LongMemEval retrieves the annotated evidence for five of six abilities without a miss; temporal reasoning and assistant's-own-words questions are answered perfectly. On HaluMem's *memory boundary* questions (things the user never said), smrti answers correctly 97% of the time and invents something 2.9% of the time.
 

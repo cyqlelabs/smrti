@@ -178,6 +178,36 @@ def test_recalled_memories_reach_the_model_dated(mem, dataset):
     assert memories and all(m.startswith("[2025-09-04]") for m in memories)
 
 
+def _attention(mem) -> dict:
+    rows = mem.db.fetchall(
+        "SELECT id, sti FROM atoms WHERE tenant_id='halumem' AND space='u_u1'"
+    )
+    return {row["id"]: row["sti"] for row in rows}
+
+
+def test_a_recall_leaves_no_trace_for_the_next_question(mem, dataset):
+    # Every question about a user is asked of one graph: a boosting recall
+    # would raise what it returned and tilt the questions asked after it.
+    user = load_users(dataset)[0]
+    ingest(user, mem)
+    before = _attention(mem)
+
+    recall_for(user.questions[0], mem, top_k=10, min_confidence=0.0)
+
+    assert _attention(mem) == before
+
+
+def test_the_sequential_reading_boosts(mem, dataset):
+    user = load_users(dataset)[0]
+    ingest(user, mem)
+    before = _attention(mem)
+
+    recall_for(user.questions[0], mem, top_k=10, min_confidence=0.0, boost=True)
+
+    after = _attention(mem)
+    assert any(after[atom_id] > sti for atom_id, sti in before.items())
+
+
 # ── the three-way verdict ────────────────────────────────────────────────────
 
 

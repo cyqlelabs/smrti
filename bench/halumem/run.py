@@ -69,6 +69,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict,
                     question, mem,
                     top_k=config.get("top_k", 50),
                     min_confidence=config.get("min_confidence", 0.0),
+                    boost=config.get("sequential", False),
                 ),
             }
             for question in questions

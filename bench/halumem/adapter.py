@@ -171,9 +171,20 @@ def ingest(user: User, mem, extraction: dict | None = None) -> int:
     return stored
 
 
-def recall_for(question: Question, mem, top_k: int, min_confidence: float) -> list[str]:
-    """The memories the answering model will see, newest date first in text."""
-    results = mem.recall(question.question, top_k=top_k, min_confidence=min_confidence)
+def recall_for(
+    question: Question, mem, top_k: int, min_confidence: float, boost: bool = False
+) -> list[str]:
+    """The memories the answering model will see, newest date first in text.
+
+    The boost is off by default: every question about a user is asked of one
+    graph, and a boosting recall raises what it returned for the questions
+    after it, so a score would depend on the order the questions were asked
+    in. ``boost=True`` is the sequential reading, where each question is a
+    turn that leaves its trace on the next.
+    """
+    results = mem.recall(
+        question.question, top_k=top_k, min_confidence=min_confidence, boost=boost
+    )
     return [
         f"[{(r.atom.created_at or '')[:10]}] {r.atom.content or r.atom.label}"
         for r in results

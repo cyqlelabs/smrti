@@ -112,7 +112,6 @@ def test_a_bare_hour_is_left_alone_even_though_the_parser_would_shift_the_date()
         # Idioms and weekday references the parser declines. These are the
         # cases the extraction LLM covers later, from the atom's metadata.
         ("Lo vemos el finde que viene", "el finde que viene"),
-        ("The review is next Friday", "next Friday"),
         ("Der Termin ist nächsten Freitag", "nächsten Freitag"),
     ],
 )

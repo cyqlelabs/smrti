@@ -160,6 +160,8 @@ _VIZ_LOGIN_FORM = """<!doctype html><meta charset="utf-8"><title>smrti visualize
 <form method="post" action="viz/login"><label>API key
 <input type="password" name="key" autocomplete="current-password" autofocus required></label>
 <button type="submit">Open</button></form>"""
+# The most the login form may post: a key, URL-encoded, with room to spare.
+_LOGIN_BODY_MAX = 4096
 
 
 async def _viz_login(request: Request):
@@ -172,8 +174,20 @@ async def _viz_login(request: Request):
     landed in the access log and the history — and the browser keeps only a
     random session token, in an HttpOnly, SameSite=Strict cookie the auth
     check accepts on reads.
+
+    The login is answered by the auth middleware, before BodyLimit sees the
+    request, so it bounds its own read: it read any body whole, and a
+    10 KB post passed a 64-byte limit unauthenticated.
     """
-    body = (await request.body()).decode("utf-8", "replace")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > _LOGIN_BODY_MAX:
+        return _too_large(_LOGIN_BODY_MAX)
+    raw = b""
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > _LOGIN_BODY_MAX:
+            return _too_large(_LOGIN_BODY_MAX)
+    body = raw.decode("utf-8", "replace")
     supplied = (parse_qs(body).get("key") or [""])[0]
     if _tenants_of(supplied) is _NO_KEY:
         return HTMLResponse(_VIZ_LOGIN_FORM, status_code=401)

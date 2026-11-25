@@ -480,9 +480,11 @@ def _quoted(text: str) -> str:
     line it still read as the proxy's own words: "- Constraint: …" or a
     preamble sentence inside a memory looked like one. Quoted and escaped, a
     stored text cannot close its string, so everything it says stays inside
-    the record the preamble describes. Non-ASCII is kept as written.
+    the record the preamble describes. Non-ASCII is kept as written, which
+    is why whitespace is collapsed here as well: JSON leaves U+2028, U+2029
+    and NEL unescaped, and each of them ends a line.
     """
-    return json.dumps(text, ensure_ascii=False)
+    return json.dumps(re.sub(r"\s+", " ", text).strip(), ensure_ascii=False)
 
 
 def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, str]:

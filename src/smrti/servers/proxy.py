@@ -10,6 +10,7 @@ import re
 import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
 from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
@@ -91,17 +92,36 @@ def _spawn(coro) -> asyncio.Task:
     return task
 
 
-async def _make_room() -> None:
-    """Wait until fewer than _BACKGROUND_MAX background tasks are in flight.
+# Stores running at once, per event loop (an asyncio semaphore belongs to the
+# loop it was first used on).
+_store_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
 
-    Backpressure rather than a drop: the request that would overflow the set
-    waits for a slot, so a burst slows down instead of losing memories.
+
+def _spawn_store(coro) -> asyncio.Task:
+    """Store an exchange in the background, at most _BACKGROUND_MAX at once.
+
+    The limit is taken inside the task, never on the response path: waiting
+    for a slot before answering made every reply wait on memory writes — each
+    up to two model calls — whenever the proxy was busy. A burst queues its
+    stores instead of losing them.
     """
-    while len(_background_tasks) >= _BACKGROUND_MAX:
-        await asyncio.wait(set(_background_tasks), return_when=asyncio.FIRST_COMPLETED)
+    loop = asyncio.get_running_loop()
+    slots = _store_slots.get(loop)
+    if slots is None:
+        slots = _store_slots[loop] = asyncio.Semaphore(_BACKGROUND_MAX)
+
+    async def in_turn():
+        async with slots:
+            return await coro
+
+    return _spawn(in_turn())
 
 _UPSTREAM = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
-_RECALL_TOP_K = int(os.environ.get("SMRTI_RECALL_TOP_K", "5"))
+# Ten, not five: on LongMemEval-S the evidence reached the prompt for 31 of 40
+# questions at ten against 27 at five, for at most twice the injected text.
+_RECALL_TOP_K = int(os.environ.get("SMRTI_RECALL_TOP_K", "10"))
 # Unset means the personality's own surfacing floor (min_confidence_to_surface);
 # the variable overrides it rather than replacing it with a second default.
 _raw_min_conf = os.environ.get("SMRTI_RECALL_MIN_CONFIDENCE", "").strip()
@@ -261,6 +281,20 @@ async def _remember(
     source: str = "user",
     tone: tuple[float, float | None] | None = None,
 ) -> str:
+    """Store one turn as an episode, off the event loop — the dedup lookup
+    waits on the read pool and the write on any epoch's transaction."""
+    return await asyncio.get_running_loop().run_in_executor(
+        None, _remember_now, content, tenant_id, write_space, source, tone
+    )
+
+
+def _remember_now(
+    content: str,
+    tenant_id: str,
+    write_space: str,
+    source: str,
+    tone: tuple[float, float | None] | None,
+) -> str:
     mem = get_mem(tenant_id, write_space)
     if mem.is_ignored(content):
         return ""
@@ -279,13 +313,9 @@ async def _remember(
     # come back as a constraint the agent must obey.
     meta = {"source": source} if source != "user" else {}
     valence, intensity = tone if tone is not None else (None, None)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: mem.remember(
-            content, type="episode", probability=0.75, metadata=meta,
-            valence=valence, intensity=intensity,
-        ),
+    return mem.remember(
+        content, type="episode", probability=0.75, metadata=meta,
+        valence=valence, intensity=intensity,
     )
 
 
@@ -496,7 +526,9 @@ async def _inject_context(
         return body, "", []
 
     mem = get_mem(tenant_id, write_space)
-    enriched_contents = [_enrich_content(r, mem) for r in memories]
+    enriched_contents = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: [_enrich_content(r, mem) for r in memories]
+    )
     formatted = [_format_memory(r, c) for r, c in zip(memories, enriched_contents)]
     memory_dicts = [
         _memory_record(r, c, sev) for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
@@ -828,6 +860,20 @@ async def _non_stream_proxy(
         return _upstream_failure(
             log_entry, t0, f"upstream request failed: {redact(str(exc))}", "upstream_unreachable"
         )
+    if not response.is_success:
+        # The upstream's refusal is the client's to read: parsed here, a
+        # text/plain 429 or an HTML 502 became this proxy's own 502, and the
+        # status and Retry-After were lost.
+        log_entry["status"] = response.status_code
+        log_entry["error"] = redact(response.text[:500])
+        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _update_log(log_entry)
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=_passthrough_headers(response),
+            media_type=response.headers.get("content-type"),
+        )
     try:
         data = response.json()
     except ValueError as exc:
@@ -847,8 +893,7 @@ async def _non_stream_proxy(
     if response.is_success:
         auth = headers.get("Authorization", "")
         model = body.get("model", "")
-        await _make_room()
-        _spawn(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model, tone))
+        _spawn_store(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model, tone))
 
     return JSONResponse(
         content=data, status_code=response.status_code, headers=_passthrough_headers(response)
@@ -951,8 +996,7 @@ async def _stream_proxy(
         log_entry["response_snippet"] = full_text[:500]
         log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
         _update_log(log_entry)
-        await _make_room()
-        _spawn(_store_exchange(original_messages, full_text, tenant_id, write_space, auth, model, tone))
+        _spawn_store(_store_exchange(original_messages, full_text, tenant_id, write_space, auth, model, tone))
 
     try:
         log_entry["status"] = upstream.status_code

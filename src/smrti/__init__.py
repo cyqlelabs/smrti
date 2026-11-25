@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -46,7 +47,7 @@ from smrti.retrieval.fan_out import (
     retrieve,
     superseded_claims,
 )
-from smrti.evolution.epoch import empty_result, try_epoch
+from smrti.evolution.epoch import LeaseLost, empty_result, try_epoch
 from smrti.evolution.forgetting import derived_only_from
 from smrti.evolution.reinforcement import DEFAULT_WEIGHT as _REINFORCE_WEIGHT, reinforce_atoms
 from smrti.personality.params import PersonalityProfile, load_preset, param_value
@@ -58,6 +59,8 @@ from smrti.spaces.set_ops import (
     space_symmetric_difference as _space_symmetric_difference,
 )
 from smrti.spaces.emergence import materialize_bridge as _materialize_bridge
+
+logger = logging.getLogger(__name__)
 
 # What forget() takes a query match to be. Forgetting is final, so a result
 # is dropped only when it is about the query in its own right (an absolute
@@ -512,12 +515,20 @@ class Smrti:
         """Consolidate the write space once.
 
         Another process consolidating the same space holds its lease, and then
-        this call changes nothing and returns an empty result. The activity
-        count is kept in that case, so the reflect loop tries again next
+        this call changes nothing and returns an empty result; one that takes
+        the space over mid-epoch ends this run the same way. The activity
+        count is kept in both cases, so the reflect loop tries again next
         interval; it is reset only when an epoch ran to the end.
         """
         with _get_reflect_lock(self.tenant_id, self.write_space):
-            result = try_epoch(self.tenant_id, self.write_space, self.db, self.embed)
+            try:
+                result = try_epoch(self.tenant_id, self.write_space, self.db, self.embed)
+            except LeaseLost:
+                # Another process took the space over mid-epoch: its run does
+                # the work, and what this one wrote before the takeover stands.
+                logger.warning("epoch on %s/%s was taken over by another process",
+                               self.tenant_id, self.write_space)
+                return empty_result()
             if result is None:
                 return empty_result()
             self._ops_since_reflect = 0
@@ -618,8 +629,11 @@ class Smrti:
             if cascade
             else ([], [])
         )
+        # Built before the transaction: it reads the surfacing floor, and a
+        # read inside the write transaction waits on its own lock in memory.
+        statements = self._sink_statements(matches + concepts)
         with self.db.transaction() as conn:
-            for statement, params in self._sink_statements(matches + concepts):
+            for statement, params in statements:
                 conn.execute(statement, params)
             # A claim edge is deleted rather than stamped: the readers that
             # render an entity's facts test the atoms an edge joins, not the

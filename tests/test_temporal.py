@@ -52,7 +52,6 @@ class BrokenNER:
         # English
         ("The session is tomorrow", "tomorrow", "2026-08-27"),
         ("We shipped it yesterday", "yesterday", "2026-08-25"),
-        ("The review is in two weeks", "in two weeks", "2026-09-09"),
         # German, to show the parser is not doing English with extra steps
         ("Der Termin ist übermorgen", "übermorgen", "2026-08-28"),
         ("Wir haben es vorgestern deployed", "vorgestern", "2026-08-24"),
@@ -113,6 +112,9 @@ def test_a_bare_hour_is_left_alone_even_though_the_parser_would_shift_the_date()
         # cases the extraction LLM covers later, from the atom's metadata.
         ("Lo vemos el finde que viene", "el finde que viene"),
         ("Der Termin ist nächsten Freitag", "nächsten Freitag"),
+        # A week names no day: resolved, "next week" became one Wednesday.
+        ("The review is in two weeks", "in two weeks"),
+        ("Nos vemos la semana que viene", "la semana que viene"),
     ],
 )
 def test_a_span_no_parser_can_resolve_leaves_the_text_untouched(text, span):

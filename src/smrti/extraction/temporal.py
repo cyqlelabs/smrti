@@ -56,11 +56,13 @@ _ANNOTATION = re.compile(r"\s*\[resolved: \d{4}-\d{2}-\d{2}\]")
 # it.
 _READINGS = (("past", "DMY"), ("future", "MDY"))
 
-# The periods dateparser reports for a span that names a day. A month or a
-# year ("March", "2019", "last year") names none, and the parser fills the gap
-# with today's day of the month: "2019" became the 25th of November 2019. A
-# count of weeks from the write time ("in two weeks") does land on a day.
-_DAY_PERIODS = frozenset({"day", "week"})
+# The period dateparser reports for a span that names a day. A week, a month
+# or a year ("next week", "March", "2019") names none, and the parser fills
+# the gap: "2019" became the 25th of November 2019 and "next week" a single
+# Wednesday. "In two weeks" does land on a day, but the parser reports it as
+# the same period as "next week" and nothing language-agnostic tells the two
+# apart, so both are left as written.
+_DAY_PERIODS = frozenset({"day"})
 
 # One parser for the life of the process, with the write time, direction and
 # field order set on its settings per call. dateparser keys its per-locale

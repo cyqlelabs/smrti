@@ -279,3 +279,15 @@ def test_an_unreadable_metadata_row_does_not_abort_recall(tmp_path, monkeypatch,
     assert atom_from_row(
         {"id": "x", "type": "concept", "label": "x", "metadata": None}
     ).metadata == {}
+
+
+def test_forget_on_an_in_memory_database_does_not_wait_on_itself():
+    """forget() read the surfacing floor inside its own write transaction,
+    and in memory a read takes the write lock: the call never returned."""
+    from smrti import Smrti
+
+    mem = Smrti(db_path=":memory:")
+    atom_id = mem.remember("The spare key is under the blue pot")
+    assert mem.forget(atom_ids=[atom_id], cascade=True) == ["The spare key is under the blue pot"]
+    with mem.db.transaction():
+        assert mem.db.fetchone("SELECT COUNT(*) AS n FROM atoms")["n"] == 1

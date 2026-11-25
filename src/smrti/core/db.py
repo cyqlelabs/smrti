@@ -12,7 +12,7 @@ from typing import Any
 import sqlite_vec
 
 from smrti.core.models import STRUCTURAL_RELATIONS
-from smrti.core.provenance import ATOM_FORGOTTEN
+from smrti.core.provenance import ATOM_FORGOTTEN, CRITICAL_WARNING_SQL
 from smrti.retrieval.text import lexical_text
 
 logger = logging.getLogger(__name__)
@@ -293,6 +293,12 @@ CREATE INDEX IF NOT EXISTS idx_aliases_alias_norm ON aliases(tenant_id, u_lower(
 
 CREATE TABLE IF NOT EXISTS smrti_meta (key TEXT PRIMARY KEY, value TEXT);
 
+-- The stated warnings, which recall looks for on every turn apart from its
+-- candidate pool: a partial index keeps that a scan of the warnings alone,
+-- not of the whole partition.
+CREATE INDEX IF NOT EXISTS idx_atoms_warning ON atoms(tenant_id, space)
+    WHERE {CRITICAL_WARNING_SQL};
+
 CREATE TABLE IF NOT EXISTS epoch_lease (
     tenant_id       TEXT NOT NULL,
     space           TEXT NOT NULL,
@@ -346,6 +352,7 @@ class Database:
         self._read_pool: queue.Queue[sqlite3.Connection] = queue.Queue(maxsize=_READ_POOL_SIZE)
         self._migration_backup_done = False
         self._closed = False
+        self._transaction_thread: int | None = None
         # Whether this build of SQLite carries FTS5. Retrieval reads it to
         # decide whether the lexical half of the search exists at all.
         self.fts_enabled = False
@@ -1030,12 +1037,15 @@ class Database:
             conn = self._write_conn
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
+            self._transaction_thread = threading.get_ident()
             try:
                 yield conn
                 conn.commit()
             except BaseException:
                 conn.rollback()
                 raise
+            finally:
+                self._transaction_thread = None
 
     @contextmanager
     def _read_conn(self):
@@ -1045,6 +1055,11 @@ class Database:
         if self._closed:
             raise sqlite3.ProgrammingError(f"the database {self._db_path} is closed")
         if self._in_memory:
+            # Reads share the write connection here, under its lock — except
+            # inside this thread's own transaction, which already holds it.
+            if self._transaction_thread == threading.get_ident():
+                yield self._write_conn
+                return
             with self._write_lock:
                 yield self._write_conn
             return

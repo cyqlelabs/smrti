@@ -25,6 +25,7 @@ from smrti.core.db import stable_rowid
 from smrti.core.models import (
     Atom,
     AtomPair,
+    AtomType,
     SpaceOverlap,
     SpaceSetResult,
     atom_from_row,
@@ -205,7 +206,13 @@ def _contextual_similarity(
     if _context_free(atom_a, atom_b, vec_a, vec_b):
         return _unit(emb_sim)
 
-    score = W_EMBEDDING * emb_sim + W_ENTITY_TYPE * _or_neutral(_entity_type_score(atom_a, atom_b))
+    type_score = _entity_type_score(atom_a, atom_b)
+    if type_score is None and AtomType.CONCEPT not in (atom_a.type, atom_b.type):
+        # Entity types describe entities. An episode, belief or goal never
+        # has one, and reading that as half a disagreement held two copies of
+        # the same sentence under the threshold; their text alone decides.
+        type_score = emb_sim
+    score = W_EMBEDDING * emb_sim + W_ENTITY_TYPE * _or_neutral(type_score)
     if embed_engine is None:
         return _unit(score + W_NEIGHBORHOOD * emb_sim)
     both_linked = vec_a is not None and vec_b is not None

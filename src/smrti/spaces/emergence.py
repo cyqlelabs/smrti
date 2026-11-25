@@ -24,6 +24,7 @@ from smrti.core.models import (
     SpaceOverlap,
     TruthValue,
     Valence,
+    read_metadata,
 )
 from smrti.core.provenance import SOURCE_AGENT, SOURCE_USER, VALENCE_STATED
 
@@ -165,7 +166,7 @@ def _existing_bridges(
     bridged: dict[tuple[str, str], str] = {}
     tombstones: set[tuple[str, str]] = set()
     for row in rows:
-        meta = json.loads(row["metadata"] or "{}")
+        meta = read_metadata(row["metadata"], row["id"])
         src_a = meta.get("bridge_source_a")
         src_b = meta.get("bridge_source_b")
         if not (src_a and src_b):

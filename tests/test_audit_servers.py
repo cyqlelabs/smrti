@@ -380,6 +380,21 @@ def test_a_refused_stream_passes_its_status_and_retry_after_through(proxied):
     assert _episodes(proxied) == []
 
 
+def test_a_refused_answer_with_a_plain_body_keeps_its_status(proxied):
+    """A non-JSON upstream error (a text/plain 429, an HTML 502) became the
+    proxy's own 502, losing the status and Retry-After."""
+    import httpx
+
+    proxied.respond[0] = lambda request: httpx.Response(
+        429, text="slow down", headers={"retry-after": "7", "content-type": "text/plain"}
+    )
+    response = _chat(proxied, "hello")
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "7"
+    assert response.text == "slow down"
+    assert _episodes(proxied) == []
+
+
 def test_multipart_turns_are_recalled_stored_and_kept_as_parts(proxied):
     """Content parts were ignored for recall and storage, stringified in the system
     prompt, and a list-valued reply raised and lost both turns."""
@@ -459,23 +474,31 @@ def test_malformed_chat_bodies_are_a_400(proxied):
     assert proxied.post(url, json={"model": "m", "messages": ["hi"]}).status_code == 400
 
 
-def test_background_stores_wait_for_room_instead_of_growing_without_bound(monkeypatch):
-    """The set of in-flight stores and extractions grew with every request."""
+def test_background_stores_run_a_bounded_number_at_once_without_holding_the_reply(monkeypatch):
+    """The set of in-flight stores grew with every request; then the bound was
+    taken on the response path and every reply waited on memory writes."""
     import asyncio
 
     from smrti.servers import proxy
 
     async def _run():
         monkeypatch.setattr(proxy, "_BACKGROUND_MAX", 2)
-        gates = [asyncio.Event() for _ in range(2)]
-        for gate in gates:
-            proxy._spawn(gate.wait())
-        waiting = asyncio.create_task(proxy._make_room())
+        gates = [asyncio.Event() for _ in range(3)]
+        started = []
+
+        async def store(i):
+            started.append(i)
+            await gates[i].wait()
+
+        for i in range(3):
+            proxy._spawn_store(store(i))  # returns at once: nothing waits here
         await asyncio.sleep(0.01)
-        assert not waiting.done()
+        assert started == [0, 1]
         gates[0].set()
-        await asyncio.wait_for(waiting, timeout=1)
-        gates[1].set()
+        await asyncio.sleep(0.01)
+        assert started == [0, 1, 2]
+        for gate in gates:
+            gate.set()
         await asyncio.gather(*list(proxy._background_tasks))
 
     asyncio.run(_run())

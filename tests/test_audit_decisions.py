@@ -527,3 +527,17 @@ def test_halumem_tells_apart_runs_with_different_models():
     unnamed = {k: v for k, v in recorded.items() if k not in ("answer_model", "judge_model")}
     ok, message = halumem._compare_downward({**plain, "hallucination_rate": 0.4, "answer_model": "B"}, unnamed, 0.01)
     assert ok and "re-record" in message
+
+
+def test_the_same_sentence_in_two_spaces_still_matches_when_one_side_was_extracted(tmp_path):
+    """Episodes never carry an entity type, and reading the missing type as
+    half a disagreement held two copies of one sentence at 0.80, under the
+    0.85 line, so they were never matched or bridged."""
+    a, b = _spaces(tmp_path, "a", "b")
+    text = "The staging cluster runs on three nodes."
+    episode = a.remember(text, valence=0.0)
+    b.remember(text, valence=0.0)
+    concept = a.remember("staging cluster", type="concept", valence=0.0)
+    a.atomspace.link_atoms(episode, concept, "mentions", "t", "a")
+    pairs = a.space_overlap("b").pairs
+    assert [(pair.atom_a.id, pair.similarity >= 0.85) for pair in pairs] == [(episode, True)]

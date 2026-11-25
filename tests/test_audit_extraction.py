@@ -78,9 +78,12 @@ def test_a_duration_without_a_direction_is_not_resolved_into_the_past():
     ner = SpanNER([("two weeks", "date")])
 
     assert resolve_spans("She turns 30 in two weeks", BASE, ner) == []
-    assert resolve_spans(
-        "She turns 30 in two weeks", BASE, SpanNER([("in two weeks", "date")])
-    ) == [("in two weeks", "2026-12-09")]
+
+
+@pytest.mark.parametrize("span", ["in two weeks", "next week", "last week", "this week"])
+def test_a_week_is_not_pinned_to_one_day(span):
+    """A week names no day; resolved, "next week" became a single Wednesday."""
+    assert resolve_spans(f"We meet {span}", BASE, SpanNER([(span, "date")])) == []
 
 
 def test_a_numeric_date_is_resolved_only_when_its_numbers_settle_the_order():

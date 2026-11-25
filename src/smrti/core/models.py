@@ -264,7 +264,7 @@ def _clamp(value: float | None, lo: float, hi: float, default: float = 0.0) -> f
 _unreadable_metadata_logged = False
 
 
-def _metadata(raw: str | None, atom_id: str) -> dict:
+def read_metadata(raw: str | None, atom_id: str) -> dict:
     """An atom's metadata, or an empty one when the stored text is not a JSON object.
 
     One row a hand edit or another tool wrote badly used to raise out of
@@ -318,7 +318,7 @@ def atom_from_row(row) -> Atom:
         relation=d.get("relation"),
         tenant_id=d.get("tenant_id", "default"),
         space=d.get("space", "default"),
-        metadata=_metadata(d.get("metadata"), d["id"]),
+        metadata=read_metadata(d.get("metadata"), d["id"]),
         created_at=d.get("created_at"),
         updated_at=d.get("updated_at"),
     )

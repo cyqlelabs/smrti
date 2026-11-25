@@ -308,8 +308,10 @@ def test_an_epoch_that_loses_its_lease_stops_and_is_not_recorded(mem):
         )
 
     with patch.object(epoch_module, "_decay", taken_over):
-        with pytest.raises(LeaseLost):
-            mem.reflect()
+        # A takeover is not the caller's error: reflect() ends the run with an
+        # empty result, where it used to surface as a 500 from POST /reflect.
+        result = mem.reflect()
+    assert result == epoch_module.empty_result()
     assert _lease(mem)["completed_epoch"] == 0
     assert _lease(mem)["owner"] == "usurper"
     assert mem.ops_since_reflect > 0

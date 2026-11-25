@@ -12,7 +12,7 @@ from smrti.personality.params import personality_params
 from smrti.retrieval.classify import is_critical_warning
 from smrti.retrieval.diversify import diversify
 from smrti.retrieval.salience import compute_salience
-from smrti.retrieval.text import coverage, word_set, words
+from smrti.retrieval.text import comparable, coverage, word_set, words
 
 # The KNN entry pool scales with the graph. A fixed pool lets conversational
 # froth crowd the gate long before the graph is large: a fact ranked just past
@@ -25,26 +25,43 @@ _KNN_POOL_MAX = 256
 # An episode that is a stored copy of the question is an echo, not an
 # answer: utterances of "name my family" are always closer to that query
 # than any fact about the family, so pure similarity ranks the asking above
-# the knowing. Embedding distance cannot tell an echo from an answer that
-# shares the query's vocabulary — both sit high — but an echo is a
-# near-duplicate of the query as *text*, so word overlap separates them
-# where cosine cannot. An echo carries zero information the asker does not
-# already hold, so its similarity term is zeroed — and since relevance gates
+# the knowing. An echo carries zero information the asker does not already
+# hold, so its similarity term is zeroed — and since relevance gates
 # standing, an echo scores nothing at all: the question is never the answer.
 #
-# Because the verdict is now final, the overlap is measured against the
-# larger of the two word sets (``coverage``), not the smaller, and the bar is
-# high: an answer that contains every word of a three-word query is not a
-# copy of it, and neither is one that adds two words to a seven-word
-# question, while a stored question that gained a "please" still clears it.
+# Calling one takes two signals, because neither suffices alone. Word
+# overlap is measured against the larger of the two word sets
+# (``coverage``) with a high bar, so an answer that contains every word of a
+# three-word query is not a copy of it while a stored question that gained a
+# "please" is — but a short answer shares nearly every word of its question
+# too: "My sister's name is Laura." covers 0.83 of "What is my sister's
+# name?", the same as the padded echo. The encoder separates those two when
+# it is shown the texts themselves: restatements sit at 0.93 and above (a
+# "please", a "che,", a dropped question mark) and short answers that share
+# their question's words at 0.79 and below, in English, Spanish, Hindi,
+# German and French. So a suspect must clear both lines. It is embedded
+# again on its own words for the verdict: the stored vector embeds label and
+# content together, for an episode its text twice, which pulls a verbatim
+# copy of the query down to 0.86 and leaves the answer level with the
+# echoes. Suspects are rare — no LongMemEval-S candidate is one — so the
+# encoder runs only where a verdict is due.
+#
+# A pair too short for overlap to prove anything ("deploy friday" against
+# "deploy on friday?") is decided by the encoder alone, which at this line
+# is near-identity; such pairs used to be exempt, and the two-word
+# restatement outranked the answer. A text whose words are exactly the
+# query's says nothing the query does not, whatever the encoder makes of
+# its punctuation ("Kubernetes!" scores 0.58 against "kubernetes").
+#
 # Beliefs and concepts are exempt: searching for a fact by stating it must
 # return the fact first. So is a stated warning: "never deploy without a
 # backup" covers every word of "deploy without a backup", and the overlap
 # cannot see the negation that makes the one the answer to the other — the
 # one memory the engine promises to deliver is the one the filter was
-# discarding. The similarity gate below just skips the token work where
+# discarding. The gate on the stored similarity just skips the work where
 # zeroing could not change the ranking anyway.
 _ECHO_OVERLAP = 0.8
+_ECHO_IDENTITY = 0.9
 _ECHO_MIN_SIMILARITY = 0.5
 
 # Whether an atom may surface at a given confidence floor. Applied before
@@ -136,16 +153,22 @@ def _rrf_fuse(ranked_lists: list[list[str]], limit: int) -> list[str]:
     return [atom_id for atom_id, _ in ordered[:limit]]
 
 
-def _is_echo(query_tokens: set[str], text: str) -> bool:
-    """True when the text is substantially the query restated.
+def _is_echo(query_vec: list[float], query_tokens: set[str], text: str, embed_engine) -> bool:
+    """True when the text is the query restated, in words and in meaning.
 
     Word overlap against the larger side: an echo may add a word ("please")
     or drop one and still cover most of both texts, while an answer that
     merely contains the query's words is much longer than the query and does
-    not. Very short texts are never echoes — two words in common prove
-    nothing, which ``coverage`` reports as zero overlap.
+    not. A text that passes, or is too short for overlap to judge, must
+    also be near-identical to the query on the encoder — see
+    ``_ECHO_IDENTITY``.
     """
-    return coverage(query_tokens, word_set(text)) >= _ECHO_OVERLAP
+    words = word_set(text)
+    if comparable(query_tokens, words) and coverage(query_tokens, words) < _ECHO_OVERLAP:
+        return False
+    if words == query_tokens:
+        return True
+    return _cosine(query_vec, embed_engine.embed(text)) >= _ECHO_IDENTITY
 
 
 def _cosine(a: list[float], b: list[float]) -> float:
@@ -194,7 +217,7 @@ def _similarity(
         and atom.type == AtomType.EPISODE
         and similarity >= _ECHO_MIN_SIMILARITY
         and not is_critical_warning(atom)
-        and _is_echo(query_tokens, atom.content or atom.label)
+        and _is_echo(query_vec, query_tokens, atom.content or atom.label, embed_engine)
     ):
         return 0.0
     return similarity

@@ -77,6 +77,11 @@ def word_set(text: str) -> set[str]:
     return set(words(text))
 
 
+def comparable(a: set[str], b: set[str]) -> bool:
+    """Whether two word sets are long enough for their overlap to prove anything."""
+    return min(len(a), len(b)) >= _MIN_COMPARABLE
+
+
 def containment(a: set[str], b: set[str]) -> float:
     """Shared words as a fraction of the smaller set.
 
@@ -84,10 +89,9 @@ def containment(a: set[str], b: set[str]) -> float:
     one, and measuring against the longer side would score that as different.
     Returns 0 for a pair too short to judge.
     """
-    smaller = min(len(a), len(b))
-    if smaller < _MIN_COMPARABLE:
+    if not comparable(a, b):
         return 0.0
-    return len(a & b) / smaller
+    return len(a & b) / min(len(a), len(b))
 
 
 def coverage(a: set[str], b: set[str]) -> float:
@@ -100,6 +104,6 @@ def coverage(a: set[str], b: set[str]) -> float:
     side it shares three words of five, and is told apart. Returns 0 for a
     pair too short to judge.
     """
-    if min(len(a), len(b)) < _MIN_COMPARABLE:
+    if not comparable(a, b):
         return 0.0
     return len(a & b) / max(len(a), len(b))

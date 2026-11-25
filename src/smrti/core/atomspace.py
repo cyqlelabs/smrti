@@ -14,7 +14,7 @@ from smrti.core.models import (
     TruthValue,
     atom_from_row,
 )
-from smrti.core.provenance import ATOM_METADATA_JSON, is_severe_retained
+from smrti.core.provenance import ATOM_FORGOTTEN, ATOM_METADATA_JSON, is_severe_retained
 
 # Stamped on an atom stored without a vector, so the epoch can find what
 # needs re-embedding without checking every atom against the index.
@@ -22,8 +22,20 @@ VECTOR_MISSING = "vector_missing"
 
 
 def embedding_text(atom: Atom) -> str:
-    """The text an atom is embedded on: its label, plus its content when it has one."""
-    return f"{atom.label} {atom.content}" if atom.content else atom.label
+    """The text an atom is embedded on, with no part of it twice.
+
+    An episode's or belief's label is the first hundred characters of its
+    content, and embedding the two together encoded those characters twice:
+    a verbatim copy of a short stored sentence reached a median 0.93 cosine
+    against its own vector. A label that is a prefix of the content adds
+    nothing to it; a label that is not (a bridge, a concept with a
+    description) is embedded with the content.
+    """
+    if not atom.content:
+        return atom.label
+    if atom.content.startswith(atom.label):
+        return atom.content
+    return f"{atom.label} {atom.content}"
 
 
 class AtomSpace:
@@ -171,17 +183,30 @@ class AtomSpace:
         self._db.execute_batch(statements)
         return atom.id
 
-    def file_vector(self, atom: Atom, embedding: list[float]) -> None:
-        """Give an atom stored without a vector its index row, and clear the mark."""
-        vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
-        self._db.execute_batch([
-            *vec_delete([atom.id]),
-            vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
-            (
-                f"UPDATE atoms SET metadata = json_remove({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}') WHERE id = ?",
-                (atom.id,),
-            ),
-        ])
+    def file_vectors(self, vectors: list[tuple[Atom, list[float]]]) -> None:
+        """File each atom's vector as its index row, and clear its missing mark.
+
+        The vectors were computed from the atoms as the caller read them,
+        outside any transaction, so each is filed only if the atom still
+        holds that text and has not been forgotten since: a vector of text
+        the atom no longer holds would stand for it in every search, and a
+        forgotten atom's vector was removed on purpose.
+        """
+        with self._db.transaction() as conn:
+            for atom, embedding in vectors:
+                current = conn.execute(
+                    f"""UPDATE atoms SET metadata = json_remove({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}')
+                        WHERE id = ? AND label = ? AND content IS ? AND NOT {ATOM_FORGOTTEN}""",
+                    (atom.id, atom.label, atom.content),
+                ).rowcount
+                if not current:
+                    continue
+                vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+                for sql, params in (
+                    *vec_delete([atom.id]),
+                    vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
+                ):
+                    conn.execute(sql, params)
 
     def delete_atoms(self, atom_ids: list[str], tenant_id: str) -> int:
         """Hard-delete the tenant's atoms among *atom_ids* and every row that

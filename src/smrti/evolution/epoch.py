@@ -6,6 +6,7 @@ import time
 import uuid
 
 from smrti.core.atomspace import VECTOR_MISSING, AtomSpace, embedding_text
+from smrti.core.db import REEMBED_CANDIDATE_SQL, reembed_key
 from smrti.core.models import (
     PERMANENT_PROBABILITY,
     STRUCTURAL_RELATIONS,
@@ -69,6 +70,11 @@ _LEASE_SECONDS = 300.0
 _STRUCTURAL = ", ".join(f"'{relation}'" for relation in STRUCTURAL_RELATIONS)
 
 _ID_CHUNK = 400
+
+# How many atoms one epoch re-embeds while a space still holds vectors in
+# an older format (see ``_reembed``): seconds of encoding on a slow CPU,
+# well inside one phase's lease.
+_REEMBED_BATCH = 256
 
 _FORGOTTEN_BRIDGE = (
     f"({ATOM_FORGOTTEN} AND (CASE WHEN json_valid(metadata) "
@@ -221,7 +227,7 @@ def _repair_vectors(tenant_id: str, space: str, db, embed_engine) -> None:
     for row in rows:
         atom = atom_from_row(row)
         try:
-            atomspace.file_vector(atom, list(embed_engine.embed(embedding_text(atom))))
+            atomspace.file_vectors([(atom, list(embed_engine.embed(embedding_text(atom))))])
         except Exception:
             logger.warning(
                 "vector repair stopped at atom %s in tenant=%s space=%s; "
@@ -229,6 +235,44 @@ def _repair_vectors(tenant_id: str, space: str, db, embed_engine) -> None:
                 atom.id, tenant_id, space, exc_info=True,
             )
             return
+
+
+def _reembed(tenant_id: str, space: str, db, embed_engine) -> None:
+    """Re-embed the space's next batch of atoms whose vectors are in an older
+    format, until none is left (see ``db._VECTOR_FORMAT``).
+
+    Atoms are taken in id order from where the last batch stopped, so atoms
+    written since the format changed are re-embedded at most once, and
+    harmlessly: their text is the text they are embedded on. A failed
+    encoding is logged and ends the step, never the epoch, as in
+    :func:`_repair_vectors`; the batch is retried next epoch.
+    """
+    key = reembed_key(tenant_id, space)
+    after = db.meta_get(key)
+    if after is None:
+        return
+    rows = db.fetchall(
+        f"""SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND id > ?
+            AND {REEMBED_CANDIDATE_SQL} ORDER BY id LIMIT ?""",
+        (tenant_id, space, after, _REEMBED_BATCH),
+    )
+    atoms = [atom_from_row(row) for row in rows]
+    if atoms:
+        try:
+            vectors = embed_engine.embed_batch([embedding_text(atom) for atom in atoms])
+        except Exception:
+            logger.warning(
+                "re-embedding stopped in tenant=%s space=%s; it resumes next epoch",
+                tenant_id, space, exc_info=True,
+            )
+            return
+        AtomSpace(db, embed_engine).file_vectors(
+            [(atom, list(vector)) for atom, vector in zip(atoms, vectors)]
+        )
+    if len(atoms) < _REEMBED_BATCH:
+        db.execute("DELETE FROM smrti_meta WHERE key = ?", (key,))
+    else:
+        db.meta_set(key, atoms[-1].id)
 
 
 def _apply_evidence(tenant_id: str, space: str, db, lr: float, fence=None) -> int:
@@ -599,6 +643,7 @@ def _consolidate(
          epoch)
       8. Prune dead atoms below confidence and LTI floors
       9. File the vectors of atoms stored without one
+     10. Re-embed the next batch of atoms whose vectors are in an older format
 
     Bridge spaces are no longer grown here. An earlier version compared the
     space against every other space in the tenant every tenth epoch and
@@ -789,6 +834,11 @@ def _consolidate(
     # finds it.
     hold()
     _repair_vectors(tenant_id, space, db, embed_engine)
+
+    # 8. Re-embed, a batch at a time, what an older build embedded with its
+    # opening twice.
+    hold()
+    _reembed(tenant_id, space, db, embed_engine)
 
     return EpochResult(
         beliefs_updated=beliefs_updated,

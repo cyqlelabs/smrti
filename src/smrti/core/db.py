@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import os
 import queue
@@ -89,6 +90,28 @@ _FTS_SCHEMA_SQL = """CREATE VIRTUAL TABLE IF NOT EXISTS atoms_fts USING fts5(
 # Japanese) as space-separated bigrams, see ``retrieval.text.lexical_text``;
 # an index written in another format is rebuilt on open.
 _FTS_FORMAT = "2"
+
+# What the vectors encode. Version 2 embeds an episode's or belief's text
+# once, where version 1 embedded its label (the first hundred characters)
+# and then the whole content, so the opening of every such atom twice
+# (``atomspace.embedding_text``). The two vectors of one atom sit at a median
+# 0.96 cosine and 0.87 at the fifth percentile, too far apart to mix in one
+# index, but re-embedding a whole file on open would stall it for minutes.
+# So a file written in version 1 gets a progress key per space that holds
+# such atoms (``reembed_key``), and each epoch of the space re-embeds the
+# next batch of them until the key is gone.
+_VECTOR_FORMAT = "2"
+
+# The atoms whose embedding text version 2 changed: those whose label is a
+# prefix of their content. The others embed the same text in both versions.
+REEMBED_CANDIDATE_SQL = f"""type != 'relation' AND length(content) > 0
+    AND substr(content, 1, length(label)) = label AND NOT {ATOM_FORGOTTEN}"""
+
+
+def reembed_key(tenant_id: str, space: str) -> str:
+    """The ``smrti_meta`` key holding a space's re-embedding progress: the id
+    of the last atom re-embedded, in id order, or '' before the first."""
+    return f"vector_reembed {json.dumps([tenant_id, space])}"
 
 
 def stable_rowid(atom_id: str) -> int:
@@ -380,8 +403,46 @@ class Database:
             self._write_conn.commit()
             self._migrate_evidence_columns()
             self._init_atoms_fts()
+            self._init_vector_format()
             self._repair_legacy_rows()
         self.optimize()
+
+    def _init_vector_format(self) -> None:
+        """Record which spaces hold vectors written in an older format.
+
+        Runs once per file (``_VECTOR_FORMAT``). It writes one progress key
+        per space that holds atoms whose embedding text has changed, and the
+        epoch re-embeds them a batch at a time; no atom row is touched here,
+        so opening an old file costs one scan of the table, not an encoding
+        of it. A new file has no such atoms and is born current. The format
+        is read again inside the transaction, since another process may have
+        done this, and the epoch begun its work, while this one waited.
+        """
+        conn = self._write_conn
+        format_sql = "SELECT value FROM smrti_meta WHERE key = 'vector_format'"
+        row = conn.execute(format_sql).fetchone()
+        if row is not None and row["value"] == _VECTOR_FORMAT:
+            return
+        try:
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(format_sql).fetchone()
+            if row is None or row["value"] != _VECTOR_FORMAT:
+                spaces = conn.execute(
+                    f"SELECT DISTINCT tenant_id, space FROM atoms WHERE {REEMBED_CANDIDATE_SQL}"
+                ).fetchall()
+                conn.executemany(
+                    "INSERT OR IGNORE INTO smrti_meta (key, value) VALUES (?, '')",
+                    [(reembed_key(r["tenant_id"], r["space"]),) for r in spaces],
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES ('vector_format', ?)",
+                    (_VECTOR_FORMAT,),
+                )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
 
     def optimize(self) -> None:
         """Refresh the query planner's statistics where they have gone stale.

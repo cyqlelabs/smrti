@@ -253,6 +253,8 @@ def test_a_locked_database_does_not_fail_a_finished_recall(table_mem, monkeypatc
 def test_a_recall_costs_the_same_statements_however_many_candidates_it_scores(table_mem, monkeypatch):
     """Each recall counted the whole partition, and fetched the vector of
     every candidate the graph reached with a statement of its own."""
+    from smrti.retrieval.fan_out import retrieve
+
     hub = _add(table_mem, "project atlas hub", 0.9)
     for n in range(60):
         neighbour = _add(table_mem, f"atlas detail {n}", 0.2 + n / 1000)
@@ -260,7 +262,12 @@ def test_a_recall_costs_the_same_statements_however_many_candidates_it_scores(ta
     for n in range(60):
         _add(table_mem, f"filler note {n}", 0.5 - n / 1000)
     table_mem.embed.table["atlas?"] = QUERY
-    table_mem.recall("atlas?", top_k=60, boost=False)
+
+    def recall():
+        return retrieve("atlas?", "t", ["s"], table_mem.db, table_mem.embed,
+                        write_space="s", top_k=60, boost=False)
+
+    recall()
 
     statements: list[str] = []
     for name in ("fetchall", "fetchone"):
@@ -271,7 +278,7 @@ def test_a_recall_costs_the_same_statements_however_many_candidates_it_scores(ta
             return _original(sql, params)
 
         monkeypatch.setattr(table_mem.db, name, counted)
-    results = table_mem.recall("atlas?", top_k=60, boost=False)
+    results = recall()
 
     assert len(results) == 60
     assert not [s for s in statements if "COUNT(*)" in s or "WHERE rowid = ?" in s]

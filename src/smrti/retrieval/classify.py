@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from smrti.core.models import AtomType, RecallResult
-from smrti.core.provenance import is_critical_warning
+from smrti.core.provenance import SUPERSEDED_BY, is_critical_warning
 
 # The kinds of atom that hold a proposition whose probability can fall: a
 # belief, and a claim edge between two entities. A low probability on
@@ -30,9 +30,13 @@ def classify_memory(r: RecallResult) -> str:
     And the memory must be able to hold a proposition. Concepts are index
     nodes: a bare label carries nothing to avoid doing again.
 
-    A known antipattern is a proposition — a belief or a claim edge — at
-    probability < 0.3 with confidence > 0.3, which is where a superseded
-    preference, constraint or fact lands. Other kinds never qualify.
+    A known antipattern is a proposition — a belief or a claim edge — that a
+    later claim replaced (stamped ``superseded_by``), or one at probability
+    < 0.3 with confidence > 0.3. The stamp decides by itself because the
+    epoch keeps decaying a superseded claim's confidence: read off the
+    numbers alone, the preference the user abandoned stopped being an
+    antipattern within five epochs and read as plain context from then on.
+    Other kinds never qualify.
 
     The tone read here is the atom's own, never the mood it absorbed from its
     neighbours — see :class:`smrti.core.models.Valence`.
@@ -42,6 +46,6 @@ def classify_memory(r: RecallResult) -> str:
     c = atom.truth.confidence
     if is_critical_warning(atom):
         return "critical_warning"
-    if atom.type in _PROPOSITIONS and p < 0.3 and c > 0.3:
+    if atom.type in _PROPOSITIONS and (atom.metadata.get(SUPERSEDED_BY) or (p < 0.3 and c > 0.3)):
         return "known_antipattern"
     return "context"

@@ -266,7 +266,7 @@ def test_attend_boosts_only_what_the_caller_kept(tmp_path):
     assert {r.atom.id for r in wide} >= {kept, other}
     assert all(_row(mem, i)["sti"] == 0.0 for i in (kept, other))
 
-    assert mem.attend([kept, foreign]) == 2  # two ids written; only the write space one moves
+    assert mem.attend([kept, foreign]) == 1  # only the write space one moves, and only it is counted
     assert _row(mem, kept)["sti"] > 0.0
     assert _row(mem, other)["sti"] == 0.0
     assert _row(mem, foreign)["sti"] == 0.0

@@ -167,9 +167,10 @@ def _extraction_auth(auth: str) -> str:
         return f"Bearer {_EXTRACT_API_KEY}"
     from smrti.servers import config as _cfg
 
+    auth = (auth or "").strip()
     if _cfg.API_KEY and auth:
-        scheme, _, token = auth.strip().partition(" ")
-        presented = token.strip() if scheme.lower() == "bearer" else auth.strip()
+        scheme, _, token = auth.partition(" ")
+        presented = token.strip() if scheme.lower() == "bearer" else auth
         if hmac.compare_digest(presented.encode(), _cfg.API_KEY.encode()):
             return ""
     return auth
@@ -191,6 +192,8 @@ async def _post_chat(
     Some OpenAI-compatible validators reject unknown fields with a 4xx; the
     retry drops the thinking-mode hint so extraction still works.
     """
+    # No credential, no header: an empty Authorization is still a header,
+    # and an endpoint that checks for one rejects it.
     headers = {"Content-Type": "application/json"}
     credential = _extraction_auth(auth)
     if credential:

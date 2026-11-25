@@ -123,6 +123,16 @@ def test_the_smrti_server_key_is_never_forwarded_to_the_extraction_endpoint(monk
     assert sent == "Bearer upstream-key"
 
 
+def test_no_credential_sends_no_authorization_header(monkeypatch):
+    """An empty caller Authorization, or the Smrti key once stripped, was
+    still sent as an empty `Authorization:` header."""
+    for auth in ("", "   ", None):
+        _, sent = _chat_request(monkeypatch, "http://llm", auth)
+        assert sent is None, repr(auth)
+    _, sent = _chat_request(monkeypatch, "http://llm", "Bearer server-key", server_key="server-key")
+    assert sent is None
+
+
 def test_an_extraction_api_key_is_the_endpoint_s_credential(monkeypatch):
     _, sent = _chat_request(
         monkeypatch, "http://llm", "Bearer upstream-key", server_key="server-key", extract_key="ek",

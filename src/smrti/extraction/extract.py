@@ -169,6 +169,20 @@ async def _post_chat(
     return resp
 
 
+def _warn_if_failed(entry: dict) -> None:
+    """Log a failed extraction call where an operator will see it.
+
+    The call log is an in-process ring buffer read from the visualizer; a
+    misconfigured endpoint that fails every call was otherwise invisible to
+    anyone reading the server's own log.
+    """
+    if entry["error"]:
+        logger.warning(
+            "%s extraction call failed after %.0f ms: %s",
+            entry["subkind"], entry["duration_ms"], entry["error"],
+        )
+
+
 _ITEM_SHAPES = {
     "entities": ("name", "type"),
     "claims": ("subject", "predicate", "object"),
@@ -362,6 +376,7 @@ async def extract_knowledge(
     finally:
         entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
         _log(entry)
+        _warn_if_failed(entry)
 
 
 _COREF_TYPES = {"person", "organization", "project", "role", "tool", "technology", "skill", "location", "event", "topic", "media", "health", "goal", "preference", "constraint"}
@@ -1066,6 +1081,7 @@ async def extract_claims_only(
     finally:
         entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
         _log(entry)
+        _warn_if_failed(entry)
 
 
 # ── Hybrid dispatch ───────────────────────────────────────────────────────────

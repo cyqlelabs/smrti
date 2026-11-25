@@ -151,3 +151,13 @@ def test_local_mode_calls_no_model_for_an_agent_turn(mem):
         ))
     assert post.await_count == 0
     assert mem.db.fetchone("SELECT 1 FROM atoms WHERE label = 'Docker'") is not None
+
+
+def test_a_failed_extraction_call_is_logged_as_a_warning(caplog):
+    """Failures went only to the in-process call log, so an endpoint failing
+    every call left nothing in the server's own log."""
+    post = AsyncMock(return_value=httpx.Response(503))
+    with patch.object(extract, "_post_chat", post), caplog.at_level("WARNING", logger="smrti.extract"):
+        result = asyncio.run(extract.extract_knowledge("Alice met Bob", None, "http://llm", "", "m"))
+    assert result is None
+    assert any("HTTP 503" in record.getMessage() for record in caplog.records)

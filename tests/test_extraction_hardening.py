@@ -312,30 +312,32 @@ def test_u_lower_merges_non_ascii_case_variants(resolver):
 # ── Fuzzy / embedding alias persistence gates ────────────────────────────────
 
 
-def test_fuzzy_high_score_persists_alias(resolver):
-    """WRatio('Tensorflow2', 'Tensorflow') is ~95 — above the persist gate."""
+def test_an_unverified_high_fuzzy_score_is_a_new_atom_and_no_alias(resolver):
+    """WRatio('Tensorflow2', 'Tensorflow') is ~95, and so is Daniela against
+    Daniel: without the entity task to confirm it, the score proves nothing,
+    and the alias it used to persist made the merge permanent."""
     id1 = resolver.resolve("Tensorflow", "technology", "test", "default", ["default"])
     id2 = resolver.resolve("Tensorflow2", "technology", "test", "default", ["default"])
-    assert id1 == id2
+    assert id1 != id2
     row = resolver.db.fetchone(
         "SELECT atom_id FROM aliases WHERE alias = 'Tensorflow2' AND tenant_id = 'test'", ()
     )
-    assert row is not None
+    assert row is None
 
 
-def test_fuzzy_threshold_score_matches_without_persisting_alias(resolver):
-    """WRatio('PostgreSQL Database', 'PostgreSQL') is 90 — matches at the
-    fuzzy threshold (85) but must not be persisted as an alias (< 92)."""
+def test_an_unverified_threshold_fuzzy_score_is_a_new_atom_and_no_alias(resolver):
+    """WRatio('PostgreSQL Database', 'PostgreSQL') is 90 — over the fuzzy
+    threshold (85), which only proposes a match the entity task may confirm."""
     id1 = resolver.resolve("PostgreSQL", "technology", "test", "default", ["default"])
     id2 = resolver.resolve("PostgreSQL Database", "technology", "test", "default", ["default"])
-    assert id1 == id2
+    assert id1 != id2
     row = resolver.db.fetchone(
         "SELECT atom_id FROM aliases WHERE alias = 'PostgreSQL Database' AND tenant_id = 'test'", ()
     )
     assert row is None
 
 
-def test_embedding_tier_never_persists_alias(resolver):
+def test_an_unverified_embedding_match_is_a_new_atom_and_no_alias(resolver):
     id1 = resolver.resolve("machine learning", "topic", "test", "default", ["default"])
     real_vec = resolver.embed_engine.embed("machine learning")
 
@@ -344,7 +346,7 @@ def test_embedding_tier_never_persists_alias(resolver):
         resolver.cosine_threshold = 1.0
         id2 = resolver.resolve("statistical modelling", "topic", "test", "default", ["default"])
 
-    assert id2 == id1
+    assert id2 != id1
     row = resolver.db.fetchone(
         "SELECT atom_id FROM aliases WHERE alias = 'statistical modelling' AND tenant_id = 'test'", ()
     )

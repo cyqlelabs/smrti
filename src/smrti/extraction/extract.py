@@ -485,12 +485,19 @@ def _register_entity(entity_ids: dict[str, str], name: str, atom_id: str) -> Non
 
 
 def _db_resolve_label(label: str, entity_ids: dict[str, str], mem: "Smrti") -> str | None:
-    """Resolve a claim subject/object to an atom_id, falling back to DB lookup."""
+    """Resolve a claim subject/object to an atom_id, falling back to DB lookup.
+
+    The lookup skips forgotten atoms, as the resolver does: a claim naming
+    one is about a new entity. A label two entity atoms share (Java the
+    place and the language are kept apart) goes to the more salient one.
+    """
     atom_id = entity_ids.get(label) or entity_ids.get(label.lower())
     if atom_id:
         return atom_id
     row = mem.db.fetchone(
-        "SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND tenant_id = ? AND space = ? AND type NOT IN ('relation', 'episode')",
+        f"""SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND tenant_id = ? AND space = ?
+            AND type IN ('concept', 'belief', 'goal') AND NOT {ATOM_FORGOTTEN}
+            ORDER BY (sti + lti) DESC, created_at, id LIMIT 1""",
         (label, mem.tenant_id, mem.write_space),
     )
     if row:
@@ -1281,8 +1288,8 @@ async def extract_and_link_hybrid(
 
     def _sync_resolve_and_link() -> None:
         # Resolve new entities the LLM emitted: goals (new atoms) and
-        # preference/constraint reclassifications (resolve to existing atom,
-        # updating its entity_type so it becomes a belief atom).
+        # preferences and constraints (the resolver makes a concept of the
+        # same name the belief they say it is).
         _ALLOWED_NEW_TYPES = {"goal", "preference", "constraint", "role", "technology", "skill", "topic", "media", "health", "concept"}
         new_entities = claims_result.get("entities", [])
         if new_entities:
@@ -1294,13 +1301,7 @@ async def extract_and_link_hybrid(
                     continue
                 atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
                 _register_entity(entity_ids, name, atom_id)
-                if etype in ("preference", "constraint"):
-                    # Reclassify the atom: concept → belief, update entity_type
-                    mem.db.execute(
-                        "UPDATE atoms SET type = 'belief', entity_type = ? WHERE id = ? AND type = 'concept'",
-                        (etype, atom_id),
-                    )
-                elif etype not in ("goal", "preference", "constraint"):
+                if etype not in ("goal", "preference", "constraint"):
                     mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
         _link_claims(claims_result.get("claims", []), entity_ids, mem, episode_id, source)
         _store_temporal(episode_id, mem, claims_result.get("temporal", []))

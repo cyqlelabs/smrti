@@ -256,3 +256,55 @@ def test_a_revived_claim_is_not_pulled_back_down_by_the_supersession_it_undid(me
     mem.reflect()
 
     assert _edge(mem, ids, "Berlin")["probability"] >= 0.8 - 1e-9
+
+
+# ── entity resolution ────────────────────────────────────────────────────────
+
+
+def _resolve(mem, name, entity_type):
+    return extract._resolver(mem, "user", "", context="").resolve(name, entity_type, "t", "s", ["s"])
+
+
+def test_a_label_shared_with_a_person_organization_or_place_is_a_homonym(mem):
+    """Tier 0b matched a label across any entity type: Java the island became
+    Java the language and Apple the company the fruit."""
+    assert _resolve(mem, "Java", "technology") != _resolve(mem, "Java", "location")
+    assert _resolve(mem, "Apple", "organization") != _resolve(mem, "Apple", "concept")
+
+
+def test_a_preference_makes_the_concept_of_the_same_name_a_belief(mem):
+    """The preference resolved to a fresh belief beside the concept, so the
+    reclassification after it never fired and "coffee" existed twice."""
+    concept = _resolve(mem, "coffee", "concept")
+
+    assert _resolve(mem, "coffee", "preference") == concept
+    row = mem.db.fetchone("SELECT type, entity_type FROM atoms WHERE id = ?", (concept,))
+    assert (row["type"], row["entity_type"]) == ("belief", "preference")
+
+
+def test_a_name_that_only_looks_like_a_known_one_is_a_new_atom(mem):
+    """WRatio ≥ 85 merged Paul into Paula and Java into JavaScript, with no
+    decision to confirm it."""
+    for known, mention, entity_type in [
+        ("Paul", "Paula", "person"), ("Jon", "John", "person"), ("Ana", "Anabel", "person"),
+        ("Java", "JavaScript", "technology"), ("React", "React Native", "technology"),
+    ]:
+        assert _resolve(mem, known, entity_type) != _resolve(mem, mention, entity_type), mention
+    assert mem.db.fetchall("SELECT alias FROM aliases") == []
+
+
+def test_an_accent_is_not_a_different_name_but_a_kana_mark_is(mem):
+    assert _resolve(mem, "José", "person") == _resolve(mem, "Jose", "person")
+    assert _resolve(mem, "かとう", "person") != _resolve(mem, "がとう", "person")
+
+
+def test_a_claim_naming_a_forgotten_atom_is_about_a_new_one(mem):
+    """_db_resolve_label found the forgotten atom the resolver skips."""
+    ids = {"Carol": _concept(mem, "Carol", "person")}
+    dave = _concept(mem, "Dave", "person")
+    mem.forget(atom_ids=[dave])
+
+    extract._link_claims([{"subject": "Carol", "predicate": "met", "object": "Dave"}], ids, mem)
+
+    edge = mem.db.fetchone("SELECT target_id FROM atoms WHERE relation = 'met'")
+    assert edge["target_id"] != dave

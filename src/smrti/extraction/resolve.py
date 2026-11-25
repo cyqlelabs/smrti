@@ -1,8 +1,9 @@
-"""Entity resolution: exact -> alias -> fuzzy -> embedding -> create."""
+"""Entity resolution: exact -> alias -> accent folding -> fuzzy -> embedding -> create."""
 from __future__ import annotations
 
 import logging
 import struct
+import unicodedata
 import uuid
 
 from rapidfuzz import fuzz, process
@@ -33,6 +34,25 @@ from smrti.decisions.extraction import verify_entity
 logger = logging.getLogger("smrti.resolve")
 
 
+def _is_latin(char: str) -> bool:
+    return "A" <= char <= "ɏ" or "Ḁ" <= char <= "ỿ"
+
+
+def _fold(name: str) -> str:
+    """*name* case-folded, with the accents on Latin letters dropped.
+
+    "José" and "Jose" are one name written with and without its accent.
+    Only Latin letters lose theirs: in Devanagari or kana the combining mark
+    makes another letter (क़ is not क, が is not か).
+    """
+    kept: list[str] = []
+    for char in unicodedata.normalize("NFD", name.casefold()):
+        if unicodedata.combining(char) and kept and _is_latin(kept[-1]):
+            continue
+        kept.append(char)
+    return unicodedata.normalize("NFC", "".join(kept))
+
+
 class EntityResolver:
     """Resolves extracted entity names to existing atoms or creates new ones.
 
@@ -41,18 +61,21 @@ class EntityResolver:
     Resolution tiers (ordered by cost):
       0. Exact label match      — indexed, < 1ms
       1. Alias table lookup     — indexed, < 1ms
+      1b. Accent-folded label   — in-process, < 5ms
       2. Fuzzy match (RapidFuzz) — in-process, < 5ms
       3. Embedding cosine sim   — ONNX inference, < 20ms
       4. Create new atom        — write path
 
-    Tiers 0 and 1 are unambiguous and never questioned. A tier 2 match
-    short of the alias-persist score, and every tier 3 match, is uncertain:
-    when the ``entity`` decision task is on, the candidates the tier found
-    are put to the provider with the sentence the mention came from and
-    what the graph records about each, plus "none" and "ambiguous", and
-    only a confident choice of one of them is an identity link — anything
-    else makes a provisional duplicate, which a later mention can still
-    merge, where a wrong link cannot be undone.
+    Tiers 0 to 1b are unambiguous and never questioned. Tiers 2 and 3 only
+    propose: a name that looks like a known one is as often a different
+    entity (Paul and Paula, Java and JavaScript, React and React Native).
+    When the ``entity`` decision task is on, the candidates they found are
+    put to the provider with the sentence the mention came from and what
+    the graph records about each, plus "none" and "ambiguous", and only a
+    confident choice of one of them is an identity link. Anything else, and
+    every uncertain match when the task is off, makes a provisional
+    duplicate, which a later mention can still merge, where a wrong link
+    cannot be undone.
     """
 
     def __init__(
@@ -116,19 +139,30 @@ class EntityResolver:
             self._boost_sti(row["id"], tenant_id, write_space)
             return row["id"]
 
-        # Tier 0b: cross-type exact label match — prevents duplicate atoms when
-        # the same span is classified under different entity_types (e.g. GLiNER
-        # tagging "technology" as both "tool" and "concept"). Only matches atoms
-        # that share the same underlying atom type so that goal/belief atoms are
-        # never merged into concept atoms.
+        # Tier 0b: the same label under a compatible entity type. GLiNER puts
+        # several labels on one span, so "Python" arrives as technology in
+        # one message and concept in the next. A person, an organization and
+        # a place are each a distinct kind of referent, and a label shared
+        # with one of them is a homonym: Java the island is not Java the
+        # language, nor Apple the company the fruit. A goal only ever matches
+        # a goal; a preference or constraint also matches a concept of the
+        # same name, which it makes the belief it says it is.
         atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
-        row = self.db.fetchone(
-            f"SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND NOT {ATOM_FORGOTTEN}",
-            (name, atom_type, tenant_id, *read_spaces),
-        )
-        if row:
-            self._boost_sti(row["id"], tenant_id, write_space)
-            return row["id"]
+        if entity_type not in self._DISTINCT_KINDS:
+            targets = self._CROSS_TYPE_TARGETS[atom_type]
+            row = self.db.fetchone(
+                f"""SELECT id, type, space FROM atoms
+                    WHERE u_lower(label) = u_lower(?) AND type IN ({",".join("?" * len(targets))})
+                      AND COALESCE(entity_type, '') NOT IN ({",".join("?" * len(self._DISTINCT_KINDS))})
+                      AND tenant_id = ? AND space IN ({spaces_ph}) AND NOT {ATOM_FORGOTTEN}
+                    ORDER BY type != ?, (sti + lti) DESC LIMIT 1""",
+                (name, *targets, *self._DISTINCT_KINDS, tenant_id, *read_spaces, atom_type),
+            )
+            if row:
+                if row["type"] != atom_type and row["space"] == write_space:
+                    self._make_belief(row["id"], entity_type, tenant_id, write_space)
+                self._boost_sti(row["id"], tenant_id, write_space)
+                return row["id"]
 
         # Tier 1: alias table across read_spaces
         atom_id = self.aliases.lookup(name, tenant_id, read_spaces)
@@ -136,38 +170,39 @@ class EntityResolver:
             self._boost_sti(atom_id, tenant_id, write_space)
             return atom_id
 
-        # Tier 2: fuzzy match within same entity_type across read_spaces,
-        # bounded to the most salient candidates so the scan can't blow up
+        # The tiers below compare against the most salient atoms of the same
+        # entity type, bounded so the scan cannot blow up.
         candidates = self.db.fetchall(
             f"SELECT id, label FROM atoms WHERE entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND type != 'relation' AND NOT {ATOM_FORGOTTEN} ORDER BY (sti + lti) DESC LIMIT 500",
             (entity_type, tenant_id, *read_spaces),
         )
+
+        # Tier 1b: the same spelling with or without its accents.
+        folded = _fold(name)
+        for candidate in candidates:
+            if _fold(candidate["label"]) == folded:
+                self._boost_sti(candidate["id"], tenant_id, write_space)
+                return candidate["id"]
+
+        # Without the entity task nothing can confirm what tiers 2 and 3
+        # propose, so the mention becomes an atom of its own.
+        if not self._verifying():
+            return self._create_atom(name, entity_type, tenant_id, write_space)
+
+        # Tier 2: fuzzy match within the same entity type.
         if candidates:
             names_map = {r["id"]: r["label"] for r in candidates}
-            matches = [
-                m for m in process.extract(
-                    name, names_map, scorer=fuzz.WRatio, limit=self._verify_candidates(),
+            proposed = [
+                m[2] for m in process.extract(
+                    name, names_map, scorer=fuzz.WRatio,
+                    limit=self._verify_candidates(),
                 )
                 if m[1] >= self.fuzzy_threshold
             ]
-            if matches:
-                match = matches[0]
-                matched_id = match[2]
-                if match[1] >= self._ALIAS_PERSIST_SCORE:
-                    # Only persist the alias on near-certain matches — a
-                    # threshold-level fuzzy hit would otherwise poison tier-1
-                    # resolution permanently.
-                    self.aliases.add(matched_id, name, tenant_id, write_space)
-                else:
-                    verdict = self._verify(
-                        name, entity_type, [m[2] for m in matches], tenant_id, write_space, read_spaces,
-                    )
-                    if verdict is not None and verdict.applied:
-                        if not verdict.matched:
-                            return self._create_atom(name, entity_type, tenant_id, write_space)
-                        matched_id = verdict.atom_id
-                self._boost_sti(matched_id, tenant_id, write_space)
-                return matched_id
+            if proposed:
+                return self._confirmed_or_new(
+                    name, entity_type, proposed, tenant_id, write_space, read_spaces,
+                )
 
         # Tier 3: embedding cosine similarity via sqlite-vec. KNN filters
         # support equality only, so probe each read space and keep the best.
@@ -195,18 +230,37 @@ class EntityResolver:
             if atom_row and atom_row["entity_type"] == entity_type:
                 vec_ids.append(row["atom_id"])
         if vec_ids:
-            matched_id = vec_ids[0]
-            verdict = self._verify(name, entity_type, vec_ids, tenant_id, write_space, read_spaces)
-            if verdict is not None and verdict.applied:
-                if not verdict.matched:
-                    return self._create_atom(name, entity_type, tenant_id, write_space, vec=query_vec)
-                matched_id = verdict.atom_id
-            # Embedding is the least reliable tier — never persist aliases here.
-            self._boost_sti(matched_id, tenant_id, write_space)
-            return matched_id
+            return self._confirmed_or_new(
+                name, entity_type, vec_ids, tenant_id, write_space, read_spaces, vec=query_vec,
+            )
 
         # Tier 4: create new atom in write_space (reusing the probe vector)
         return self._create_atom(name, entity_type, tenant_id, write_space, vec=query_vec)
+
+    def _confirmed_or_new(
+        self,
+        name: str,
+        entity_type: str,
+        proposed: list[str],
+        tenant_id: str,
+        write_space: str,
+        read_spaces: list[str],
+        vec: list[float] | None = None,
+    ) -> str:
+        """The proposed atom the entity task confirms, else a new atom."""
+        verdict = self._verify(name, entity_type, proposed, tenant_id, write_space, read_spaces)
+        if verdict is not None and verdict.applied and verdict.matched:
+            self._boost_sti(verdict.atom_id, tenant_id, write_space)
+            return verdict.atom_id
+        return self._create_atom(name, entity_type, tenant_id, write_space, vec=vec)
+
+    def _make_belief(self, atom_id: str, entity_type: str, tenant_id: str, space: str) -> None:
+        """Turn a concept into the preference or constraint a mention says it is."""
+        self.db.execute(
+            """UPDATE atoms SET type = 'belief', entity_type = ?
+               WHERE id = ? AND tenant_id = ? AND space = ? AND type = 'concept'""",
+            (entity_type, atom_id, tenant_id, space),
+        )
 
     # A re-mention asserts the entity is real and still relevant, but it is a
     # weaker signal than an explicit belief assertion — hence short of 1.0.
@@ -215,11 +269,11 @@ class EntityResolver:
     # How many facts each candidate carries into a verification.
     _VERIFY_FACTS = 4
 
+    def _verifying(self) -> bool:
+        return self.decisions is not None and self.decisions.enabled("entity")
+
     def _verify_candidates(self) -> int:
-        """How many matches a tier keeps for verification — one when the
-        task is off, since the extra rows would then go unread."""
-        if self.decisions is None or not self.decisions.enabled("entity"):
-            return 1
+        """How many matches a tier proposes for verification."""
         return max(1, self.decisions.policy.entity_candidates)
 
     def _candidate_facts(self, atom_ids: list[str], tenant_id: str, spaces: list[str]) -> list[dict]:
@@ -263,7 +317,7 @@ class EntityResolver:
         """Put an uncertain match to the ``entity`` decision task.
 
         None when the task is off or could not answer, in which case the
-        tier's own best match stands as it always did. A verdict naming an
+        mention becomes an atom of its own. A verdict naming an
         atom is checked against the graph again after the call — the
         provider was given candidates, and only one of them, still present
         and not forgotten, can come back.
@@ -361,10 +415,12 @@ class EntityResolver:
             (SOURCE_USER, atom_id, tenant_id, space, SOURCE_AGENT),
         )
 
-    # Persisting an alias below this WRatio score risks poisoning tier-1
-    # resolution — matches at fuzzy_threshold still resolve, they just
-    # aren't remembered as aliases.
-    _ALIAS_PERSIST_SCORE = 92.0
+    # Entity types naming a distinct kind of referent (see tier 0b).
+    _DISTINCT_KINDS = ("person", "organization", "location")
+
+    # The atom types a mention of each atom type may match under another
+    # entity type (see tier 0b).
+    _CROSS_TYPE_TARGETS = {"goal": ("goal",), "belief": ("belief", "concept"), "concept": ("concept",)}
 
     _ENTITY_TYPE_TO_ATOM_TYPE = {
         "goal": "goal",

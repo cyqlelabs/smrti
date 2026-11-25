@@ -3,6 +3,7 @@ and the benchmark harness: one test per defect fixed."""
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import subprocess
 import sys
@@ -270,3 +271,181 @@ def test_the_entity_set_fails_on_a_merge_into_the_wrong_candidate():
     separate = next(i for i, item in enumerate(items) if item["gold"] is None)
     verdicts[separate] = {"chosen": 0, "raw_label": "c0"}
     assert len(score_verdicts(items, verdicts)["wrong_merges"]) == 1
+
+
+# ── space operations and bridges ────────────────────────────────────────────
+
+
+def _spaces(tmp_path, *names):
+    from smrti import Smrti
+
+    path = str(tmp_path / "spaces.db")
+    return [Smrti(db_path=path, tenant_id="t", write_space=name) for name in names]
+
+
+def _bridge_atoms(mem, space):
+    return mem.db.fetchall(
+        "SELECT id, metadata FROM atoms WHERE tenant_id = 't' AND space = ? AND type != 'relation'", (space,)
+    )
+
+
+def test_set_operations_never_render_a_forgotten_atom(tmp_path):
+    """Union and difference returned forgotten content and the Jaccard
+    counted it: forgetting hid an atom from recall but not from set ops."""
+    a, b = _spaces(tmp_path, "a", "b")
+    secret = a.remember("The vault code is 4417.", valence=0.0)
+    a.remember("The staging cluster runs on three nodes.", valence=0.0)
+    b.remember("The staging cluster runs on three nodes.", valence=0.0)
+    a.forget(atom_ids=[secret])
+    assert secret not in {x.id for x in a.space_union("b").atoms}
+    assert secret not in {x.id for x in a.space_difference("b").atoms}
+    overlap = a.space_overlap("b")
+    assert (overlap.sampled_a, overlap.size_a, overlap.jaccard) == (1, 1, 1.0)
+
+
+def test_rebridging_leaves_a_forgotten_bridge_forgotten(tmp_path):
+    """Refreshing a bridge replaced the bridge atom's metadata, forget stamp
+    included, and brought it back."""
+    left, right, bridge = _spaces(tmp_path, "a", "b", "a_x_b")
+    left.believe("Preserve snapshots before every deploy", 0.8, valence=0.0)
+    right.believe("Preserve snapshots before every deploy", 0.8, valence=0.0)
+    assert left.materialize_bridge("b") == 1
+    (row,) = _bridge_atoms(bridge, "a_x_b")
+    bridge.forget(atom_ids=[row["id"]])
+    assert left.materialize_bridge("b") == 0
+    (again,) = _bridge_atoms(bridge, "a_x_b")  # the pair is a tombstone, not re-created
+    assert again["id"] == row["id"] and json.loads(again["metadata"])["forgotten"] is True
+
+
+def test_a_bridge_earns_its_own_warning_and_authorship():
+    """Bridges merged both parents' metadata, so a stated valence or an agent
+    source on either parent leaked into the bridge: two ``context`` parents
+    produced a ``critical_warning`` bridge."""
+    from smrti.core.models import Atom, AtomPair, AtomType, Valence
+    from smrti.spaces.emergence import _merge_pair
+
+    stated = Atom(type=AtomType.EPISODE, label="x", space="a", valence=Valence(valence=-0.8, intensity=0.9),
+                  metadata={"valence_stated": True, "source": "agent"})
+    plain = Atom(type=AtomType.EPISODE, label="x", space="b", metadata={"source": "agent"})
+    user = Atom(type=AtomType.EPISODE, label="x", space="b")
+    assert "valence_stated" not in _merge_pair(AtomPair(atom_a=stated, atom_b=plain, similarity=1.0), "a_x_b", "t").metadata
+    assert _merge_pair(AtomPair(atom_a=stated, atom_b=plain, similarity=1.0), "a_x_b", "t").metadata["source"] == "agent"
+    assert "source" not in _merge_pair(AtomPair(atom_a=stated, atom_b=user, similarity=1.0), "a_x_b", "t").metadata
+
+
+def test_a_bridge_takes_its_tone_from_its_parents_tone_not_their_mood():
+    """The bridge blended the parents' drifting mood into its own tone, so a
+    neutral memory that had absorbed a sour mood gave its bridge a pruning
+    floor neither parent was written with."""
+    from smrti.core.models import Atom, AtomPair, AtomType, Valence
+    from smrti.core.provenance import is_severe_retained
+    from smrti.spaces.emergence import _merge_pair
+
+    drifted = Valence(valence=-0.9, intensity=0.9, intrinsic_valence=0.0, intrinsic_intensity=0.0)
+    a = Atom(type=AtomType.EPISODE, label="x", space="a", valence=drifted)
+    b = Atom(type=AtomType.EPISODE, label="x", space="b", valence=drifted)
+    bridged = _merge_pair(AtomPair(atom_a=a, atom_b=b, similarity=1.0), "a_x_b", "t")
+    assert bridged.valence.valence == pytest.approx(-0.9) and bridged.valence.own == 0.0
+    assert not is_severe_retained(bridged)
+
+
+def test_a_bridge_is_the_same_whichever_parent_asks():
+    """The bridge name is commutative but the content was not: label, type
+    and metadata came from whichever parent was passed first."""
+    from smrti.core.models import Atom, AtomPair, AtomType, TruthValue
+    from smrti.spaces.emergence import _merge_pair
+
+    x = Atom(type=AtomType.BELIEF, label="X", space="a", truth=TruthValue(probability=0.8, confidence=0.5),
+             metadata={"key": "left"})
+    y = Atom(type=AtomType.GOAL, label="Y", space="b", truth=TruthValue(probability=0.8, confidence=0.5),
+             metadata={"key": "right"})
+    xy = _merge_pair(AtomPair(atom_a=x, atom_b=y, similarity=1.0), "a_x_b", "t")
+    yx = _merge_pair(AtomPair(atom_a=y, atom_b=x, similarity=1.0), "a_x_b", "t")
+    assert (xy.label, xy.type, xy.metadata) == (yx.label, yx.type, yx.metadata)
+
+
+def test_two_pairs_of_spaces_cannot_share_one_bridge_name(tmp_path):
+    """("a_x_b", "c") and ("a", "b_x_c") both name "a_x_b_x_c"; the second
+    bridge was written into the first one's space."""
+    ab, c, a, bc = _spaces(tmp_path, "a_x_b", "c", "a", "b_x_c")
+    for mem in (ab, c, a, bc):
+        mem.remember("The office closes at six on Fridays.", valence=0.0)
+    assert ab.materialize_bridge("c") == 1
+    with pytest.raises(ValueError, match="share a bridge name"):
+        a.materialize_bridge("b_x_c")
+
+
+def test_a_bridge_atom_is_never_written_without_its_edges(tmp_path):
+    """The bridge atom and its two edges were three transactions, so an edge
+    that failed left a bridge atom joined to nothing."""
+    from smrti.spaces.emergence import materialize_bridge
+    from smrti.spaces.set_ops import space_overlap
+
+    a, b = _spaces(tmp_path, "a", "b")
+    a.remember("The office closes at six on Fridays.", valence=0.0)
+    gone = b.remember("The office closes at six on Fridays.", valence=0.0)
+    overlap = space_overlap("t", "a", "b", a.db, 0.85, a.embed)
+    b.atomspace.delete_atoms([gone], "t")  # the edge to it can no longer be drawn
+    with pytest.raises(Exception):
+        materialize_bridge(overlap, "t", a.db, a.embed, a.atomspace)
+    assert _bridge_atoms(a, "a_x_b") == []
+
+
+def test_refreshing_a_bridge_redraws_an_edge_it_lost(tmp_path):
+    """The update path refreshed the bridge atom and never looked at its
+    edges, so one lost was lost for good."""
+    a, b = _spaces(tmp_path, "a", "b")
+    a.remember("The office closes at six on Fridays.", valence=0.0)
+    b.remember("The office closes at six on Fridays.", valence=0.0)
+    a.materialize_bridge("b")
+    edges = "SELECT id FROM atoms WHERE tenant_id = 't' AND space = 'a_x_b' AND relation = 'bridge'"
+    first = a.db.fetchall(edges)[0]["id"]
+    a.atomspace.delete_atoms([first], "t")
+    assert len(a.db.fetchall(edges)) == 1
+    a.materialize_bridge("b")
+    assert len(a.db.fetchall(edges)) == 2
+
+
+def test_a_missing_neighbourhood_is_not_read_as_agreement(tmp_path):
+    """Two untyped "Java" atoms scored 1.0 when only one had neighbours: the
+    missing signal handed its weight to the embedding of a bare name."""
+    from smrti.core.models import Atom, AtomType
+    from smrti.spaces.set_ops import space_overlap
+
+    (mem,) = _spaces(tmp_path, "prog")
+    java = mem.atomspace.add_atom(Atom(type=AtomType.CONCEPT, label="Java", tenant_id="t", space="prog"))
+    for name in ("JVM", "Spring Boot", "Kotlin"):
+        other = mem.atomspace.add_atom(Atom(type=AtomType.CONCEPT, label=name, tenant_id="t", space="prog"))
+        mem.atomspace.link_atoms(java, other, "related_to", "t", "prog")
+    mem.atomspace.add_atom(Atom(type=AtomType.CONCEPT, label="Java", tenant_id="t", space="travel"))
+    overlap = space_overlap("t", "prog", "travel", mem.db, 0.85, mem.embed)
+    assert not [p for p in overlap.pairs if p.atom_a.label == "Java"]
+
+
+def test_an_overlap_embeds_every_neighbourhood_in_one_call(tmp_path):
+    """Each candidate with neighbours cost its own encoder pass, and each
+    sampled atom its own vector query."""
+    from smrti.spaces.set_ops import space_overlap
+
+    a, b = _spaces(tmp_path, "a", "b")
+    for mem in (a, b):
+        for i in range(4):
+            x = mem.remember(f"Deploy step {i} runs on the staging cluster.", valence=0.0)
+            y = mem.remember(f"Rollback plan {i} for the staging cluster.", valence=0.0)
+            mem.atomspace.link_atoms(x, y, "related_to", "t", mem.write_space)
+
+    class Counting:
+        def __init__(self, inner):
+            self.inner, self.single, self.batches = inner, 0, 0
+
+        def embed(self, text):
+            self.single += 1
+            return self.inner.embed(text)
+
+        def embed_batch(self, texts):
+            self.batches += 1
+            return self.inner.embed_batch(texts)
+
+    engine = Counting(a.embed)
+    overlap = space_overlap("t", "a", "b", a.db, 0.85, engine)
+    assert overlap.pairs and engine.single == 0 and engine.batches == 1

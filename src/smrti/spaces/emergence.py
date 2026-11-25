@@ -7,13 +7,15 @@ edges connect the bridge atom back to both parents so graph traversal can
 flow across space boundaries.
 
 Bridge spaces are named ``{sorted_a}_x_{sorted_b}`` so the operation is
-commutative (A∩B == B∩A always produces the same space name).
+commutative (A∩B == B∩A always produces the same space name), and the two
+parents of each pair are merged in the same sorted order, so the bridge
+atom is the same whichever parent asked for it.
 """
 from __future__ import annotations
 
 import json
-import uuid
 
+from smrti.core.atomspace import AtomSpace
 from smrti.core.models import (
     Atom,
     AtomPair,
@@ -23,11 +25,22 @@ from smrti.core.models import (
     TruthValue,
     Valence,
 )
+from smrti.core.provenance import SOURCE_AGENT, SOURCE_USER, VALENCE_STATED
+
+
+def _blend(a: tuple[float, float], b: tuple[float, float]) -> tuple[float, float]:
+    """Two (valence, intensity) pairs weighted by intensity: the stronger
+    signal wins, and the result is as intense as the more intense one."""
+    total = a[1] + b[1]
+    if total <= 1e-9:
+        return 0.0, 0.0
+    valence = (a[0] * a[1] + b[0] * b[1]) / total
+    return max(-1.0, min(1.0, valence)), min(1.0, max(a[1], b[1]))
 
 
 def _merge_pair(pair: AtomPair, bridge_space: str, tenant_id: str) -> Atom:
     """Create a single bridge atom from a matched pair."""
-    a, b = pair.atom_a, pair.atom_b
+    a, b = sorted((pair.atom_a, pair.atom_b), key=lambda atom: (atom.space, atom.id))
 
     # PLN merge for truth value
     merged_truth = a.truth.merge(b.truth)
@@ -38,17 +51,15 @@ def _merge_pair(pair: AtomPair, bridge_space: str, tenant_id: str) -> Atom:
         lti=max(a.attention.lti, b.attention.lti),
     )
 
-    # Blend valence: weighted by intensity (stronger signal wins)
-    total_intensity = a.valence.intensity + b.valence.intensity
-    if total_intensity > 1e-9:
-        blended_valence = (
-            a.valence.valence * a.valence.intensity
-            + b.valence.valence * b.valence.intensity
-        ) / total_intensity
-        blended_intensity = max(a.valence.intensity, b.valence.intensity)
-    else:
-        blended_valence = 0.0
-        blended_intensity = 0.0
+    # The mood and the tone each blend from their own kind. Blending the
+    # parents' mood into the bridge's own tone would hand it a tone neither
+    # parent was written with, and a pruning floor with it.
+    mood, mood_intensity = _blend(
+        (a.valence.valence, a.valence.intensity), (b.valence.valence, b.valence.intensity)
+    )
+    own, own_intensity = _blend(
+        (a.valence.own, a.valence.own_intensity), (b.valence.own, b.valence.own_intensity)
+    )
 
     # Use the higher-confidence atom's label
     label = a.label if a.truth.confidence >= b.truth.confidence else b.label
@@ -57,8 +68,18 @@ def _merge_pair(pair: AtomPair, bridge_space: str, tenant_id: str) -> Atom:
     # Preserve entity_type from the higher-confidence source
     entity_type = a.entity_type if a.truth.confidence >= b.truth.confidence else b.entity_type
 
-    # Merge metadata from both sources
+    # Merge metadata from both sources — except what a bridge has to earn
+    # itself. A bridge is the engine's own inference that two memories match,
+    # so no caller stated its valence: inheriting the flag from either parent
+    # turned two ordinary memories into a critical warning. And it is
+    # agent-authored only when both parents are, since user testimony on
+    # either side is what it rests on.
     metadata = {**a.metadata, **b.metadata}
+    metadata.pop(VALENCE_STATED, None)
+    if all(p.metadata.get("source", SOURCE_USER) == SOURCE_AGENT for p in (a, b)):
+        metadata["source"] = SOURCE_AGENT
+    else:
+        metadata.pop("source", None)
     metadata["bridge_source_a"] = a.id
     metadata["bridge_source_b"] = b.id
     metadata["bridge_similarity"] = pair.similarity
@@ -70,14 +91,61 @@ def _merge_pair(pair: AtomPair, bridge_space: str, tenant_id: str) -> Atom:
         truth=merged_truth,
         attention=merged_attention,
         valence=Valence(
-            valence=max(-1.0, min(1.0, blended_valence)),
-            intensity=min(1.0, blended_intensity),
+            valence=mood, intensity=mood_intensity,
+            intrinsic_valence=own, intrinsic_intensity=own_intensity,
         ),
         entity_type=entity_type,
         tenant_id=tenant_id,
         space=bridge_space,
         metadata=metadata,
     )
+
+
+class _Deferred:
+    """A database handle that collects writes instead of running them.
+
+    The bridge atom and its two edges each go through ``AtomSpace``, the one
+    door every atom comes through, and through this handle the three land in
+    one transaction. Written as three, an edge that failed left a bridge atom
+    joined to neither parent. Reads go to the real database, which is what
+    the writes are built against.
+    """
+
+    def __init__(self, db) -> None:
+        self._db = db
+        self.statements: list[tuple] = []
+
+    def __getattr__(self, name: str):
+        return getattr(self._db, name)
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        self.statements.append((sql, params))
+
+    def execute_batch(self, statements: list[tuple]) -> None:
+        self.statements.extend(statements)
+
+
+def _refuse_foreign_bridge(
+    bridge_space: str, sources: set[str], overlap: SpaceOverlap, tenant_id: str, db
+) -> None:
+    """Refuse to write into a bridge space that bridges another pair.
+
+    The name is the two parent names joined by ``_x_``, so ``a_x_b`` with
+    ``c`` and ``a`` with ``b_x_c`` both name ``a_x_b_x_c``; bridging the
+    second into it would mix two unrelated intersections in one space.
+    """
+    if not sources:
+        return
+    rows = db.fetchall(
+        "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? AND id IN (SELECT value FROM json_each(?))",
+        (tenant_id, json.dumps(sorted(sources))),
+    )
+    parents = {r["space"] for r in rows}
+    if parents - {overlap.space_a, overlap.space_b}:
+        raise ValueError(
+            f"bridge space {bridge_space!r} already bridges {' and '.join(sorted(parents))}, "
+            f"not {overlap.space_a!r} and {overlap.space_b!r}: the two pairs share a bridge name"
+        )
 
 
 def materialize_bridge(
@@ -93,18 +161,23 @@ def materialize_bridge(
     Creates bridge atoms and ``bridge`` relation edges connecting them back to
     their source atoms in both parent spaces.  Existing bridge atoms (identified
     by ``bridge_source_a`` / ``bridge_source_b`` metadata) are updated rather
-    than duplicated.
+    than duplicated, and an edge missing from one is drawn again. A bridge
+    atom that was forgotten is left alone and keeps its pair: refreshing it
+    used to replace its metadata, stamp and all, and bring it back.
 
     Args:
         overlap: The SpaceOverlap result from ``space_overlap()``.
         tenant_id: Tenant partition key.
         db: Database handle.
         embed_engine: Embedding provider for new atoms.
-        atomspace: AtomSpace instance for atom/relation creation.
+        atomspace: AtomSpace instance, read for the edges a bridge atom has.
         min_jaccard: Minimum Jaccard threshold to trigger materialization.
 
     Returns:
         Number of bridge atoms created or updated.
+
+    Raises:
+        ValueError: the bridge space already bridges a different pair.
     """
     if overlap.jaccard < min_jaccard or not overlap.pairs:
         return 0
@@ -119,52 +192,59 @@ def materialize_bridge(
 
     # Index existing bridge atoms by their source pair so we can update.
     # Keys are order-normalized so discovery from either parent space finds
-    # the same stored bridge atom.
+    # the same stored bridge atom. A forgotten one is a tombstone: its pair
+    # is neither refreshed nor bridged again.
     existing = db.fetchall(
         "SELECT id, metadata FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'",
         (tenant_id, bridge_space),
     )
     source_pair_to_id: dict[tuple[str, str], str] = {}
+    tombstones: set[tuple[str, str]] = set()
+    sources: set[str] = set()
     for row in existing:
         meta = json.loads(row["metadata"] or "{}")
         src_a = meta.get("bridge_source_a")
         src_b = meta.get("bridge_source_b")
         if src_a and src_b:
-            source_pair_to_id[tuple(sorted((src_a, src_b)))] = row["id"]
+            key = tuple(sorted((src_a, src_b)))
+            if meta.get("forgotten"):
+                tombstones.add(key)
+            else:
+                source_pair_to_id[key] = row["id"]
+            sources.update(key)
+    _refuse_foreign_bridge(bridge_space, sources, overlap, tenant_id, db)
 
     for pair in overlap.pairs:
         key = tuple(sorted((pair.atom_a.id, pair.atom_b.id)))
+        if key in tombstones:
+            continue
         bridge_atom = _merge_pair(pair, bridge_space, tenant_id)
+        deferred = _Deferred(db)
+        writer = AtomSpace(deferred, embed_engine)
 
         if key in source_pair_to_id:
-            # Update existing bridge atom
             bridge_atom.id = source_pair_to_id[key]
-            atomspace.update_atom(bridge_atom)
-            count += 1
+            writer.update_atom(bridge_atom)
+            linked = {
+                edge.target_id
+                for edge in atomspace.get_relations(bridge_atom.id, tenant_id, [bridge_space])
+                if edge.relation == "bridge" and edge.source_id == bridge_atom.id
+            }
         else:
-            # Create new bridge atom + relation edges
-            atom_id = atomspace.add_atom(bridge_atom)
+            writer.add_atom(bridge_atom)
+            linked = set()
 
-            # Bridge → source_a
-            atomspace.link_atoms(
-                source_id=atom_id,
-                target_id=pair.atom_a.id,
-                relation="bridge",
-                tenant_id=tenant_id,
-                space=bridge_space,
-                truth=TruthValue(probability=pair.similarity, confidence=0.8),
-            )
-
-            # Bridge → source_b
-            atomspace.link_atoms(
-                source_id=atom_id,
-                target_id=pair.atom_b.id,
-                relation="bridge",
-                tenant_id=tenant_id,
-                space=bridge_space,
-                truth=TruthValue(probability=pair.similarity, confidence=0.8),
-            )
-
-            count += 1
+        for source in (pair.atom_a, pair.atom_b):
+            if source.id not in linked:
+                writer.link_atoms(
+                    source_id=bridge_atom.id,
+                    target_id=source.id,
+                    relation="bridge",
+                    tenant_id=tenant_id,
+                    space=bridge_space,
+                    truth=TruthValue(probability=pair.similarity, confidence=0.8),
+                )
+        db.execute_batch(deferred.statements)
+        count += 1
 
     return count

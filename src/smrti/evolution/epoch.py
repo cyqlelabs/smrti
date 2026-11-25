@@ -243,9 +243,9 @@ def _reembed(tenant_id: str, space: str, db, embed_engine) -> None:
 
     Atoms are taken in id order from where the last batch stopped, so atoms
     written since the format changed are re-embedded at most once, and
-    harmlessly: their text is the text they are embedded on. A failed
-    encoding is logged and ends the step, never the epoch, as in
-    :func:`_repair_vectors`; the batch is retried next epoch.
+    harmlessly: their text is the text they are embedded on. A failure, of
+    the encoder or of the writes, is logged and ends the step, never the
+    epoch, as in :func:`_repair_vectors`; the batch is retried next epoch.
     """
     key = reembed_key(tenant_id, space)
     after = db.meta_get(key)
@@ -257,22 +257,21 @@ def _reembed(tenant_id: str, space: str, db, embed_engine) -> None:
         (tenant_id, space, after, _REEMBED_BATCH),
     )
     atoms = [atom_from_row(row) for row in rows]
-    if atoms:
-        try:
+    try:
+        if atoms:
             vectors = embed_engine.embed_batch([embedding_text(atom) for atom in atoms])
-        except Exception:
-            logger.warning(
-                "re-embedding stopped in tenant=%s space=%s; it resumes next epoch",
-                tenant_id, space, exc_info=True,
+            AtomSpace(db, embed_engine).file_vectors(
+                [(atom, list(vector)) for atom, vector in zip(atoms, vectors)]
             )
-            return
-        AtomSpace(db, embed_engine).file_vectors(
-            [(atom, list(vector)) for atom, vector in zip(atoms, vectors)]
+        if len(atoms) < _REEMBED_BATCH:
+            db.execute("DELETE FROM smrti_meta WHERE key = ?", (key,))
+        else:
+            db.meta_set(key, atoms[-1].id)
+    except Exception:
+        logger.warning(
+            "re-embedding stopped in tenant=%s space=%s; it resumes next epoch",
+            tenant_id, space, exc_info=True,
         )
-    if len(atoms) < _REEMBED_BATCH:
-        db.execute("DELETE FROM smrti_meta WHERE key = ?", (key,))
-    else:
-        db.meta_set(key, atoms[-1].id)
 
 
 def _apply_evidence(tenant_id: str, space: str, db, lr: float, fence=None) -> int:

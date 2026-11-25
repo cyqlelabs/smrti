@@ -4,15 +4,15 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import os
-import secrets
-from typing import Callable
+from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 
 from smrti import Smrti, __version__
-from smrti.core.db import _registry, _registry_lock, _resolve_path
+from smrti.core.db import Database, _registry, _registry_lock, _resolve_path
 from smrti.servers import config as cfg
+from smrti.servers.common import tenant_for, visible
 
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 
@@ -24,33 +24,44 @@ _db_cache: dict[str, Smrti] = {}
 _DB_CACHE_MAX = 20
 
 
-async def api_key_middleware(request: Request, call_next):
-    """Require SMRTI_API_KEY on every request when it is configured.
+class _Reader:
+    """The reads the visualizer routes make over one database, and nothing else.
 
-    Accepts either `Authorization: Bearer <key>` or `X-Api-Key: <key>`, so
-    proxy clients can keep their upstream credentials in Authorization and
-    supply the smrti key via X-Api-Key.
+    Status and the space list are taken per tenant and space rather than from
+    the configured instance, so a key bound to another tenant sees its own
+    figures, and no instance has to be minted — which writes a personality
+    row — to read one.
     """
-    key = cfg.API_KEY
-    if key:
-        supplied = request.headers.get("x-api-key") or ""
-        auth = request.headers.get("authorization", "")
-        bearer = auth[7:] if auth.startswith("Bearer ") else ""
-        if not (
-            secrets.compare_digest(supplied, key)
-            or secrets.compare_digest(bearer, key)
-        ):
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "error": {
-                        "message": "Invalid or missing API key",
-                        "type": "authentication_error",
-                        "code": "invalid_api_key",
-                    }
-                },
-            )
-    return await call_next(request)
+
+    def __init__(self, db: Database) -> None:
+        self.db = db
+
+    def list_spaces(self, tenant_id: str) -> list[str]:
+        rows = self.db.fetchall(
+            "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? ORDER BY space",
+            (tenant_id,),
+        )
+        return [r["space"] for r in rows]
+
+    def status(self, tenant_id: str, space: str) -> dict:
+        """The figures ``Smrti.status()`` reports, for any tenant and space."""
+        total = self.db.fetchone(
+            "SELECT COUNT(*) as n FROM atoms WHERE tenant_id=? AND space=?",
+            (tenant_id, space),
+        )
+        by_type = self.db.fetchall(
+            "SELECT type, COUNT(*) as n FROM atoms WHERE tenant_id=? AND space=? GROUP BY type",
+            (tenant_id, space),
+        )
+        personality = self.db.fetchone(
+            "SELECT * FROM personality WHERE tenant_id=? AND space=?",
+            (tenant_id, space),
+        )
+        return {
+            "total_atoms": total["n"] if total else 0,
+            "by_type": {row["type"]: row["n"] for row in by_type},
+            "personality": dict(personality) if personality else {},
+        }
 
 
 def _db_mem(db_path: str) -> Smrti:
@@ -119,6 +130,9 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         """
         return get_mem(cfg.TENANT_ID, cfg.SPACE)
 
+    def _reader(db: Optional[str]) -> _Reader:
+        return _Reader((_db_mem(db) if db else _configured_mem()).db)
+
     @router.get("/viz", include_in_schema=False)
     async def visualizer():
         path = os.path.join(_STATIC_DIR, "visualizer.html")
@@ -127,34 +141,36 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         return FileResponse(path, media_type="text/html")
 
     @router.get("/tenants")
-    async def list_tenants(db: str | None = Query(None)):
-        mem = _db_mem(db) if db else _configured_mem()
-        rows = mem.db.fetchall("SELECT DISTINCT tenant_id FROM atoms ORDER BY tenant_id")
-        return [r["tenant_id"] for r in rows]
+    async def list_tenants(request: Request, db: str | None = Query(None)):
+        rows = _reader(db).db.fetchall("SELECT DISTINCT tenant_id FROM atoms ORDER BY tenant_id")
+        return [r["tenant_id"] for r in rows if visible(request, r["tenant_id"])]
 
     @router.get("/spaces")
-    async def list_spaces(tenant_id: str | None = Query(None), db: str | None = Query(None)):
-        mem = _db_mem(db) if db else _configured_mem()
-        rows = mem.db.fetchall(
-            "SELECT DISTINCT space FROM atoms WHERE tenant_id = ? ORDER BY space",
-            (tenant_id or cfg.TENANT_ID,),
-        )
-        return [r["space"] for r in rows]
+    async def list_spaces(
+        request: Request, tenant_id: str | None = Query(None), db: str | None = Query(None)
+    ):
+        return _reader(db).list_spaces(tenant_for(request, tenant_id, cfg.TENANT_ID))
 
     @router.get("/graph")
     async def get_graph(
-        tenant_id: str = Query("default"),
-        space: str = Query("default"),
+        request: Request,
+        tenant_id: str | None = Query(None),
+        space: str | None = Query(None),
         limit: int = Query(200, ge=0),
         min_confidence: float = Query(0.0),
         types: str = Query("concept,belief,episode,goal"),
         db: str | None = Query(None),
     ):
+        # Unset tenant and space mean the server's own, as on every other
+        # route: the literal "default" this used to fall back to showed an
+        # empty graph to a server configured for any other tenant.
+        tenant_id = tenant_for(request, tenant_id, cfg.TENANT_ID)
+        space = space or cfg.SPACE
         type_list = [t.strip() for t in types.split(",") if t.strip()] or [
             "concept", "belief", "episode", "goal"
         ]
         ph = ",".join("?" * len(type_list))
-        mem = _db_mem(db) if db else _configured_mem()
+        mem = _reader(db)
         node_sql = f"""SELECT * FROM atoms
                         WHERE tenant_id=? AND space=? AND type IN ({ph})
                           AND confidence >= ?
@@ -190,26 +206,29 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         return {"nodes": nodes, "edges": edges}
 
     @router.get("/status")
-    async def status(db: str | None = Query(None)):
+    async def status(request: Request, db: str | None = Query(None)):
         # `spaces` doubles as the capability signal: clients treat its presence
         # as proof the server understands per-request space routing. `space`
         # names the space this server writes to when a request does not say —
         # a client whose own config disagrees would otherwise route writes away
         # from the graph it has been building.
-        mem = _db_mem(db) if db else _configured_mem()
-        result = mem.status()
-        result["spaces"] = mem.list_spaces()
-        result["space"] = mem.write_space
+        home = _configured_mem()
+        tenant = tenant_for(request, None, home.tenant_id)
+        mem = _reader(db)
+        result = mem.status(tenant, home.write_space)
+        result["spaces"] = mem.list_spaces(tenant)
+        result["space"] = home.write_space
         result["version"] = __version__
         return result
 
     @router.get("/atoms/{atom_id}")
     async def get_atom(
+        request: Request,
         atom_id: str,
         tenant_id: str | None = Query(None),
         space: str | None = Query(None),
     ):
-        tenant = tenant_id or cfg.TENANT_ID
+        tenant = tenant_for(request, tenant_id, cfg.TENANT_ID)
         spc = space or cfg.SPACE
         mem = _configured_mem()
         atom = mem.atomspace.get_atom(atom_id, tenant, spc)
@@ -218,12 +237,12 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         return atom.model_dump()
 
     @router.get("/llm-calls")
-    async def get_llm_calls():
+    async def get_llm_calls(request: Request):
         from smrti.call_log import get_all
-        return get_all()
+        return [e for e in get_all() if visible(request, e.get("tenant_id"))]
 
     @router.get("/llm-calls/stream")
-    async def stream_llm_calls():
+    async def stream_llm_calls(request: Request):
         from smrti.call_log import subscribe, unsubscribe
 
         async def event_generator():
@@ -232,7 +251,10 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
                 while True:
                     try:
                         entry = await asyncio.wait_for(q.get(), timeout=15.0)
-                        yield f"data: {_json.dumps(entry)}\n\n"
+                        # A clear carries no tenant and only the all-tenants
+                        # key can send one; every other message is a record.
+                        if entry.get("__clear__") or visible(request, entry.get("tenant_id")):
+                            yield f"data: {_json.dumps(entry)}\n\n"
                     except asyncio.TimeoutError:
                         yield ": keepalive\n\n"
             except asyncio.CancelledError:
@@ -254,12 +276,12 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
 
     # ── Decision audit ─────────────────────────────────────────────────────
     @router.get("/decisions")
-    async def get_decisions_log():
+    async def get_decisions_log(request: Request):
         """Every semantic decision the engine made or failed to make, newest
         first, with the mode it ran under and whether it was applied — the
         record shadow mode exists to produce."""
         from smrti.decisions import audit
-        return audit.get_all()
+        return [r for r in audit.get_all() if visible(request, r.get("tenant_id"))]
 
     @router.delete("/decisions")
     async def clear_decisions_log():
@@ -269,7 +291,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
 
     # ── Prometheus / OpenMetrics exposition ─────────────────────────────────
     @router.get("/metrics")
-    async def prometheus_metrics(db: str | None = Query(None)):
+    async def prometheus_metrics(request: Request, db: str | None = Query(None)):
         """Export smrti status as Prometheus-format metrics.
 
         Zero external deps — plain text/plain response matching the Prometheus
@@ -280,11 +302,10 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
             """Escape a Prometheus label value: backslash, quote, newline."""
             return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
-        mem = _db_mem(db) if db else _configured_mem()
-        s = mem.status()
-        tenant = _esc(str(s.get("personality", {}).get("tenant_id") or "default"))
-        space = _esc(str(s.get("personality", {}).get("space") or "default"))
-        labels = f'tenant="{tenant}",space="{space}"'
+        home = _configured_mem()
+        tenant_id = tenant_for(request, None, home.tenant_id)
+        s = _reader(db).status(tenant_id, home.write_space)
+        labels = f'tenant="{_esc(tenant_id)}",space="{_esc(home.write_space)}"'
 
         lines: list[str] = []
 
@@ -337,7 +358,9 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         for task in _TASKS:
             level = {"off": 0, "shadow": 1, "active": 2}.get(engine.mode(task), 0)
             lines.append(f'smrti_decisions_mode{{task="{task}"}} {level}')
-        counts = _audit.counters()
+        # The counters add up every tenant's decisions, so only the
+        # all-tenants key reads them.
+        counts = _audit.counters() if visible(request, None) else {}
         if counts:
             lines.append("# HELP smrti_decisions_total Decisions by task, mode and outcome.")
             lines.append("# TYPE smrti_decisions_total counter")

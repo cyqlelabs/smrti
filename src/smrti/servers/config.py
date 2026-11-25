@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 DB: str = os.environ.get("SMRTI_DB", "~/.smrti/memory.db")
 PERSONALITY: str = os.environ.get("SMRTI_PERSONALITY", "balanced")
@@ -9,8 +10,41 @@ TENANT_ID: str = os.environ.get("SMRTI_TENANT_ID", "default")
 SPACE: str = os.environ.get("SMRTI_SPACE", "default")
 
 # Optional API key — when set, REST/proxy/viz require it on every request
-# (Authorization: Bearer <key> or X-Api-Key: <key>).
+# (Authorization: Bearer <key> or X-Api-Key: <key>). It may act on every tenant.
 API_KEY: str = os.environ.get("SMRTI_API_KEY", "")
+
+
+def _parse_api_keys(raw: str) -> dict[str, tuple[str, ...]]:
+    """Read SMRTI_API_KEYS: ``key:tenant1|tenant2`` entries split by ``;`` or ``,``.
+
+    A key bound this way may act only on the tenants it lists, and acts on the
+    first of them when a request names none. The key ends at the first ``:``,
+    so a key cannot contain one, and a tenant name cannot contain ``|``, ``;``
+    or ``,``. A malformed entry stops the server rather than leaving a key
+    that silently grants nothing; the message names the entry by position so
+    the key itself never reaches a log.
+    """
+    keys: dict[str, tuple[str, ...]] = {}
+    for position, entry in enumerate(re.split(r"[;,]", raw), start=1):
+        entry = entry.strip()
+        if not entry:
+            continue
+        key, sep, listed = entry.partition(":")
+        key = key.strip()
+        tenants = tuple(t.strip() for t in listed.split("|") if t.strip())
+        if not sep or not key or not tenants:
+            raise ValueError(
+                f"SMRTI_API_KEYS entry {position} must read key:tenant1|tenant2"
+            )
+        if key in keys:
+            raise ValueError(f"SMRTI_API_KEYS entry {position} repeats an earlier key")
+        keys[key] = tenants
+    return keys
+
+
+# Keys bound to tenants (see _parse_api_keys); SMRTI_API_KEY above stays the
+# key for every tenant. Either one being set turns authentication on.
+API_KEYS: dict[str, tuple[str, ...]] = _parse_api_keys(os.environ.get("SMRTI_API_KEYS", ""))
 
 # Extra SQLite paths the visualizer's ?db= param may open — os.pathsep-separated.
 # Empty by default, so the only browsable DB is the one the server was started

@@ -320,7 +320,7 @@ def test_metrics_skips_personality_params_that_are_unset(client, mem):
             "valence_weight": None,
         },
     }
-    with patch.object(mem, "status", return_value=status):
+    with patch.object(viz_routes._Reader, "status", return_value=status):
         response = client.get("/metrics")
     body = response.text
     assert response.status_code == 200
@@ -338,9 +338,14 @@ async def _timeout_immediately(awaitable, timeout=None):
 
 
 def _stream_endpoint():
-    """The /llm-calls/stream handler, taken from a freshly built viz router."""
+    """The /llm-calls/stream handler, taken from a freshly built viz router,
+    bound to a request that carries no key — the one every record is visible to."""
+    from starlette.requests import Request
+
     router = viz_routes.create_viz_router(lambda tenant, space: None)
-    return next(r.endpoint for r in router.routes if r.path == "/llm-calls/stream")
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/llm-calls/stream")
+    request = Request({"type": "http", "method": "GET", "headers": [], "query_string": b""})
+    return lambda: endpoint(request)
 
 
 def test_llm_call_stream_emits_appended_entries():

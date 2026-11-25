@@ -24,9 +24,10 @@ from smrti.core.models import RecallResult
 from smrti.core.provenance import SOURCE_AGENT, claim_current_sql, forgotten_sql
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
+from smrti.servers.common import api_key_middleware, tenant_for
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
-from smrti.servers.viz_routes import api_key_middleware, create_viz_router
+from smrti.servers.viz_routes import create_viz_router
 
 
 logger = logging.getLogger("smrti.proxy")
@@ -125,11 +126,22 @@ def get_http() -> httpx.AsyncClient:
     return _http
 
 
+# A tenant or space name is a partition key on every atom, a cache key for an
+# instance and a personality row of its own — the same cap REST puts on space
+# names, so a malformed header cannot become any of those.
+_NAME_MAX_LEN = 128
+_READ_SPACES_MAX = 32
+
+
 def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
-    """Extract (tenant_id, write_space, read_spaces) from request headers."""
+    """Extract (tenant_id, write_space, read_spaces) from request headers.
+
+    The tenant is the one the auth middleware resolved for a key bound to
+    tenants — already checked against the key — and the header otherwise.
+    """
     default_tenant, default_space, _ = _bootstrap()
 
-    tenant_id = request.headers.get("x-smrti-tenant-id") or default_tenant
+    tenant_id = tenant_for(request, request.headers.get("x-smrti-tenant-id"), default_tenant)
     write_space = request.headers.get("x-smrti-write-space") or default_space
 
     raw_read = request.headers.get("x-smrti-read-spaces", "")
@@ -137,6 +149,10 @@ def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
     if not read_spaces:
         read_spaces = [write_space]
 
+    if any(len(name) > _NAME_MAX_LEN for name in (tenant_id, write_space, *read_spaces)):
+        raise HTTPException(400, f"Tenant and space names are limited to {_NAME_MAX_LEN} characters")
+    if len(read_spaces) > _READ_SPACES_MAX:
+        raise HTTPException(400, f"X-Smrti-Read-Spaces names at most {_READ_SPACES_MAX} spaces")
     return tenant_id, write_space, read_spaces
 
 

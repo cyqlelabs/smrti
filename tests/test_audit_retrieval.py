@@ -299,6 +299,22 @@ def test_the_knn_refill_never_asks_for_more_than_sqlite_vec_returns():
     assert _knn_entry_points(b"", "t", "s", db, 50, 0.1) == []
     assert max(db.asked) == 4096
 
+
+def test_a_vector_with_no_length_does_not_abort_a_recall(table_mem):
+    """vec0 reports a NULL distance for a zero-length vector, stored or
+    queried, and sorting the probe's rows by it raised TypeError."""
+    good = _add(table_mem, "a memory with a real vector", 0.5)
+    table_mem.atomspace.add_atom(
+        Atom(type=AtomType.EPISODE, label="a memory with no length", content="a memory with no length",
+             tenant_id="t", space="s"),
+        embedding=[0.0] * DIM,
+    )
+    table_mem.embed.table["q"] = QUERY
+    assert [r.atom.id for r in table_mem.recall("q", boost=False)] == [good]
+
+    table_mem.embed.table["q"] = [0.0] * DIM
+    assert table_mem.recall("q", boost=False) == []
+
 # ── T13: stated warnings are found apart from the candidate pool ─────────────
 
 def test_find_warnings_reaches_a_stated_warning_the_candidate_pool_misses(table_mem):
@@ -356,9 +372,13 @@ def test_a_superseded_claim_stays_a_known_antipattern_after_its_confidence_decay
     ids, old_edge = _superseded_preference(table_mem)
     # The stamp extraction puts on a superseded claim edge, carried by the
     # belief it pointed at as well.
+    new_edge = table_mem.db.fetchone(
+        "SELECT id FROM atoms WHERE type = 'relation' AND relation = 'prefers' AND target_id = ?",
+        (ids["coffee"],),
+    )["id"]
     table_mem.db.execute(
         "UPDATE atoms SET metadata = json_set(metadata, '$.superseded_by', ?) WHERE id = ?",
-        ("coffee", ids["tea"]),
+        (new_edge, ids["tea"]),
     )
     fresh = table_mem.believe("the user dislikes licorice", probability=0.1)
     for _ in range(50):

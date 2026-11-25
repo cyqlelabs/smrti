@@ -163,9 +163,9 @@ def _stored_vectors(atom_ids: list[str], db) -> dict[str, np.ndarray]:
         chunk = rowids[start : start + _ID_CHUNK]
         values = ",".join("(?)" for _ in chunk)
         for row in db.fetchall(
-            f"""WITH wanted(rowid) AS (VALUES {values})
+            f"""WITH wanted(id) AS (VALUES {values})
                 SELECT v.rowid AS rowid, v.embedding AS embedding
-                FROM wanted CROSS JOIN vec_atoms v ON v.rowid = wanted.rowid""",
+                FROM wanted CROSS JOIN vec_atoms v ON v.rowid = wanted.id""",
             tuple(chunk),
         ):
             if row["embedding"] is not None:
@@ -324,6 +324,10 @@ def _knn_entry_points(
     decayed one a handful of times. A probe that returned fewer rows than it
     asked for has seen the whole space; one that asked for ``_KNN_MAX_K``
     has asked for all sqlite-vec will give.
+
+    vec0 reports no distance at all for a stored vector with no length, and
+    such a row is about nothing: it is dropped here, where sorting it would
+    have aborted the whole recall.
     """
     limit = pool
     while True:
@@ -335,7 +339,7 @@ def _knn_entry_points(
             (vec_bytes, tenant_id, space, limit),
         )
         eligible = _eligible_ids([r["atom_id"] for r in rows], tenant_id, space, db, min_confidence)
-        kept = [r for r in rows if r["atom_id"] in eligible]
+        kept = [r for r in rows if r["distance"] is not None and r["atom_id"] in eligible]
         if len(kept) >= pool or len(rows) < limit or limit >= _KNN_MAX_K:
             return kept[:pool]
         limit = min(limit * _REFILL_FACTOR, _KNN_MAX_K)
@@ -543,10 +547,13 @@ def rank_candidates(
     graph_size = _graph_size(db, tenant_id, read_spaces)
     knn_pool = max(_KNN_POOL_MIN, min(_KNN_POOL_MAX, 4 * int(graph_size**0.5)))
     knn_rows: list = []
-    for space in read_spaces:
-        knn_rows.extend(
-            _knn_entry_points(vec_bytes, tenant_id, space, db, knn_pool, min_confidence)
-        )
+    # A query vector with no length is near nothing — vec0 gives every row
+    # a NULL distance against it — so the lexical half searches alone.
+    if np.linalg.norm(query_vec) > 0.0:
+        for space in read_spaces:
+            knn_rows.extend(
+                _knn_entry_points(vec_bytes, tenant_id, space, db, knn_pool, min_confidence)
+            )
     knn_rows.sort(key=lambda r: r["distance"])
     knn_rows = knn_rows[:knn_pool]
 
@@ -750,12 +757,14 @@ def find_warnings(
     stored = _stored_vectors([r["id"] for r in rows], db)
     found: list[RecallResult] = []
     for row in rows:
-        atom = atom_from_row(row)
-        vector = stored.get(atom.id)
+        atom = None
+        vector = stored.get(row["id"])
         if vector is None:
+            atom = atom_from_row(row)
             vector = embed_engine.embed(embedding_text(atom))
         similarity = _cosine(query_vec, vector)
         if similarity >= min_similarity:
+            atom = atom or atom_from_row(row)
             found.append(RecallResult(atom=atom, salience=similarity, similarity=similarity))
     found.sort(key=lambda r: (-r.similarity, r.atom.id))
     return found[:limit]
@@ -792,6 +801,23 @@ def superseded_claims(
     read_spaces = list(dict.fromkeys(read_spaces))
     if not ids or not read_spaces or limit <= 0:
         return {}
+    claims: dict[str, list[SupersededClaim]] = {}
+    # Each id is bound twice, so a chunk holds half of what an id list may.
+    for start in range(0, len(ids), _ID_CHUNK // 2):
+        chunk = ids[start : start + _ID_CHUNK // 2]
+        _collect_superseded(chunk, tenant_id, read_spaces, db, limit, claims)
+    return claims
+
+
+def _collect_superseded(
+    ids: list[str], tenant_id: str, read_spaces: list[str], db, limit: int,
+    claims: dict[str, list[SupersededClaim]],
+) -> None:
+    """Add the superseded claims about *ids* to *claims*, *limit* per atom.
+
+    Only the ids of this chunk are credited: an edge whose other endpoint
+    sits in another chunk is credited to it when that chunk is read.
+    """
     ids_ph = ",".join("?" * len(ids))
     spaces_ph = ",".join("?" * len(read_spaces))
     rows = db.fetchall(
@@ -811,7 +837,6 @@ def superseded_claims(
         (*ids, *ids, tenant_id, *read_spaces),
     )
     wanted = set(ids)
-    claims: dict[str, list[SupersededClaim]] = {}
     for row in rows:
         claim = SupersededClaim(
             edge_id=row["id"], subject=row["subject"], predicate=row["relation"],
@@ -820,4 +845,3 @@ def superseded_claims(
         for atom_id in dict.fromkeys((row["source_id"], row["target_id"])):
             if atom_id in wanted and len(claims.setdefault(atom_id, [])) < limit:
                 claims[atom_id].append(claim)
-    return claims

@@ -52,7 +52,11 @@ def _served_config(run, **kwargs):
     import uvicorn
 
     configs = []
-    with patch.object(uvicorn.Server, "run", lambda self: configs.append(self.config)):
+    def _run(self):
+        configs.append(self.config)
+        self.started = True
+
+    with patch.object(uvicorn.Server, "run", _run):
         run(**kwargs)
     assert len(configs) == 1
     return configs[0]

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import secrets
+import sys
 from typing import Optional
 
 from fastapi import HTTPException, Request
@@ -281,9 +282,11 @@ def serve(app, host: str, port: int) -> None:
     shutdown, and an SSE subscriber to /llm-calls/stream never closes its
     own: one open visualizer held the server, and the drain of in-flight
     stores behind it, until the process was killed. The streams are ended
-    first, and the wait for the rest is bounded.
+    first, and the wait for the rest is bounded. Ctrl-C and a failed startup
+    end the process the way ``uvicorn.run`` ends it.
     """
     import uvicorn
+    from uvicorn.main import STARTUP_FAILURE
 
     from smrti import call_log
 
@@ -292,7 +295,12 @@ def serve(app, host: str, port: int) -> None:
             call_log.close_streams()
             await super().shutdown(sockets=sockets)
 
-    config = uvicorn.Config(
+    server = _Server(uvicorn.Config(
         app, host=host, port=port, timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS
-    )
-    _Server(config).run()
+    ))
+    try:
+        server.run()
+    except KeyboardInterrupt:
+        pass
+    if not server.started:
+        sys.exit(STARTUP_FAILURE)

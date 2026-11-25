@@ -504,13 +504,14 @@ def test_a_slow_graph_read_does_not_stall_other_requests_and_its_limit_is_capped
         async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=ADMIN) as c:
             graph = asyncio.create_task(c.get("/graph"))
             await asyncio.sleep(0.05)
-            started = time.monotonic()
-            await c.get("/llm-calls")
-            ping = time.monotonic() - started
-            await graph
-            return ping
+            ping = await c.get("/llm-calls")
+            # On the loop, the graph read would have finished before the ping
+            # could even start; off it, the ping returns while it still runs.
+            graph_still_running = not graph.done()
+            assert (await graph).status_code == 200
+            return ping.status_code, graph_still_running
 
-    assert asyncio.run(_run()) < 0.3
+    assert asyncio.run(_run()) == (200, True)
 
 
 def test_a_call_log_entry_is_bounded_by_bytes_however_many_turns_it_holds():
@@ -648,13 +649,27 @@ def test_an_evicted_instance_with_pending_activity_gets_its_epoch(tmp_path, monk
 
 # ── CLI: an exposed bind is always warned about ──────────────────────────────
 
-def test_servers_without_auth_warn_on_any_exposed_bind(monkeypatch, capsys):
+def test_servers_without_auth_warn_on_any_exposed_bind(monkeypatch, tmp_path, capsys):
     """`serve town` and `serve decisions` bound to 0.0.0.0 in silence, though they check no key."""
+    from typer.testing import CliRunner
+
     from smrti import cli
 
+    monkeypatch.setattr(cli, "_RUN_DIR", tmp_path / "run")
     monkeypatch.setenv("SMRTI_API_KEY", "set-but-irrelevant")
-    cli._warn_if_unauthenticated("0.0.0.0", "town simulation")
-    assert "checks no API key" in capsys.readouterr().err
+    monkeypatch.setenv("SMRTI_TOWN_DB", str(tmp_path / "town.db"))
+    runner = CliRunner()
+    with patch("smrti_town.server.serve"), \
+            patch("smrti.decisions.student.serve.run_student_server"):
+        town = runner.invoke(cli.app, ["serve", "town", "--host", "0.0.0.0", "--no-browser", "--port", "18530"])
+        decisions = runner.invoke(
+            cli.app, ["serve", "decisions", "--host", "0.0.0.0", "--port", "18531", "--model", str(tmp_path)]
+        )
+    for result, server in ((town, "town simulation"), (decisions, "decision server")):
+        assert result.exit_code == 0, result.output
+        assert f"binding the {server} to 0.0.0.0" in result.output
+        assert "checks no API key" in result.output
+
     cli._warn_if_unauthenticated("127.0.0.1", "decision server")
     assert capsys.readouterr().err == ""
 

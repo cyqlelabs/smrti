@@ -29,24 +29,38 @@ from smrti.core.models import (
     SpaceSetResult,
     atom_from_row,
 )
+from smrti.core.provenance import ATOM_FORGOTTEN, forgotten_sql
 
 # ── Weights for the contextual similarity blend ──────────────────────
 W_EMBEDDING: float = 0.6
 W_ENTITY_TYPE: float = 0.2
 W_NEIGHBORHOOD: float = 0.2
 
+# What a signal the two atoms do not both carry contributes once either of
+# them carries context: the midpoint, neither agreement nor a clash. Handing
+# its weight to the embedding instead read "unknown" as "agrees", and two
+# atoms labelled "Java" scored a perfect 1.0 whenever one had no neighbours.
+NEUTRAL: float = 0.5
+
 # How many atoms of each space an operation considers: the most salient
 # ones, by attention. Every result reports the sample against the space's
 # size (``SpaceOverlap.sampled_a`` / ``size_a``), so a Jaccard over a
-# 500-atom head of a 20,000-atom space is read as what it is.
+# 500-atom head of a 20,000-atom space is read as what it is. Forgotten
+# atoms are neither sampled nor counted: a set operation renders the space,
+# and forgetting hides an atom from every rendering.
 SAMPLE_LIMIT = 500
+
+# Vectors fetched per query, under SQLite's oldest default limit of 999
+# bound parameters.
+_VECTOR_CHUNK = 500
 
 
 def _get_space_atoms(tenant_id: str, space: str, db) -> list[Atom]:
     """Return the most salient non-relation atoms in a space, up to SAMPLE_LIMIT."""
     rows = db.fetchall(
-        """SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'
-           ORDER BY (sti + lti) DESC LIMIT ?""",
+        f"""SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'
+              AND NOT {ATOM_FORGOTTEN}
+            ORDER BY (sti + lti) DESC LIMIT ?""",
         (tenant_id, space, SAMPLE_LIMIT),
     )
     return [atom_from_row(r) for r in rows]
@@ -54,7 +68,8 @@ def _get_space_atoms(tenant_id: str, space: str, db) -> list[Atom]:
 
 def _space_size(tenant_id: str, space: str, db) -> int:
     row = db.fetchone(
-        "SELECT COUNT(*) AS n FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'",
+        f"""SELECT COUNT(*) AS n FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'
+              AND NOT {ATOM_FORGOTTEN}""",
         (tenant_id, space),
     )
     return row["n"] if row else 0
@@ -68,17 +83,30 @@ def _unit_rows(vectors: list[list[float]]) -> np.ndarray:
     return matrix / norms
 
 
+def _get_embeddings(atom_ids: list[str], db) -> dict[str, list[float]]:
+    """The stored embeddings of *atom_ids*, by id; an atom with no vector is
+    left out. One query per chunk rather than one per atom: two full samples
+    were a thousand round trips before the first similarity was taken."""
+    by_rowid = {stable_rowid(atom_id): atom_id for atom_id in atom_ids}
+    rowids = list(by_rowid)
+    found: dict[str, list[float]] = {}
+    for start in range(0, len(rowids), _VECTOR_CHUNK):
+        chunk = rowids[start : start + _VECTOR_CHUNK]
+        rows = db.fetchall(
+            f"SELECT rowid, embedding FROM vec_atoms WHERE rowid IN ({','.join('?' * len(chunk))})",
+            tuple(chunk),
+        )
+        for row in rows:
+            blob = row["embedding"]
+            found[by_rowid[row["rowid"]]] = list(struct.unpack(f"{len(blob) // 4}f", blob))
+    # In sample order, so the similarity matrix is laid out the same way
+    # whatever order the index returned the rows in.
+    return {atom_id: found[atom_id] for atom_id in atom_ids if atom_id in found}
+
+
 def _get_embedding(atom_id: str, db) -> list[float] | None:
     """Fetch the stored embedding for an atom."""
-    row = db.fetchone(
-        "SELECT embedding FROM vec_atoms WHERE rowid = ?",
-        (stable_rowid(atom_id),),
-    )
-    if row is None:
-        return None
-    blob = row["embedding"]
-    n = len(blob) // 4
-    return list(struct.unpack(f"{n}f", blob))
+    return _get_embeddings([atom_id], db).get(atom_id)
 
 
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
@@ -91,11 +119,7 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
 
 
 def _entity_type_score(a: Atom, b: Atom) -> float | None:
-    """Return 1.0 if entity types match, 0.0 if they clash, None when unknown.
-
-    None means the signal is absent — its weight is redistributed to
-    embedding similarity by ``_contextual_similarity``.
-    """
+    """Return 1.0 if entity types match, 0.0 if they clash, None when unknown."""
     if a.entity_type is None or b.entity_type is None:
         return None
     return 1.0 if a.entity_type == b.entity_type else 0.0
@@ -104,14 +128,14 @@ def _entity_type_score(a: Atom, b: Atom) -> float | None:
 def _get_neighbor_labels(atom_id: str, tenant_id: str, space: str, db) -> list[str]:
     """Get labels of 1-hop neighbors (via relation edges) for context."""
     rows = db.fetchall(
-        """SELECT a.label FROM atoms a
+        f"""SELECT a.label FROM atoms a
            INNER JOIN atoms r ON (
                (r.source_id = ? AND r.target_id = a.id)
                OR (r.target_id = ? AND r.source_id = a.id)
            )
            WHERE r.type = 'relation' AND r.tenant_id = ? AND r.space = ?
              AND a.tenant_id = ? AND a.space = ?
-             AND a.type != 'relation'
+             AND a.type != 'relation' AND NOT {forgotten_sql('a')}
            LIMIT 20""",
         (atom_id, atom_id, tenant_id, space, tenant_id, space),
     )
@@ -133,20 +157,21 @@ def _neighbor_context_embedding(
     return vec
 
 
-def _neighborhood_similarity(
-    atom_a: Atom, atom_b: Atom, db, embed_engine, cache: dict
-) -> float | None:
-    """Compute similarity between atoms' graph neighborhoods.
-
-    Concatenates neighbor labels into a single string per atom and compares
-    their embeddings.  Returns None when either atom has no neighbors — the
-    signal is absent and its weight is redistributed to embedding similarity.
-    """
-    vec_a = _neighbor_context_embedding(atom_a, db, embed_engine, cache)
-    vec_b = _neighbor_context_embedding(atom_b, db, embed_engine, cache)
-    if vec_a is None or vec_b is None:
-        return None
-    return _cosine_similarity(vec_a, vec_b)
+def _prefetch_neighbor_contexts(atoms: list[Atom], db, embed_engine, cache: dict) -> None:
+    """Fill *cache* for *atoms* with one batched embedding call rather than
+    one encoder pass per atom that has neighbours."""
+    texts: dict[str, str] = {}
+    for atom in atoms:
+        if atom.id in cache:
+            continue
+        labels = _get_neighbor_labels(atom.id, atom.tenant_id, atom.space, db)
+        if labels:
+            texts[atom.id] = " ".join(labels)
+        else:
+            cache[atom.id] = None
+    if texts:
+        for atom_id, vec in zip(texts, embed_engine.embed_batch(list(texts.values()))):
+            cache[atom_id] = list(vec)
 
 
 def _contextual_similarity(
@@ -160,29 +185,36 @@ def _contextual_similarity(
     """Compute multi-signal contextual similarity between two atoms.
 
     Blends embedding similarity, entity-type compatibility, and neighborhood
-    similarity.  When a signal is absent (entity type unknown on either side,
-    no embed engine, or either neighborhood empty) its weight is redistributed
-    to embedding similarity, so two identical atoms always score 1.0.
+    similarity. When neither atom carries any context — no entity type, and
+    no neighbours on either side — the embedding is the only evidence there
+    is and decides alone, so two identical memories still score 1.0. Once
+    either carries context, a signal the two do not both carry counts as
+    ``NEUTRAL``: one "Java" linked to the JVM and another linked to an
+    island, both untyped, are not known to be the same thing, and handing
+    the type's weight to the embedding of a bare name — which is exactly
+    what a homonym fools — merged them. Without an embed engine the
+    neighbourhood is not measured at all, and its weight goes to the
+    embedding as before.
     """
-    w_emb = W_EMBEDDING
-    score = 0.0
+    vec_a = vec_b = None
+    if embed_engine is not None:
+        cache = {} if neighbor_cache is None else neighbor_cache
+        vec_a = _neighbor_context_embedding(atom_a, db, embed_engine, cache)
+        vec_b = _neighbor_context_embedding(atom_b, db, embed_engine, cache)
+    typed = atom_a.entity_type is not None or atom_b.entity_type is not None
+    linked = vec_a is not None or vec_b is not None
+    if not typed and not linked:
+        return max(0.0, min(1.0, emb_sim))
 
     et_score = _entity_type_score(atom_a, atom_b)
-    if et_score is None:
-        w_emb += W_ENTITY_TYPE
-    else:
-        score += W_ENTITY_TYPE * et_score
-
-    ns = None
-    if embed_engine is not None:
-        if neighbor_cache is None:
-            neighbor_cache = {}
-        ns = _neighborhood_similarity(atom_a, atom_b, db, embed_engine, neighbor_cache)
-    if ns is None:
+    w_emb = W_EMBEDDING
+    score = W_ENTITY_TYPE * (NEUTRAL if et_score is None else et_score)
+    if embed_engine is None:
         w_emb += W_NEIGHBORHOOD
+    elif vec_a is not None and vec_b is not None:
+        score += W_NEIGHBORHOOD * _cosine_similarity(vec_a, vec_b)
     else:
-        score += W_NEIGHBORHOOD * ns
-
+        score += W_NEIGHBORHOOD * NEUTRAL
     return max(0.0, min(1.0, w_emb * emb_sim + score))
 
 
@@ -205,18 +237,8 @@ def _match_atoms(
         matched_a_ids: IDs from atoms_a that were matched
         matched_b_ids: IDs from atoms_b that were matched
     """
-    # Pre-fetch embeddings
-    emb_a: dict[str, list[float]] = {}
-    for atom in atoms_a:
-        vec = _get_embedding(atom.id, db)
-        if vec is not None:
-            emb_a[atom.id] = vec
-
-    emb_b: dict[str, list[float]] = {}
-    for atom in atoms_b:
-        vec = _get_embedding(atom.id, db)
-        if vec is not None:
-            emb_b[atom.id] = vec
+    emb_a = _get_embeddings([atom.id for atom in atoms_a], db)
+    emb_b = _get_embeddings([atom.id for atom in atoms_b], db)
 
     pairs: list[AtomPair] = []
     matched_a: set[str] = set()
@@ -237,7 +259,14 @@ def _match_atoms(
     if emb_a and emb_b:
         ids_a, ids_b = list(emb_a), list(emb_b)
         sims = _unit_rows([emb_a[i] for i in ids_a]) @ _unit_rows([emb_b[i] for i in ids_b]).T
-        for i, j in zip(*np.nonzero(sims >= pre_filter)):
+        hits = list(zip(*np.nonzero(sims >= pre_filter)))
+        if embed_engine is not None and hits:
+            _prefetch_neighbor_contexts(
+                [atom_a_map[ids_a[i]] for i in sorted({i for i, _ in hits})]
+                + [atom_b_map[ids_b[j]] for j in sorted({j for _, j in hits})],
+                db, embed_engine, neighbor_cache,
+            )
+        for i, j in hits:
             aid, bid = ids_a[i], ids_b[j]
             ctx_sim = _contextual_similarity(
                 atom_a_map[aid], atom_b_map[bid], float(sims[i, j]), db, embed_engine,

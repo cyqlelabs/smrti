@@ -7,7 +7,7 @@ import os
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 
 from smrti import Smrti, __version__
 from smrti.core.db import Database, _registry, _registry_lock, _resolve_path, get_database
@@ -233,7 +233,12 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         # unbounded read of a large space held a worker for seconds and
         # shipped the whole graph to a browser that cannot draw it.
         limit = min(limit or _GRAPH_LIMIT_MAX, _GRAPH_LIMIT_MAX)
-        return await _off_loop(_reader(db).graph, tenant_id, space, type_list, limit, min_confidence)
+        reader = _reader(db)
+        # Encoded in the executor as well: returned as a dict, thousands of
+        # rows were serialized on the loop after the query had left it.
+        return await _off_loop(
+            lambda: JSONResponse(reader.graph(tenant_id, space, type_list, limit, min_confidence))
+        )
 
     @router.get("/status")
     async def status(request: Request, db: str | None = Query(None)):

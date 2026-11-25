@@ -308,3 +308,63 @@ def test_a_claim_naming_a_forgotten_atom_is_about_a_new_one(mem):
 
     edge = mem.db.fetchone("SELECT target_id FROM atoms WHERE relation = 'met'")
     assert edge["target_id"] != dave
+
+
+# ── aliases and pronouns ─────────────────────────────────────────────────────
+
+
+def test_a_pronoun_alias_an_older_build_stored_is_never_a_match_and_is_purged(mem):
+    """"she" stored as Bob's alias made Bob of every later "she"."""
+    bob = _concept(mem, "Bob", "person")
+    mem.db.execute(
+        "INSERT INTO aliases (alias, atom_id, tenant_id, space) VALUES ('she', ?, 't', 's')", (bob,),
+    )
+
+    assert _resolve(mem, "She", "person") != bob
+    assert mem.db.fetchall("SELECT alias FROM aliases") == []
+
+
+def test_extraction_stores_no_alias_but_resolves_its_claims_with_them(mem):
+    episode = mem.remember("Bob said he would come.")
+    entity_ids = extract._resolve_ner_entities(
+        [{"name": "Bob", "type": "person", "aliases": ["he", "Robert"]}], episode, mem,
+    )
+
+    assert entity_ids["he"] == entity_ids["Robert"] == entity_ids["Bob"]
+    assert mem.db.fetchall("SELECT alias FROM aliases") == []
+
+
+def test_aliases_in_the_model_s_output_are_validated(mem):
+    """A string was read one alias per letter; a number aborted the extraction."""
+    episode = mem.remember("Bob and Dana are here.")
+    entity_ids = extract._resolve_ner_entities(
+        [{"name": "Bob", "type": "person", "aliases": "Robert"},
+         {"name": "Carl", "type": "person", "aliases": [42]},
+         {"name": "Dana", "type": "person"}],
+        episode, mem,
+    )
+
+    assert entity_ids["Robert"] == entity_ids["Bob"]
+    assert "R" not in entity_ids
+    assert {"Carl", "Dana"} <= set(entity_ids)
+
+
+def test_a_pronoun_is_typed_from_the_tagger_in_context_not_a_word_list():
+    """The word list missed Dutch "Hij", which became a person, and took the
+    names "Mia" and "Ella" for pronouns, which dropped them."""
+    from smrti.extraction.ner import NERProvider
+    from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
+
+    span = lambda text, label, score: MagicMock(text=text, label=label, score=score)
+    provider = NERProvider()
+    provider._model = MagicMock()
+    provider._model.extract_entities.return_value = [
+        span("Hij", "person", 0.93), span("Hij", "pronoun", 0.41), span("Philips", "organization", 1.0),
+    ]
+    assert {e["name"]: e["type"] for e in provider.extract("Hij werkt bij Philips")} == {
+        "Hij": "pronoun", "Philips": "organization",
+    }
+
+    people = [{"name": "Mia", "type": "person", "aliases": []}, {"name": "Ella", "type": "person", "aliases": []}]
+    assert merge_pronoun_entities_in_batch(people) == people
+

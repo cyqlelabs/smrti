@@ -254,7 +254,7 @@ def test_serialized_works_across_sequential_loops():
     assert len(calls) == 2
 
 
-# ── Pronoun merge alias hygiene ──────────────────────────────────────────────
+# ── Person fixtures ───────────────────────────────────────────────────────────
 
 
 def _insert_person(mem, atom_id: str, label: str, space: str = "default") -> None:
@@ -262,34 +262,6 @@ def _insert_person(mem, atom_id: str, label: str, space: str = "default") -> Non
         "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
         (atom_id, "concept", label, "person", "test", space),
     )
-
-
-def test_merge_pronoun_does_not_persist_pronoun_alias(mem):
-    from smrti.extraction.pronouns import merge_pronoun_into_named
-
-    _insert_person(mem, "pron-1", "I")
-    _insert_person(mem, "named-1", "Elara")
-
-    merge_pronoun_into_named("pron-1", "named-1", mem.db, "test", "default")
-
-    assert mem.db.fetchone("SELECT id FROM atoms WHERE id = 'pron-1'", ()) is None
-    alias_row = mem.db.fetchone(
-        "SELECT atom_id FROM aliases WHERE alias = 'I' AND tenant_id = 'test'", ()
-    )
-    assert alias_row is None
-
-
-def test_merge_pronoun_delete_is_space_scoped(mem):
-    from smrti.extraction.pronouns import merge_pronoun_into_named
-
-    _insert_person(mem, "pron-other", "I", space="other")
-    _insert_person(mem, "named-2", "Elara")
-
-    merge_pronoun_into_named("pron-other", "named-2", mem.db, "test", "default")
-
-    # Pronoun atom lives in a different space — must survive the merge
-    row = mem.db.fetchone("SELECT id FROM atoms WHERE id = 'pron-other'", ())
-    assert row is not None
 
 
 # ── Unicode-aware label matching (u_lower) ───────────────────────────────────

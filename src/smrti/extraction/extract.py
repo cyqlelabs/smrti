@@ -557,60 +557,56 @@ def _resolve_ner_entities(
     """Resolve a list of {"name", "type"} dicts via the entity cascade.
 
     Returns a mapping of name → atom_id. Also creates mentions edges.
-    Handles pronoun entities: batch-merges where unambiguous, skips type="pronoun",
-    and retroactively merges existing pronoun atoms for resolved named persons.
-    ``context`` is the text the mentions came from; read from the episode
-    when not given.
+    Pronoun entities are folded into the one person the text names, or
+    dropped (see ``merge_pronoun_entities_in_batch``). ``context`` is the
+    text the mentions came from; read from the episode when not given.
     """
+    from .pronouns import merge_pronoun_entities_in_batch
+
     resolver = _resolver(mem, source, episode_id, context)
     entity_ids: dict[str, str] = {}
-
-    # Batch-merge pronoun entities before resolution
-    try:
-        from .ner import get_ner
-        ner = get_ner()
-        from .pronouns import merge_pronoun_entities_in_batch
-        entities = merge_pronoun_entities_in_batch(
-            entities, ner,
-            db=mem.db, tenant_id=mem.tenant_id, spaces=[mem.write_space],
-        )
-    except Exception:
-        ner = None
+    entities = merge_pronoun_entities_in_batch([
+        {**ent, "aliases": _entity_aliases(ent)} for ent in entities if isinstance(ent, dict)
+    ])
 
     for ent in entities:
         name = (ent.get("name") or "").strip()
         etype = ent.get("type", "concept")
-        if not name:
-            continue
-        # Skip pronoun-typed entities that survived batch merge (ambiguous case)
-        if etype == "pronoun":
+        # A pronoun is never an atom of its own, whatever reaches this loop.
+        if not name or etype == "pronoun":
             continue
         if etype not in _VALID_TYPES:
             etype = "concept"
         atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
         _register_entity(entity_ids, name, atom_id)
-        for alias in ent.get("aliases", []):
-            if alias and alias.lower() != name.lower():
-                resolver.aliases.add(atom_id, alias, mem.tenant_id, mem.write_space)
+        # The other names this text uses for the entity, the pronouns folded
+        # into it and the model's aliases, resolve the claims read from the
+        # same text and are never stored. A stored alias is an identity for
+        # the whole space, and which of them is a pronoun or a description
+        # only this speaker can use ("my boss") cannot be told without a
+        # word list: "she", once stored as Bob's, made Bob of every "she".
+        for alias in ent["aliases"]:
+            if alias.lower() != name.lower():
                 entity_ids.setdefault(alias, atom_id)
                 entity_ids.setdefault(alias.lower(), atom_id)
         mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
 
-    # Retroactive merge: for each resolved named person, merge co-mentioned pronoun atoms
-    if ner is not None:
-        from .pronouns import find_and_merge_pronoun_atoms
-        for ent in entities:
-            etype = ent.get("type", "concept")
-            name = (ent.get("name") or "").strip()
-            if etype != "person" or not name:
-                continue
-            atom_id = entity_ids.get(name)
-            if atom_id and not ner.classify_pronoun(name):
-                find_and_merge_pronoun_atoms(
-                    atom_id, episode_id, mem.db, ner, mem.tenant_id, mem.write_space,
-                )
-
     return entity_ids
+
+
+def _entity_aliases(ent: dict) -> list[str]:
+    """The other names an extracted entity carries, as a list of strings.
+
+    The model's output is not held to the shape the prompt asks for: a bare
+    string was read one character at a time, one alias per letter, and a
+    number aborted the whole extraction.
+    """
+    aliases = ent.get("aliases")
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    if not isinstance(aliases, list):
+        return []
+    return [alias.strip() for alias in aliases if isinstance(alias, str) and alias.strip()]
 
 
 # Lower an atom's tone to a claim's, in both pairs. The claim is the model's

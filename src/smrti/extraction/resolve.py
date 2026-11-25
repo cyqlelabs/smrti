@@ -108,6 +108,8 @@ class EntityResolver:
 
         from smrti.extraction.aliases import AliasManager
         self.aliases = AliasManager(db)
+        # Write spaces whose stored pronoun aliases this resolver has purged.
+        self._purged: set[tuple[str, str]] = set()
 
     def resolve(
         self,
@@ -164,7 +166,13 @@ class EntityResolver:
                 self._boost_sti(row["id"], tenant_id, write_space)
                 return row["id"]
 
-        # Tier 1: alias table across read_spaces
+        # Tier 1: alias table across read_spaces. Pronouns older builds stored
+        # there are never a match, and are removed from the write space the
+        # first time this resolver reads it; spaces it only reads are left as
+        # they are.
+        if (tenant_id, write_space) not in self._purged:
+            self.aliases.purge_pronouns(tenant_id, write_space)
+            self._purged.add((tenant_id, write_space))
         atom_id = self.aliases.lookup(name, tenant_id, read_spaces)
         if atom_id and not self._forgotten(atom_id):
             self._boost_sti(atom_id, tenant_id, write_space)

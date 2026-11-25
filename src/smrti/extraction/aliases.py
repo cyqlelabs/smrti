@@ -1,6 +1,8 @@
 """Alias table management for fast entity resolution."""
 from __future__ import annotations
 
+from smrti.extraction.ner import _PRONOUNS
+
 
 class AliasManager:
     def __init__(self, db) -> None:
@@ -10,13 +12,33 @@ class AliasManager:
         """Returns atom_id if alias is known in any of the given spaces, else None.
 
         Uses u_lower for Unicode-aware case folding (SQLite LOWER is ASCII-only).
+        A pronoun is never an alias, whatever the table says: older builds
+        stored "she" as the alias of whoever it first stood for, and every
+        later "she" became that person.
         """
+        if alias.strip().casefold() in _PRONOUNS:
+            return None
         ph = ",".join("?" * len(spaces))
         row = self.db.fetchone(
             f"SELECT atom_id FROM aliases WHERE u_lower(alias) = u_lower(?) AND tenant_id = ? AND space IN ({ph})",
             (alias, tenant_id, *spaces),
         )
         return row["atom_id"] if row else None
+
+    def purge_pronouns(self, tenant_id: str, space: str) -> None:
+        """Delete the pronoun aliases older builds stored in *space*.
+
+        Idempotent, and a read when there is nothing to delete, so it can run
+        whenever a resolver starts rather than once: a process on older code
+        sharing the file may still be writing them.
+        """
+        listed = sorted(_PRONOUNS)
+        where = (
+            f"tenant_id = ? AND space = ? AND u_lower(alias) IN ({','.join('?' * len(listed))})"
+        )
+        params = (tenant_id, space, *listed)
+        if self.db.fetchone(f"SELECT 1 FROM aliases WHERE {where} LIMIT 1", params):
+            self.db.execute(f"DELETE FROM aliases WHERE {where}", params)
 
     def add(self, atom_id: str, alias: str, tenant_id: str, space: str) -> None:
         """Register a new alias for an atom in the given space."""

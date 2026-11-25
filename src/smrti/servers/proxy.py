@@ -441,23 +441,31 @@ async def _inject_context(
     mem = get_mem(tenant_id, write_space)
     enriched_contents = [_enrich_content(r, mem) for r in memories]
     formatted = [_format_memory(r, c) for r, c in zip(memories, enriched_contents)]
-
     memory_dicts = [
-        {
-            "id": r.atom.id,
-            "label": r.atom.label,
-            "content": c,
-            "severity": sev,
-            "source": r.atom.metadata.get("source") or "user",
-            "confidence": round(r.atom.truth.confidence, 3),
-            "probability": round(r.atom.truth.probability, 3),
-            "valence": round(r.atom.valence.valence, 3),
-            "salience": round(r.salience, 3),
-            "evidence": None if r.evidence is None else round(r.evidence, 3),
-        }
-        for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
+        _memory_record(r, c, sev) for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
     ]
+    injection = _render_injection(formatted)
+    return {**body, "messages": _with_system(messages, injection)}, injection, memory_dicts
 
+
+def _memory_record(r: RecallResult, content: str, severity: str) -> dict:
+    """What the call log keeps of one injected memory."""
+    return {
+        "id": r.atom.id,
+        "label": r.atom.label,
+        "content": content,
+        "severity": severity,
+        "source": r.atom.metadata.get("source") or "user",
+        "confidence": round(r.atom.truth.confidence, 3),
+        "probability": round(r.atom.truth.probability, 3),
+        "valence": round(r.atom.valence.valence, 3),
+        "salience": round(r.salience, 3),
+        "evidence": None if r.evidence is None else round(r.evidence, 3),
+    }
+
+
+def _render_injection(formatted: list[tuple[str, str]]) -> str:
+    """The memory block for the system prompt: constraints first, then context."""
     warnings = [(line, sev) for line, sev in formatted if sev in _SEVERITY_RULES]
     context_lines = [line for line, sev in formatted if sev == "context"]
     warning_lines, context_lines = _within_budget(
@@ -476,26 +484,27 @@ async def _inject_context(
             "Background context from past interactions (do not mention these directly):\n"
             + "\n".join(context_lines)
         )
-    injection = "\n\n".join(parts)
+    return "\n\n".join(parts)
 
+
+def _with_system(messages: list[dict], injection: str) -> list[dict]:
+    """*messages* with *injection* appended to the system prompt, or as one."""
     messages = list(messages)
     system_idx = next((i for i, m in enumerate(messages) if m.get("role") == "system"), None)
-
-    if system_idx is not None:
-        existing = messages[system_idx].get("content")
-        if isinstance(existing, list):
-            # Parts stay parts: formatting the list into a string sent the
-            # client's system prompt upstream as "[{'type': 'text', ...}]".
-            content = [*existing, {"type": "text", "text": injection}]
-        elif existing:
-            content = f"{existing}\n\n{injection}"
-        else:
-            content = injection
-        messages[system_idx] = {**messages[system_idx], "content": content}
-    else:
+    if system_idx is None:
         messages.insert(0, {"role": "system", "content": injection})
-
-    return {**body, "messages": messages}, injection, memory_dicts
+        return messages
+    existing = messages[system_idx].get("content")
+    if isinstance(existing, list):
+        # Parts stay parts: formatting the list into a string sent the
+        # client's system prompt upstream as "[{'type': 'text', ...}]".
+        content = [*existing, {"type": "text", "text": injection}]
+    elif existing:
+        content = f"{existing}\n\n{injection}"
+    else:
+        content = injection
+    messages[system_idx] = {**messages[system_idx], "content": content}
+    return messages
 
 
 def _within_budget(
@@ -844,6 +853,15 @@ async def _open_stream(
     )
 
 
+def _read_chunk(chunk: dict, accumulated: list[str]) -> bool:
+    """Add choice 0's text in a stream chunk to *accumulated*; True once it finished."""
+    choice = _first_choice(chunk)
+    piece = (choice.get("delta") or {}).get("content")
+    if isinstance(piece, str) and piece:
+        accumulated.append(piece)
+    return bool(choice.get("finish_reason"))
+
+
 async def _stream_proxy(
     upstream,
     close,
@@ -886,10 +904,7 @@ async def _stream_proxy(
                 yield b"\n"
                 continue
 
-            if line.startswith(":"):
-                yield f"{line}\n\n".encode()
-                continue
-
+            # SSE comments (":"), event names and any other non-data line.
             if not line.startswith("data: "):
                 yield f"{line}\n\n".encode()
                 continue
@@ -907,12 +922,7 @@ async def _stream_proxy(
                 yield f"data: {payload}\n\n".encode()
                 continue
 
-            choice = _first_choice(chunk)
-            piece = (choice.get("delta") or {}).get("content")
-            if isinstance(piece, str) and piece:
-                accumulated.append(piece)
-            finished = finished or bool(choice.get("finish_reason"))
-
+            finished = _read_chunk(chunk, accumulated) or finished
             yield f"data: {json.dumps(chunk)}\n\n".encode()
         if finished:
             await _complete()

@@ -64,6 +64,20 @@ def _error(status: int, message: str, kind: str, code: str) -> JSONResponse:
     )
 
 
+def _presented_tenants(request: Request):
+    """The tenants of the first known key the request presents, or _NO_KEY."""
+    presented = (
+        request.headers.get("x-api-key") or "",
+        _bearer(request),
+        request.cookies.get(KEY_COOKIE, ""),
+    )
+    for supplied in presented:
+        tenants = _tenants_of(supplied)
+        if tenants is not _NO_KEY:
+            return tenants
+    return _NO_KEY
+
+
 def _named_tenants(request: Request) -> list[str]:
     """Every tenant the request names: the proxy's header and the viz query."""
     named = (request.headers.get("x-smrti-tenant-id"), request.query_params.get("tenant_id"))
@@ -88,10 +102,11 @@ async def api_key_middleware(request: Request, call_next):
     """Authenticate every request and bind it to the tenants its key may use.
 
     With neither SMRTI_API_KEY nor SMRTI_API_KEYS set, every request passes
-    unchanged (local use). Otherwise the key comes from ``X-Api-Key`` or
+    unchanged (local use). Otherwise the key comes from ``X-Api-Key``,
     ``Authorization: Bearer`` — so proxy clients can keep their upstream
     credentials in Authorization and supply the smrti key via X-Api-Key —
-    and one this server does not know is a 401.
+    or the visualizer's cookie (see _viz_login), and one this server does
+    not know is a 401.
 
     A key from SMRTI_API_KEYS may act only on its own tenants. The check is
     made here, once, for every route: a request naming another tenant, an
@@ -104,16 +119,8 @@ async def api_key_middleware(request: Request, call_next):
         return await call_next(request)
     if request.url.path == "/viz" and "key" in request.query_params:
         return _viz_login(request)
-    presented = (
-        request.headers.get("x-api-key") or "",
-        _bearer(request),
-        request.cookies.get(KEY_COOKIE, ""),
-    )
-    for supplied in presented:
-        tenants = _tenants_of(supplied)
-        if tenants is not _NO_KEY:
-            break
-    else:
+    tenants = _presented_tenants(request)
+    if tenants is _NO_KEY:
         return _error(401, "Invalid or missing API key", "authentication_error", "invalid_api_key")
     if tenants is not None:
         refusal = _refusal(request, tenants)

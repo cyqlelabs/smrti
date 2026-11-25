@@ -122,7 +122,12 @@ def _tenant_mem(tenant: str, space: str) -> Smrti:
 
 
 def _mem_for(request: Request, space: Optional[str] = None) -> Smrti:
-    """The instance a request acts on: its space, in the tenant its key allows."""
+    """The instance a request acts on: its space, in the tenant its key allows.
+
+    REST serves the configured tenant, as it always has. A key bound to
+    tenants (SMRTI_API_KEYS) acts on its first instead, or on another of its
+    own named with X-Smrti-Tenant-Id, which the auth middleware has checked.
+    """
     tenant = tenant_for(request, None, cfg.TENANT_ID)
     return get_mem(space) if tenant == cfg.TENANT_ID else get_mem(space, tenant)
 

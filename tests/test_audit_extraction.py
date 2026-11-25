@@ -161,3 +161,35 @@ def test_a_failed_extraction_call_is_logged_as_a_warning(caplog):
         result = asyncio.run(extract.extract_knowledge("Alice met Bob", None, "http://llm", "", "m"))
     assert result is None
     assert any("HTTP 503" in record.getMessage() for record in caplog.records)
+
+
+# ── tone ─────────────────────────────────────────────────────────────────────
+
+
+def _concept(mem, label, entity_type="concept"):
+    from smrti.core.models import Atom, AtomType, EntityType
+
+    return mem.atomspace.add_atom(Atom(
+        type=AtomType.CONCEPT, label=label, entity_type=EntityType(entity_type),
+        tenant_id=mem.tenant_id, space=mem.write_space,
+    ))
+
+
+def test_a_claim_never_lowers_a_tone_the_caller_stated(mem):
+    """A stated −0.1 note kept its VALENCE_STATED mark when a −0.9 claim
+    lowered its tone, and was injected as "YOU MUST NOT: …"."""
+    from smrti.core.models import RecallResult
+    from smrti.retrieval.classify import classify_memory
+
+    ids = {"Alice": _concept(mem, "Alice", "person"), "Rome": _concept(mem, "Rome", "location")}
+    episode = mem.remember("Enforce the security policy.", valence=-0.1)
+    extract._link_claims(
+        [{"subject": "Alice", "predicate": "lives_in", "object": "Rome", "valence": -0.9}],
+        ids, mem, episode_id=episode,
+    )
+
+    atom = mem.atomspace.get_atom(episode, "t", "s")
+    assert atom.valence.own == pytest.approx(-0.1)
+    assert classify_memory(RecallResult(atom=atom, salience=1, similarity=1)) == "context"
+    # An estimated tone is still lowered, as before.
+    assert mem.atomspace.get_atom(ids["Rome"], "t", "s").valence.own == pytest.approx(-0.9)

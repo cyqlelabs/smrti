@@ -21,6 +21,7 @@ from smrti.core.provenance import (
     SUPERSEDED_BY,
     claim_current_sql,
     forgotten_sql,
+    valence_stated_sql,
 )
 from smrti.decisions import DecisionEngine
 from smrti.decisions.extraction import route_extraction, verify_supersession
@@ -611,13 +612,15 @@ def _resolve_ner_entities(
 # than the neutral default an extracted concept is born with, so it reaches
 # the intrinsic pair that every judgement reads and not only the drifting one
 # propagation moves. Only ever downward: a claim can make a memory graver,
-# never lighter.
-_LOWER_TONE_SQL = """UPDATE atoms SET
+# never lighter. Never on a tone the caller stated: the atom keeps its
+# VALENCE_STATED mark, so the model's reading would pass for the caller's,
+# and a stated −0.1 note lowered to −0.9 became a critical warning.
+_LOWER_TONE_SQL = f"""UPDATE atoms SET
         valence = MIN(valence, ?),
         intensity = MAX(intensity, ?),
         intrinsic_valence = MIN(COALESCE(intrinsic_valence, valence), ?),
         intrinsic_intensity = MAX(COALESCE(intrinsic_intensity, intensity), ?)
-    WHERE id = ?"""
+    WHERE id = ? AND NOT {valence_stated_sql()}"""
 
 def _lower_tone(mem: "Smrti", atom_id: str, valence: float) -> None:
     intensity = min(1.0, abs(valence))

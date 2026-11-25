@@ -595,9 +595,9 @@ def _resolve_ner_entities(
     """Resolve a list of {"name", "type"} dicts via the entity cascade.
 
     Returns a mapping of name → atom_id. Also creates mentions edges.
-    Pronoun entities are folded into the one person the text names, or
-    dropped (see ``merge_pronoun_entities_in_batch``). ``context`` is the
-    text the mentions came from; read from the episode when not given.
+    Pronoun entities are dropped (see ``merge_pronoun_entities_in_batch``).
+    ``context`` is the text the mentions came from; read from the episode
+    when not given.
     """
     from .pronouns import merge_pronoun_entities_in_batch
 
@@ -617,9 +617,9 @@ def _resolve_ner_entities(
             etype = "concept"
         atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
         _register_entity(entity_ids, name, atom_id)
-        # The other names this text uses for the entity, the pronouns folded
-        # into it and the model's aliases, resolve the claims read from the
-        # same text and are never stored. A stored alias is an identity for
+        # The other names this text uses for the entity, the model's
+        # aliases, resolve the claims read from the same text and are never
+        # stored. A stored alias is an identity for
         # the whole space, and which of them is a pronoun or a description
         # only this speaker can use ("my boss") cannot be told without a
         # word list: "she", once stored as Bob's, made Bob of every "she".
@@ -1322,8 +1322,8 @@ async def extract_and_link_hybrid(
     if mode == "local":
         return
 
-    # Speaker injection: for user messages, if no person atom resolved (pronoun dropped
-    # because "I" alias wasn't in the alias table), inject the sole known person
+    # Speaker injection: for user messages, if no person atom resolved (a
+    # pronoun is never resolved to one), inject the sole known person
     # so claims — especially goals, preferences, and actions — can be attributed to them.
     # Attribution only happens when exactly one person atom exists in the write
     # space; with several candidates the speaker is ambiguous and we skip it.

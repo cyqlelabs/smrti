@@ -108,3 +108,26 @@ def test_a_file_with_older_vectors_is_re_embedded_a_batch_per_epoch(db_path, mon
                for atom_id, text in zip(ids, texts))
     assert mem.db.meta_get(reembed_key(T, S)) is None
     clear_registry()
+
+
+# ── pronouns ────────────────────────────────────────────────────────────────
+
+def test_the_speaker_is_not_folded_into_the_only_person_a_text_names(mem):
+    """Every pronoun was folded into the one person a text named, first person
+    included, so in "I met Bob yesterday. I live in Paris." the claim about
+    "I" resolved to Bob."""
+    text = "I met Bob yesterday. I live in Paris."
+    episode = mem.remember(text)
+    entities = [
+        {"name": "I", "type": "pronoun"},
+        {"name": "Bob", "type": "person"},
+        {"name": "Paris", "type": "location"},
+    ]
+
+    entity_ids = _resolve_ner_entities(entities, episode, mem, "user", text)
+
+    assert "Bob" in entity_ids and "Paris" in entity_ids
+    assert "I" not in entity_ids and "i" not in entity_ids
+    assert all(not ent.get("aliases") for ent in merge_pronoun_entities_in_batch(
+        [{**ent, "aliases": []} for ent in entities]
+    ))

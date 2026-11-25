@@ -141,3 +141,39 @@ def test_a_lexical_query_term_finds_the_word_it_names(table_mem, stored, query):
     _add(table_mem, "an unrelated note about the weather", 0.1)
     hits = _lexical_entry_points(query, "t", ["s"], table_mem.db, 10, 0.0)
     assert hits == [atom_id]
+
+
+# ── selection: the judge's order and the belief reserve ──────────────────────
+
+def _ranked(label: str, salience: float, similarity: float, atom_type=AtomType.EPISODE, day: int = 1):
+    from smrti.core.models import RecallResult
+
+    atom = Atom(type=atom_type, label=label, content=label,
+                truth=TruthValue(probability=0.8, confidence=0.5),
+                created_at=f"2026-08-{day:02d} 10:00:00")
+    return RecallResult(atom=atom, salience=salience, similarity=similarity)
+
+
+def test_selection_keeps_the_judges_order_when_candidates_exceed_top_k():
+    """Selection re-sorted its survivors by raw salience, so a reranker's
+    order survived only when there were no more candidates than slots."""
+    from smrti.retrieval.fan_out import select
+
+    ranked = [_ranked(f"distinct memory {n} about topic {n}", 1.0 - n / 10, 0.6, day=n + 1)
+              for n in range(8)]
+    kept = select("q", ranked, top_k=5, min_confidence=0.0,
+                  judge=lambda _q, results: list(reversed(results)))
+    assert [r.atom.label for r in kept] == [r.atom.label for r in reversed(ranked)][:5]
+
+
+def test_a_belief_with_no_bearing_on_the_question_claims_no_reserved_slot():
+    """Beliefs at similarity 0.05 took two of five slots from episodes at 0.70."""
+    from smrti.retrieval.diversify import diversify
+
+    episodes = [_ranked(f"relevant episode {n} about topic {n}", 0.5 - n / 100, 0.7, day=n + 1)
+                for n in range(6)]
+    stray = [_ranked(f"unrelated fact {n}", 0.03, 0.05, AtomType.BELIEF) for n in range(2)]
+    assert not [r for r in diversify(episodes + stray, top_k=5) if r.atom.type == AtomType.BELIEF]
+
+    terse = _ranked("a terse fact on the topic", 0.08, 0.25, AtomType.BELIEF)
+    assert terse in diversify(episodes + [terse], top_k=5)

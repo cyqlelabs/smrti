@@ -54,6 +54,17 @@ def _repeat_allowance(top_k: int) -> int:
 # thing a wall of episodes buries.
 _BELIEF_RESERVE = 2
 
+# How relevant a belief must be, as a share of the best candidate's
+# similarity, to claim a reserved slot. A fact that is not about the question
+# is not buried by the episodes that are; without a line, beliefs at 0.05
+# took two of five slots from episodes at 0.70. The line is relative because
+# a terse fact scores a fraction of what a chatty episode on the same topic
+# does — "Roxana es la pareja de Nicolás" sits at 0.19 against "qué sabes
+# sobre mi familia" while a family-dinner episode sits at 0.48 — so a fixed
+# cosine high enough to mean anything would cut the very facts the reserve
+# is for.
+_RESERVE_RELEVANCE = 1 / 3
+
 
 def _cluster_key(result: RecallResult) -> str:
     """The time bucket an atom was written in.
@@ -78,20 +89,23 @@ def diversify(
 ) -> list[RecallResult]:
     """Return at most *top_k* results, varied across moments and types.
 
-    *results* must already be sorted by descending salience; the returned list
-    keeps that order. The cap only ever changes which candidates make the cut,
-    never how the survivors rank against each other.
+    *results* arrive in the order selection should cut them — descending
+    salience, or a judge's order — and the returned list keeps that order.
+    The cap only ever changes which candidates make the cut, never how the
+    survivors rank against each other.
     """
     if top_k <= 0:
         return []
     if len(results) <= top_k:
         return list(results)
 
+    relevant = _RESERVE_RELEVANCE * max(r.similarity for r in results)
     beliefs = [
         r
         for r in results
         if r.atom.type == AtomType.BELIEF
         and r.atom.truth.confidence >= min_confidence
+        and r.similarity >= relevant
     ]
     # Reserving half the response for beliefs would be its own distortion, so
     # the floor is bounded by the answer's size as well as by what exists.
@@ -134,5 +148,9 @@ def diversify(
             break
         selected.append(result)
 
-    selected.sort(key=lambda r: r.salience, reverse=True)
+    # Back into the order the results arrived in. Re-sorting on salience
+    # undid a judge's order whenever there were more candidates than slots,
+    # which is every recall the reranker can change.
+    position = {r.atom.id: i for i, r in enumerate(results)}
+    selected.sort(key=lambda r: position[r.atom.id])
     return selected[:top_k]

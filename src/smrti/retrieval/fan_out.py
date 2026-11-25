@@ -360,7 +360,8 @@ def retrieve(
          and agent-authored atoms are discounted by source trust
       5. Hand the ranked candidates to ``judge`` when one is given (the
          evidence reranker), cap near-duplicate episodes and reserve slots
-         for beliefs, then return top_k sorted by descending score
+         for relevant beliefs, then return top_k in the judge's order
+         (descending score without one)
       6. Boost the STI of the returned results only, in the write space
 
     ``min_confidence`` is the surfacing floor. When the caller passes none,

@@ -3,7 +3,7 @@
 The model is Laya; the runtime is EdgeJev, which serves the same checkpoint
 as an int8 ONNX graph through onnxruntime. Nothing about the decisions
 changes — same three primitives, same calibration, same thresholds — but the
-weights are 343 MB instead of 1290 MB, resident size is about 560 MB instead
+weights are 343 MB instead of 1290 MB, resident size peaks near 750 MB instead
 of 2.9 GB, and torch is gone from the dependency tree entirely. On the boxes
 Smrti is meant to share with an agent, that is the difference between a
 decision engine and a machine that swaps.

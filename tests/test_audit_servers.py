@@ -837,3 +837,17 @@ def test_a_warning_reaches_the_prompt_when_recall_finds_nothing():
             patch.object(proxy, "get_mem", return_value=mem):
         _, injection, _ = asyncio.run(proxy._inject_context(body, "t", "s", ["s"]))
     assert "Constraint: Never run the migration twice" in injection
+
+
+def test_forget_takes_cascade_over_mcp_and_rest(tmp_path):
+    """forget(cascade=True) existed only in Python, so an agent could not take
+    the entities and claims extracted from a memory it was told to forget."""
+    from smrti.servers.mcp import handle_tool
+
+    mem = Smrti(db_path=str(tmp_path / "f.db"), tenant_id="t", write_space="s")
+    episode = mem.remember("The prod DB key is stored in vault path secret/prod", valence=0.0)
+    key = mem.remember("prod DB key", type="concept", valence=0.0)
+    mem.atomspace.link_atoms(episode, key, "mentions", "t", "s")
+    result = handle_tool(mem, "smrti_forget", {"atom_ids": [episode], "cascade": True})
+    assert "prod DB key" in result["softened"]
+    mem.close()

@@ -194,10 +194,11 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     elif name == "smrti_forget":
         atom_ids = args.get("atom_ids")
         query = args.get("query")
+        cascade = args.get("cascade") is True
         if atom_ids:
-            forgotten = mem.forget(atom_ids=list(atom_ids))
+            forgotten = mem.forget(atom_ids=list(atom_ids), cascade=cascade)
         elif query and query.strip():
-            forgotten = mem.forget(query=query, top_k=5)
+            forgotten = mem.forget(query=query, top_k=5, cascade=cascade)
         else:
             return {"error": "smrti_forget needs a non-empty query or atom_ids"}
         result = {"status": "ok", "softened": forgotten}

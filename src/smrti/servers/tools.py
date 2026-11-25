@@ -69,6 +69,10 @@ Use type=belief with an evidence string to assert a probabilistic fact (starts w
                     "items": {"type": "string"},
                     "description": "Exact memory ids to forget, instead of a query",
                 },
+                "cascade": {
+                    "type": "boolean",
+                    "description": "Also forget the entities and claims extracted only from the forgotten memories (default false)",
+                },
                 "reason": {"type": "string"},
             },
         },

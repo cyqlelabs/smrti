@@ -52,8 +52,9 @@ MAX_BODY_BYTES: int = int(os.environ.get("SMRTI_MAX_BODY_BYTES", str(8 * 1024 * 
 
 # Extra SQLite paths the visualizer's ?db= param may open — os.pathsep-separated.
 # Empty by default, so the only browsable DB is the one the server was started
-# with; the endpoints are unauthenticated unless SMRTI_API_KEY is set, so an
-# ungated ?db= would let a GET open (or create) any file as a SQLite database.
+# with; the endpoints are unauthenticated unless SMRTI_API_KEY or SMRTI_API_KEYS
+# is set (and a key bound to tenants may not open one at all), so an ungated
+# ?db= would let a GET open (or create) any file as a SQLite database.
 _viz_dbs_raw: str = os.environ.get("SMRTI_VIZ_DBS", "")
 VIZ_DBS: list[str] = [p.strip() for p in _viz_dbs_raw.split(os.pathsep) if p.strip()]
 

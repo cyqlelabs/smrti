@@ -2,7 +2,7 @@
 
 Factor runs the same Laya checkpoint Smrti decides with, as an EdgeJev
 server on loopback, and a machine running both was loading the weights
-twice: 560 MB resident each, on boxes where the second copy is the
+twice: about 750 MB resident each, on boxes where the second copy is the
 difference between an engine that answers and one that swaps. The weights
 were already shared on disk (see :mod:`smrti.decisions.model`); this shares
 the process. ``SMRTI_DECISIONS_URL`` names the server and Smrti loads

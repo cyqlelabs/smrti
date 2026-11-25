@@ -29,7 +29,7 @@ deadline and the cooldown after it silenced every other task for a minute.
 Worse than slow, it did not rank — past the window the candidate asked
 about was not in the state at all, and the answers for all twenty sat
 between 0.70 and 0.94. Alone with the question a candidate is ~200 tokens
-and 130 ms, and the same model tells 0.28 from 0.82. Asking the four
+and 230–330 ms, and the same model tells 0.28 from 0.82. Asking the four
 questions in one call is out for the reason ``laya.MAX_QUESTIONS_PER_CALL``
 gives: measured, it is slower than four calls and moves the answers by up
 to 0.6. So the shortlist is walked in salience order, one candidate and

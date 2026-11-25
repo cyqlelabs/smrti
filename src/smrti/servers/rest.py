@@ -253,6 +253,8 @@ class ForgetRequest(BaseModel):
     # memories a caller recalled and inspected. Ids win when both are given.
     query: Optional[str] = None
     atom_ids: Optional[list[AtomId]] = Field(default=None, min_length=1, max_length=64)
+    # Also forget what extraction derived only from the forgotten memories.
+    cascade: bool = False
     reason: Optional[str] = None
     space: Optional[SpaceName] = None
 

@@ -3,12 +3,23 @@ the extraction endpoint's credentials, tone writes, supersession and entity
 resolution."""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
+from unittest.mock import AsyncMock, MagicMock, patch
 
-from smrti.extraction import temporal
+import httpx
+import pytest
+
+from smrti import Smrti
+from smrti.extraction import extract, temporal
 from smrti.extraction.temporal import annotate, resolve_spans
 
 BASE = datetime(2026, 11, 25, 15, 0, 0)
+
+
+@pytest.fixture
+def mem(tmp_path):
+    return Smrti(db_path=str(tmp_path / "memory.db"), tenant_id="t", write_space="s")
 
 
 class SpanNER:
@@ -77,3 +88,66 @@ def test_a_numeric_date_is_resolved_only_when_its_numbers_settle_the_order():
     assert resolve_spans(
         "Born on 25/03/1990", BASE, SpanNER([("25/03/1990", "date")])
     ) == [("25/03/1990", "1990-03-25")]
+
+
+# ── the extraction endpoint ──────────────────────────────────────────────────
+
+
+def _chat_request(monkeypatch, upstream, auth, server_key="", extract_key=""):
+    """The (url, Authorization) one extraction call sends."""
+    from smrti.servers import config as cfg
+
+    monkeypatch.setattr(cfg, "API_KEY", server_key)
+    monkeypatch.setattr(extract, "_EXTRACT_API_KEY", extract_key)
+    seen = []
+
+    async def endpoint(request):
+        seen.append((str(request.url), request.headers.get("authorization")))
+        return httpx.Response(200, json={"choices": [{"message": {"content": "{}"}}]})
+
+    async def call():
+        async with httpx.AsyncClient(transport=httpx.MockTransport(endpoint)) as client:
+            await extract._post_chat(client, upstream, auth, {"messages": []})
+
+    asyncio.run(call())
+    return seen[0]
+
+
+def test_the_smrti_server_key_is_never_forwarded_to_the_extraction_endpoint(monkeypatch):
+    """A client that authenticated to Smrti with its key had that key posted
+    to whatever endpoint extraction pointed at."""
+    _, sent = _chat_request(monkeypatch, "http://llm", "Bearer server-key", server_key="server-key")
+    assert sent is None
+    _, sent = _chat_request(monkeypatch, "http://llm", "Bearer upstream-key", server_key="server-key")
+    assert sent == "Bearer upstream-key"
+
+
+def test_an_extraction_api_key_is_the_endpoint_s_credential(monkeypatch):
+    _, sent = _chat_request(
+        monkeypatch, "http://llm", "Bearer upstream-key", server_key="server-key", extract_key="ek",
+    )
+    assert sent == "Bearer ek"
+
+
+def test_an_upstream_that_ends_in_v1_is_not_given_a_second_one(monkeypatch):
+    """The documented Docker example names .../v1, and the call went to /v1/v1."""
+    url, _ = _chat_request(monkeypatch, "http://host:11434/v1/", "")
+    assert url == "http://host:11434/v1/chat/completions"
+    url, _ = _chat_request(monkeypatch, "http://host:11434", "")
+    assert url == "http://host:11434/v1/chat/completions"
+
+
+def test_local_mode_calls_no_model_for_an_agent_turn(mem):
+    """Agent turns took the full LLM path whatever the mode, sending the
+    assistant's text to the configured upstream in a mode promised local."""
+    episode = mem.remember("I recommend Docker for the project.", metadata={"source": "agent"})
+    ner = MagicMock()
+    ner.extract.return_value = [{"name": "Docker", "type": "technology"}]
+    post = AsyncMock()
+    with patch("smrti.extraction.ner.get_ner", return_value=ner), patch.object(extract, "_post_chat", post):
+        asyncio.run(extract.extract_and_link_hybrid(
+            episode, "I recommend Docker for the project.", mem, "", "m", "http://llm",
+            source="agent", mode="local",
+        ))
+    assert post.await_count == 0
+    assert mem.db.fetchone("SELECT 1 FROM atoms WHERE label = 'Docker'") is not None

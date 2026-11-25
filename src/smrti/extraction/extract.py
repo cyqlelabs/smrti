@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
@@ -35,6 +36,10 @@ logger = logging.getLogger("smrti.extract")
 _VALID_TYPES = set(ENTITY_TYPES)
 
 _EXTRACT_TIMEOUT: float = float(os.environ.get("SMRTI_EXTRACT_TIMEOUT", "60.0"))
+
+# The extraction endpoint's own credential. Unset, the caller's is forwarded
+# (see _extraction_auth).
+_EXTRACT_API_KEY: str = os.environ.get("SMRTI_EXTRACT_API_KEY", "")
 
 # Per-loop HTTP clients: an AsyncClient is bound to the event loop it was
 # created on — reusing it from a new loop hangs. Entries for closed loops are
@@ -116,6 +121,34 @@ async def aclose_extract_clients() -> None:
         await entry[1].aclose()
 
 
+def _extraction_auth(auth: str) -> str:
+    """The Authorization the extraction endpoint is sent, or "" for none.
+
+    ``SMRTI_EXTRACT_API_KEY``, when set, is the endpoint's own credential.
+    Otherwise the caller's Authorization is forwarded, unless it carries this
+    server's ``SMRTI_API_KEY``: a client that authenticated to Smrti with it
+    would otherwise hand the key to whatever endpoint extraction points at.
+    """
+    if _EXTRACT_API_KEY:
+        return f"Bearer {_EXTRACT_API_KEY}"
+    from smrti.servers import config as _cfg
+
+    if _cfg.API_KEY and auth:
+        scheme, _, token = auth.strip().partition(" ")
+        presented = token.strip() if scheme.lower() == "bearer" else auth.strip()
+        if hmac.compare_digest(presented.encode(), _cfg.API_KEY.encode()):
+            return ""
+    return auth
+
+
+def _chat_url(upstream: str) -> str:
+    """The chat-completions URL under *upstream*, whether or not it ends in /v1."""
+    base = upstream.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return f"{base}/v1/chat/completions"
+
+
 async def _post_chat(
     http: httpx.AsyncClient, upstream: str, auth: str, request_body: dict
 ) -> httpx.Response:
@@ -124,17 +157,15 @@ async def _post_chat(
     Some OpenAI-compatible validators reject unknown fields with a 4xx; the
     retry drops the thinking-mode hint so extraction still works.
     """
-    headers = {"Content-Type": "application/json", "Authorization": auth}
-    resp = await http.post(
-        f"{upstream}/v1/chat/completions",
-        headers=headers, json=request_body, timeout=_EXTRACT_TIMEOUT,
-    )
+    headers = {"Content-Type": "application/json"}
+    credential = _extraction_auth(auth)
+    if credential:
+        headers["Authorization"] = credential
+    url = _chat_url(upstream)
+    resp = await http.post(url, headers=headers, json=request_body, timeout=_EXTRACT_TIMEOUT)
     if 400 <= resp.status_code < 500 and "chat_template_kwargs" in request_body:
         retry_body = {k: v for k, v in request_body.items() if k != "chat_template_kwargs"}
-        resp = await http.post(
-            f"{upstream}/v1/chat/completions",
-            headers=headers, json=retry_body, timeout=_EXTRACT_TIMEOUT,
-        )
+        resp = await http.post(url, headers=headers, json=retry_body, timeout=_EXTRACT_TIMEOUT)
     return resp
 
 
@@ -1077,11 +1108,11 @@ async def extract_and_link_hybrid(
     Modes:
       - "llm"    — full LLM path (backward compatible)
       - "hybrid" — GLiNER entities + LLM claims when 2+ entities
-      - "local"  — GLiNER entities only, no LLM calls
-    source == "agent" takes the full LLM path. The routing gate, when the
-    ``routing`` decision task is on, runs before any of that and may route
-    a message past the LLM (local entities only) or to it (a durable fact
-    or correction with fewer than two entities).
+      - "local"  — GLiNER entities only, no LLM calls, for agent turns too
+    Outside local mode, source == "agent" takes the full LLM path. The
+    routing gate, when the ``routing`` decision task is on, runs before any
+    of that and may route a message past the LLM (local entities only) or to
+    it (a durable fact or correction with fewer than two entities).
     """
     mode = _effective_mode(mode, upstream)
     loop = asyncio.get_running_loop()
@@ -1112,7 +1143,7 @@ async def extract_and_link_hybrid(
             await _link_local_entities(episode_id, content, mem, source)
         return
 
-    if source == "agent" or mode == "llm":
+    if mode == "llm" or (source == "agent" and mode != "local"):
         await extract_and_link(episode_id, content, mem, auth, model, upstream, source, entity_context)
         return
 

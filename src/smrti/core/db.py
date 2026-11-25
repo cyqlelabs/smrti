@@ -411,17 +411,23 @@ class Database:
     )
 
     # Healing used to draw person -> associated -> concept placeholders at
-    # confidence 0.2; association discovery's own edges start at 0.1. Both
-    # are below this line, and discovery redraws its own on the next tenth
-    # epoch if they are still warranted.
+    # confidence 0.2. Association discovery still draws ``associated`` edges
+    # at 0.1, out of a person as readily as out of anything else, so no row
+    # tells the two apart: the cleanup runs once per database, and this key
+    # records that it has. Run on every open, it deleted discovery's live
+    # edges each time. Discovery redraws its own on the next tenth epoch if
+    # they are still warranted.
     _HUB_EDGE_MAX_CONFIDENCE = 0.2
+    _HUB_CLEANUP_KEY = "repair_hub_edges"
 
     def _repair_legacy_rows(self) -> None:
         """Bring rows written by earlier releases in line with the current code.
 
-        Three repairs. Each touches only rows that still carry the legacy
-        shape, so it is idempotent: safe on every open, and it also mends
-        whatever a process running older code writes in the meantime.
+        Two repairs run on every open. Each touches only rows in a shape the
+        current code never writes, so it is idempotent: safe on every open,
+        and it also mends whatever a process running older code writes in
+        the meantime. The third runs once per database, because the shape it
+        removes is one the current code writes too.
 
         * Extracted entities written before every creation path set the
           intrinsic valence pair (resolver-made, so no ``content``) have it
@@ -433,15 +439,16 @@ class Database:
           — which is exactly what ``_lower_tone`` writes today. Episodes
           written before the split are left alone: nothing records the tone
           they were stored with.
-        * The placeholder ``associated`` edges the old healing step drew out
-          of every person atom are removed. They made the person a hub joined
-          to everything in the space.
         * Atoms forgotten by the old ``forget()``, which left them at the
           surfacing floor rather than under it, are sunk below it so the
           pruner can take them, as the current ``forget()`` does.
+        * Once: the placeholder ``associated`` edges the old healing step
+          drew out of every person atom are removed, with everything that
+          references them. They made the person a hub joined to everything
+          in the space.
 
-        The file is snapshotted first, like a schema migration, whenever any
-        row is going to change.
+        The file is snapshotted first whenever a row is going to change,
+        unless a snapshot is already there (see ``_backup_before_migration``).
         """
         conn = self._write_conn
         if (
@@ -457,27 +464,39 @@ class Database:
         legacy_entities = (
             "intrinsic_valence IS NULL AND content IS NULL AND type != 'relation'"
         )
-        hub_edges = (
-            "SELECT r.id FROM atoms r JOIN atoms p ON p.id = r.source_id "
-            "WHERE r.type = 'relation' AND r.relation = 'associated' "
-            "AND r.confidence <= ? AND p.entity_type = 'person'"
-        )
         legacy_forgotten = f"{ATOM_FORGOTTEN} AND confidence >= {self._FLOOR_SQL}"
 
         entity_count = conn.execute(
             f"SELECT COUNT(*) FROM atoms WHERE {legacy_entities}"
         ).fetchone()[0]
-        hub_ids = [r[0] for r in conn.execute(hub_edges, (self._HUB_EDGE_MAX_CONFIDENCE,))]
         forgotten_count = conn.execute(
             f"SELECT COUNT(*) FROM atoms WHERE {legacy_forgotten}"
         ).fetchone()[0]
-        if not (entity_count or hub_ids or forgotten_count):
+        hub_pending = (
+            conn.execute(
+                "SELECT 1 FROM smrti_meta WHERE key = ?", (self._HUB_CLEANUP_KEY,)
+            ).fetchone()
+            is None
+        )
+        hub_edges = (
+            conn.execute(
+                "SELECT r.id, r.tenant_id FROM atoms r JOIN atoms p ON p.id = r.source_id "
+                "WHERE r.type = 'relation' AND r.relation = 'associated' "
+                "AND r.confidence <= ? AND p.entity_type = 'person'",
+                (self._HUB_EDGE_MAX_CONFIDENCE,),
+            ).fetchall()
+            if hub_pending
+            else []
+        )
+        if not (entity_count or forgotten_count or hub_pending):
             return
 
-        self._backup_before_migration()
+        if entity_count or forgotten_count or hub_edges:
+            self._backup_before_migration(replace=False)
         try:
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
+            conn.execute("PRAGMA defer_foreign_keys = ON")
             if entity_count:
                 conn.execute(
                     f"""UPDATE atoms SET
@@ -486,12 +505,16 @@ class Database:
                         WHERE {legacy_entities}""",
                     (*STRUCTURAL_RELATIONS, *STRUCTURAL_RELATIONS),
                 )
-            for start in range(0, len(hub_ids), 400):
-                chunk = hub_ids[start : start + 400]
-                ph = ",".join("?" * len(chunk))
-                conn.execute(f"DELETE FROM evidence WHERE atom_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM aliases WHERE atom_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM atoms WHERE id IN ({ph})", chunk)
+            if hub_pending:
+                by_tenant: dict[str, list[str]] = {}
+                for r in hub_edges:
+                    by_tenant.setdefault(r["tenant_id"], []).append(r["id"])
+                for tenant_id, ids in by_tenant.items():
+                    self._cascade_delete(conn, ids, tenant_id)
+                conn.execute(
+                    "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES (?, '1')",
+                    (self._HUB_CLEANUP_KEY,),
+                )
             if forgotten_count:
                 conn.execute(
                     f"""UPDATE atoms SET confidence = MIN(confidence, 0.5 * {self._FLOOR_SQL})
@@ -673,7 +696,7 @@ class Database:
             conn.rollback()
             raise
 
-    def _backup_before_migration(self) -> None:
+    def _backup_before_migration(self, replace: bool = True) -> None:
         """Snapshot the whole DB file before the first schema-altering migration.
 
         Each migration is transactional, but a file-level copy is the only
@@ -684,10 +707,18 @@ class Database:
         checkpointed into the main file. At most one snapshot per open; a
         later release's migration overwrites it, by which point this
         snapshot's state has already been validated by a successful upgrade.
+
+        A data repair passes ``replace=False`` and only writes a snapshot
+        where there is none. Repairs can find work on any open — beside a
+        process running older code, on every one — and replacing the file
+        each time overwrote the snapshot a downgrade needs with a copy of a
+        file the new release had already changed.
         """
         if self._migration_backup_done or self._in_memory:
             return
         backup_path = self._db_path + ".pre-migration.bak"
+        if not replace and os.path.exists(backup_path):
+            return
         try:
             # A stale or corrupt leftover is not a valid backup destination.
             os.remove(backup_path)

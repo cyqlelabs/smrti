@@ -199,6 +199,8 @@ def test_old_healing_hub_edges_are_removed_and_real_claims_kept(tmp_path):
     get_database(path)
     close_database(path)
     conn = _make_connection(path)
+    # A file an older release wrote carries no record of the one-time cleanup.
+    conn.execute("DELETE FROM smrti_meta WHERE key = ?", (Database._HUB_CLEANUP_KEY,))
     _legacy_entity(conn, "alice", "Alice", entity_type="person")
     _legacy_entity(conn, "python", "Python")
     _legacy_entity(conn, "chess", "chess")

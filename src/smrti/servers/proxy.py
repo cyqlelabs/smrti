@@ -181,13 +181,31 @@ def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
     return tenant_id, write_space, read_spaces
 
 
-async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: list[str]) -> list:
+async def _recall(
+    query: str, tenant_id: str, write_space: str, read_spaces: list[str]
+) -> tuple[list, list, dict]:
+    """The recalled memories, the stated warnings recall did not return, and
+    the superseded claims about what it did return.
+
+    Warnings are found apart from recall's pool and top_k and are injected
+    outside the budget: a warning cut by a small top_k, or outranked by
+    seventy more similar memories, is still the one the model must not act
+    against.
+    """
     mem = get_mem(tenant_id, write_space)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: mem.recall(query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces),
-    )
+
+    def work():
+        memories = mem.recall(
+            query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces
+        )
+        shown = {r.atom.id for r in memories}
+        warnings = [
+            w for w in mem.find_warnings(query, read_spaces=read_spaces) if w.atom.id not in shown
+        ]
+        replaced = mem.superseded_claims([r.atom.id for r in memories], read_spaces=read_spaces)
+        return memories, warnings, replaced
+
+    return await asyncio.get_running_loop().run_in_executor(None, work)
 
 
 def _stated_tone(request: Request) -> tuple[float, float | None] | None:
@@ -375,6 +393,25 @@ def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, st
     return f"- {_SEVERITY_LABELS[severity]}: {text} (confidence: {qualifier})", severity
 
 
+def _format_superseded(replaced: dict) -> list[tuple[str, str]]:
+    """Each superseded claim about the recalled memories, once, as an
+    Outdated line: the replaced state is what the model must not present as
+    current."""
+    lines: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for claims in replaced.values():
+        for claim in claims:
+            if claim.edge_id in seen:
+                continue
+            seen.add(claim.edge_id)
+            text = f"{claim.subject} {claim.predicate} {claim.old_object}"
+            if claim.new_object:
+                text += f" → {claim.new_object}"
+            text = re.sub(r"\s+", " ", text).strip()[: cfg.INJECT_MAX_CHARS]
+            lines.append((f"- {_SEVERITY_LABELS['known_antipattern']}: {text}", "known_antipattern"))
+    return lines
+
+
 def _text_of(content) -> str:
     """The text of a message's content.
 
@@ -434,7 +471,8 @@ async def _inject_context(
     if not query:
         return body, "", []
 
-    memories = await _recall(query, tenant_id, write_space, read_spaces)
+    memories, warnings, replaced = await _recall(query, tenant_id, write_space, read_spaces)
+    memories = [*warnings, *memories]
     if not memories:
         return body, "", []
 
@@ -444,7 +482,7 @@ async def _inject_context(
     memory_dicts = [
         _memory_record(r, c, sev) for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
     ]
-    injection = _render_injection(formatted)
+    injection = _render_injection([*formatted, *_format_superseded(replaced)])
     return {**body, "messages": _with_system(messages, injection)}, injection, memory_dicts
 
 

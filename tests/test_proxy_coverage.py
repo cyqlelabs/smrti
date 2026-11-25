@@ -220,7 +220,7 @@ def test_inject_context_serves_agent_episodes_as_the_models_own():
     body = {"messages": [{"role": "user", "content": "Hello"}]}
 
     async def _run():
-        with patch("smrti.servers.proxy._recall", return_value=[agent_result]):
+        with patch("smrti.servers.proxy._recall", return_value=([agent_result], [], {})):
             with patch("smrti.servers.proxy.get_mem", return_value=MagicMock()):
                 result, ctx, mems = await _inject_context(body, "t1", "s1", ["s1"])
         return result, ctx, mems

@@ -497,7 +497,7 @@ def test_a_negated_warning_is_not_injected_under_a_second_negation():
         valence=Valence(valence=-0.9, intensity=0.9), metadata={"valence_stated": True},
     )
     body = {"messages": [{"role": "user", "content": "Can I deploy today?"}]}
-    with patch.object(proxy, "_recall", AsyncMock(return_value=[RecallResult(atom=rule, salience=1, similarity=1)])), \
+    with patch.object(proxy, "_recall", AsyncMock(return_value=([RecallResult(atom=rule, salience=1, similarity=1)], [], {}))), \
             patch.object(proxy, "get_mem", return_value=MagicMock()):
         _, injection, _ = asyncio.run(proxy._inject_context(body, "t", "s", ["s"]))
 
@@ -734,3 +734,52 @@ def test_serve_viz_opens_the_visualizer_with_its_key(monkeypatch, tmp_path):
     monkeypatch.setattr("smrti.servers.rest.run_rest_server", lambda **_kw: None)
     cli.serve_viz(host="127.0.0.1", port=18999, no_browser=False)
     assert opened == ["http://127.0.0.1:18999/viz?key=k%2F1"]
+
+
+def test_a_stated_warning_cut_by_top_k_still_reaches_the_recall_tool(tmp_path):
+    """A warning outranked in the pool or cut by a small top_k never reached
+    the agent; it now comes back beside the memories, once."""
+    from smrti.servers.mcp import handle_tool
+
+    mem = Smrti(db_path=str(tmp_path / "w.db"))
+    warning = mem.remember("Never run the billing migration without a database backup", valence=-0.9)
+    for i in range(8):
+        mem.remember(f"The billing migration step {i} renamed a column in the invoices table")
+    result = handle_tool(mem, "smrti_recall", {"query": "billing migration", "top_k": 1})
+    ids = [m["id"] for m in result["memories"]] + [w["id"] for w in result["warnings"]]
+    assert ids.count(warning) == 1
+    assert all(w["severity"] == "critical_warning" for w in result["warnings"])
+    mem.close()
+
+
+def test_the_recall_tool_names_a_claim_a_later_one_replaced(tmp_path):
+    """Recall never returns claim edges, so "prefers tea" came back nowhere
+    once "prefers coffee" replaced it."""
+    from smrti.extraction.extract import _link_claims
+    from smrti.extraction.resolve import EntityResolver
+    from smrti.servers.mcp import handle_tool
+
+    mem = Smrti(db_path=str(tmp_path / "s.db"), tenant_id="t", write_space="s")
+    resolver = EntityResolver(mem.db, mem.embed)
+    ids = {name: resolver.resolve(name, kind, "t", "s", ["s"])
+           for name, kind in (("Nico", "person"), ("tea", "preference"), ("coffee", "preference"))}
+    _link_claims([{"subject": "Nico", "predicate": "prefers", "object": "tea"}],
+                 ids, mem, mem.remember("Nico prefers tea"))
+    _link_claims([{"subject": "Nico", "predicate": "prefers", "object": "coffee", "supersedes": "tea"}],
+                 ids, mem, mem.remember("Nico now prefers coffee instead"))
+    result = handle_tool(mem, "smrti_recall", {"query": "Nico tea"})
+    assert {"subject": "Nico", "predicate": "prefers", "old_object": "tea", "new_object": "coffee"} in [
+        {k: s[k] for k in ("subject", "predicate", "old_object", "new_object")} for s in result["superseded"]
+    ]
+    mem.close()
+
+
+def test_the_proxy_injects_a_replaced_claim_once_as_outdated():
+    from smrti.retrieval.fan_out import SupersededClaim
+    from smrti.servers import proxy
+
+    claim = SupersededClaim(edge_id="e1", subject="Nico", predicate="prefers",
+                            old_object="tea", new_object="coffee")
+    lines = proxy._format_superseded({"nico": [claim], "tea": [claim]})
+    assert lines == [("- Outdated: Nico prefers tea → coffee", "known_antipattern")]
+    assert "Outdated: Nico prefers tea → coffee" in proxy._render_injection(lines)

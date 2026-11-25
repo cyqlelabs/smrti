@@ -44,6 +44,54 @@ def _coverage(overlap) -> dict:
     }
 
 
+
+def _memory_json(r) -> dict:
+    """One recalled memory as the recall tool and route return it."""
+    return {
+        "id": r.atom.id,
+        "label": r.atom.label,
+        "content": r.atom.content,
+        "type": r.atom.type.value,
+        "probability": r.atom.truth.probability,
+        "confidence": r.atom.truth.confidence,
+        "sti": r.atom.attention.sti,
+        "lti": r.atom.attention.lti,
+        "valence": r.atom.valence.valence,
+        "intensity": r.atom.valence.intensity,
+        "severity": classify_memory(r),
+        "salience": r.salience,
+        "similarity": r.similarity,
+        # How useful the memory was judged as evidence for the
+        # query when the rerank decision task ran; null when
+        # it did not.
+        "evidence": r.evidence,
+        "space": r.atom.space,
+        # Dates the extraction model pinned down for relative
+        # expressions in this memory. They live in metadata rather
+        # than in the text, which was embedded before the model
+        # ever saw it, so this is where the reader meets them.
+        "temporal": r.atom.metadata.get("temporal") or [],
+    }
+
+
+def _superseded_json(replaced: dict) -> list[dict]:
+    """The superseded claims about the recalled memories, each once."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for atom_id, claims in replaced.items():
+        for claim in claims:
+            if claim.edge_id in seen:
+                continue
+            seen.add(claim.edge_id)
+            out.append({
+                "about": atom_id,
+                "subject": claim.subject,
+                "predicate": claim.predicate,
+                "old_object": claim.old_object,
+                "new_object": claim.new_object,
+            })
+    return out
+
 def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     if name == "smrti_remember":
         content = args["content"]
@@ -95,35 +143,21 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             boost=args.get("boost", True),
             rerank=args.get("rerank", True),
         )
+        shown = {r.atom.id for r in results}
+        # Stated warnings the recall did not return — outranked in the
+        # candidate pool or cut by top_k — come back apart from it, so a
+        # warning reaches the caller whatever top_k it asked for.
+        warnings = [
+            w for w in mem.find_warnings(args["query"], read_spaces=args.get("read_spaces") or None)
+            if w.atom.id not in shown
+        ]
+        replaced = mem.superseded_claims(
+            [r.atom.id for r in results], read_spaces=args.get("read_spaces") or None
+        )
         return {
-            "memories": [
-                {
-                    "id": r.atom.id,
-                    "label": r.atom.label,
-                    "content": r.atom.content,
-                    "type": r.atom.type.value,
-                    "probability": r.atom.truth.probability,
-                    "confidence": r.atom.truth.confidence,
-                    "sti": r.atom.attention.sti,
-                    "lti": r.atom.attention.lti,
-                    "valence": r.atom.valence.valence,
-                    "intensity": r.atom.valence.intensity,
-                    "severity": classify_memory(r),
-                    "salience": r.salience,
-                    "similarity": r.similarity,
-                    # How useful the memory was judged as evidence for the
-                    # query when the rerank decision task ran; null when
-                    # it did not.
-                    "evidence": r.evidence,
-                    "space": r.atom.space,
-                    # Dates the extraction model pinned down for relative
-                    # expressions in this memory. They live in metadata rather
-                    # than in the text, which was embedded before the model
-                    # ever saw it, so this is where the reader meets them.
-                    "temporal": r.atom.metadata.get("temporal") or [],
-                }
-                for r in results
-            ]
+            "memories": [_memory_json(r) for r in results],
+            "warnings": [_memory_json(w) for w in warnings],
+            "superseded": _superseded_json(replaced),
         }
 
     elif name == "smrti_attend":

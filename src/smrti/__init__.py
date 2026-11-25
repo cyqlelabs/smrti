@@ -39,7 +39,13 @@ from smrti.decisions.extraction import TONE_DECISION, judge_tone
 from smrti.decisions.retrieval import make_judge
 from smrti.extraction.sentiment import estimate_valence
 from smrti.extraction.resolve import EntityResolver
-from smrti.retrieval.fan_out import boost_attention, rank_candidates, retrieve
+from smrti.retrieval.fan_out import (
+    boost_attention,
+    find_warnings,
+    rank_candidates,
+    retrieve,
+    superseded_claims,
+)
 from smrti.evolution.epoch import empty_result, try_epoch
 from smrti.evolution.forgetting import derived_only_from
 from smrti.evolution.reinforcement import DEFAULT_WEIGHT as _REINFORCE_WEIGHT, reinforce_atoms
@@ -370,6 +376,31 @@ class Smrti:
             boost=boost,
             judge=judge,
         )
+
+    def find_warnings(
+        self, query: str, limit: int = 3, read_spaces: list[str] | None = None
+    ) -> list:
+        """The stated warnings in the read spaces that bear on *query*, most
+        similar first.
+
+        Found apart from :meth:`recall`'s candidate pool and its ``top_k``: a
+        warning outranked by seventy more similar memories, or cut by a small
+        ``top_k``, is still the memory the agent must not act against, so a
+        caller that injects memories asks for these separately and keeps them
+        outside its budget. Reads only; no access boost.
+        """
+        spaces = read_spaces if read_spaces is not None else self.read_spaces
+        return find_warnings(query, self.tenant_id, spaces, self.db, self.embed, limit=limit)
+
+    def superseded_claims(
+        self, atom_ids: list[str], read_spaces: list[str] | None = None, limit: int = 3
+    ) -> dict:
+        """The claims a later one replaced about each of *atom_ids* — "lives
+        in Berlin", now "lives in Paris" — keyed by the atom. Recall never
+        returns claim edges, so this is how a caller learns that what a
+        recalled memory names is no longer current."""
+        spaces = read_spaces if read_spaces is not None else self.read_spaces
+        return superseded_claims(list(atom_ids), self.tenant_id, spaces, self.db, limit=limit)
 
     def attend(self, atom_ids: list[str]) -> int:
         """Give these memories the access boost, as if recall had returned them.

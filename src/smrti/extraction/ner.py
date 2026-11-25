@@ -99,11 +99,11 @@ class NERProvider:
             labels = _DEFAULT_LABELS
         model = self._get_model()
 
-        # Collect entities across all chunks, merging as we go. Track every span
-        # GLiNER tagged as "pronoun" before priority deduplication discards that
-        # label. Deduplicate: keep one entry per name_lower, preferring the
+        # Collect entities across all chunks, merging as we go. Track every
+        # label each span was tagged with before priority deduplication keeps
+        # one. Deduplicate: keep one entry per name_lower, preferring the
         # highest-priority (most specific) type.
-        pronoun_tagged: set[str] = set()
+        tagged: dict[str, set[str]] = {}
         best: dict[str, dict] = {}
 
         for chunk in _chunk_text(text):
@@ -113,21 +113,24 @@ class NERProvider:
                     continue
                 etype = span.label
                 key = name.lower()
-                if etype == "pronoun":
-                    pronoun_tagged.add(key)
+                tagged.setdefault(key, set()).add(etype)
                 priority = _TYPE_PRIORITY.get(etype, len(_DEFAULT_LABELS))
                 existing = best.get(key)
                 if existing is None or priority < _TYPE_PRIORITY.get(existing["type"], len(_DEFAULT_LABELS)):
                     best[key] = {"name": name, "type": etype, "score": float(span.score)}
 
-        # Restore pronoun type for spans GLiNER labelled as pronoun, but only
-        # when the lexicon agrees: the model also noise-tags proper names as
-        # pronoun ("Factor", "Cyqle"), and an unchecked restore clobbers the
-        # real type the priority merge selected, after which the pronoun merge
-        # drops the entity entirely.
+        # A span is a pronoun when the tagger tagged it one, in its context,
+        # and tagged it as nothing but a person besides. A pronoun stands for
+        # someone, so in context the tagger reads "Hij", "Она" and "그녀는"
+        # as a pronoun and a person at once, and the names a word list took
+        # for pronouns ("Mia", "Ma") as a person only. A proper name it
+        # noise-tags as a pronoun is also tagged as the thing it names
+        # ("Factor" as technology) and keeps that type, which the priority
+        # merge chose.
         result = list(best.values())
         for ent in result:
-            if ent["name"].lower() in pronoun_tagged and self.classify_pronoun(ent["name"]):
+            labels_seen = tagged[ent["name"].lower()]
+            if "pronoun" in labels_seen and labels_seen <= {"pronoun", "person"}:
                 ent["type"] = "pronoun"
         # Filter out verb phrases misidentified as preference/constraint entities.
         # Uses the span head (multilingual) to distinguish noun phrases from
@@ -139,14 +142,15 @@ class NERProvider:
         return result
 
     def classify_pronoun(self, name: str) -> bool:
-        """Return True if `name` is a pronoun rather than a proper name.
+        """Return True if `name` is in the pronoun word list.
 
-        A lexicon rather than a model call. Pronouns are a closed class — every
-        language has a few dozen and coins no more — so a lookup is exact where
-        zero-shot inference is not: asked to choose between `proper_name` and
-        `pronoun`, the model answers `proper_name` for "she", "he", "they" and
-        "my" alike, on both the ONNX and the PyTorch build. Membership needs no
-        weights, no context and no inference call.
+        Extraction no longer decides anything with this: the list covers eight
+        languages, so it turned Dutch "Hij" into a person while dropping "Mia
+        and Ella" and folding "Ma" into "Lisa Su", and ``extract`` now reads
+        pronouns from the tagger in context. What is left is recognising the
+        pronoun aliases older builds stored, which those builds gated on this
+        same list for the spans they typed, and which have to be recognised
+        on a bare string, with no context and, in llm mode, no tagger.
         """
         return name.strip().casefold() in _PRONOUNS
 
@@ -179,9 +183,10 @@ def _is_verb_phrase(ent: dict, model) -> bool:
     return best.get("verb_phrase", 0.0) > best.get("noun_phrase", 0.0)
 
 
-# Personal, possessive and reflexive pronouns across the languages the
-# multilingual model covers. Closed class: this list is complete per language
-# by definition, which is what makes a lookup the right instrument.
+# Personal, possessive and reflexive pronouns in eight of the languages the
+# model covers. Extraction no longer types anything with it (see
+# ``classify_pronoun``); it recognises the pronoun aliases older builds
+# stored, and healing reads it to keep pronouns out of the names it matches.
 _PRONOUNS: frozenset[str] = frozenset(
     # English
     "i me my mine myself you your yours yourself yourselves he him his himself "

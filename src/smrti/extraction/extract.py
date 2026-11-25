@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import hmac
 import json
 import logging
 import os
@@ -20,6 +22,7 @@ from smrti.core.provenance import (
     SUPERSEDED_BY,
     claim_current_sql,
     forgotten_sql,
+    valence_stated_sql,
 )
 from smrti.decisions import DecisionEngine
 from smrti.decisions.extraction import route_extraction, verify_supersession
@@ -36,10 +39,20 @@ _VALID_TYPES = set(ENTITY_TYPES)
 
 _EXTRACT_TIMEOUT: float = float(os.environ.get("SMRTI_EXTRACT_TIMEOUT", "60.0"))
 
+# The extraction endpoint's own credential. Unset, the caller's is forwarded
+# (see _extraction_auth).
+_EXTRACT_API_KEY: str = os.environ.get("SMRTI_EXTRACT_API_KEY", "")
+
 # Per-loop HTTP clients: an AsyncClient is bound to the event loop it was
 # created on — reusing it from a new loop hangs. Entries for closed loops are
 # evicted lazily so the registry stays bounded.
 _http_clients: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
+
+
+# How many session locks a loop keeps before the idle ones are dropped. One
+# lock per (tenant, space) ever seen grew without bound, and the proxy takes
+# its tenant from a request header.
+_MAX_SESSION_LOCKS = 256
 
 
 class _PerLoopLocks:
@@ -48,31 +61,57 @@ class _PerLoopLocks:
     An asyncio.Lock is bound to the loop that created it — awaiting one from
     another loop hangs. Lock dicts are therefore kept per loop, and entries
     for closed loops are evicted lazily so the registry stays bounded.
+    Within a loop, once more than ``_MAX_SESSION_LOCKS`` locks are kept, the
+    ones nobody holds or waits for are dropped as a ``session`` ends; the
+    count ``session`` keeps is what tells them apart, since a lock dropped
+    while a caller waited on it would let the next caller run beside it.
     Dict-style access (``in``, ``[]``, ``clear``) spans all loops.
     """
 
     def __init__(self) -> None:
-        self._entries: dict[int, tuple[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]]] = {}
+        self._entries: dict[
+            int, tuple[asyncio.AbstractEventLoop, dict[str, asyncio.Lock], dict[str, int]]
+        ] = {}
 
-    def get_lock(self, key: str) -> asyncio.Lock:
+    def _loop_entry(self) -> tuple[asyncio.AbstractEventLoop, dict[str, asyncio.Lock], dict[str, int]]:
         loop = asyncio.get_running_loop()
-        for loop_id, (cached_loop, _) in list(self._entries.items()):
+        for loop_id, (cached_loop, _, _) in list(self._entries.items()):
             if cached_loop.is_closed():
                 self._entries.pop(loop_id, None)
         entry = self._entries.get(id(loop))
         if entry is None:
-            entry = (loop, {})
+            entry = (loop, {}, {})
             self._entries[id(loop)] = entry
-        locks = entry[1]
+        return entry
+
+    def get_lock(self, key: str) -> asyncio.Lock:
+        locks = self._loop_entry()[1]
         if key not in locks:
             locks[key] = asyncio.Lock()
         return locks[key]
 
+    @contextlib.asynccontextmanager
+    async def session(self, key: str):
+        """Hold *key*'s lock for the body, counted as its user from before it waits."""
+        _, locks, users = self._loop_entry()
+        lock = self.get_lock(key)
+        users[key] = users.get(key, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            users[key] -= 1
+            if not users[key]:
+                del users[key]
+            if len(locks) > _MAX_SESSION_LOCKS:
+                for idle in [k for k in locks if k not in users]:
+                    del locks[idle]
+
     def __contains__(self, key: str) -> bool:
-        return any(key in locks for _, locks in self._entries.values())
+        return any(key in locks for _, locks, _ in self._entries.values())
 
     def __getitem__(self, key: str) -> asyncio.Lock:
-        for _, locks in self._entries.values():
+        for _, locks, _ in self._entries.values():
             if key in locks:
                 return locks[key]
         raise KeyError(key)
@@ -116,6 +155,35 @@ async def aclose_extract_clients() -> None:
         await entry[1].aclose()
 
 
+def _extraction_auth(auth: str) -> str:
+    """The Authorization the extraction endpoint is sent, or "" for none.
+
+    ``SMRTI_EXTRACT_API_KEY``, when set, is the endpoint's own credential.
+    Otherwise the caller's Authorization is forwarded, unless it carries this
+    server's ``SMRTI_API_KEY``: a client that authenticated to Smrti with it
+    would otherwise hand the key to whatever endpoint extraction points at.
+    """
+    if _EXTRACT_API_KEY:
+        return f"Bearer {_EXTRACT_API_KEY}"
+    from smrti.servers import config as _cfg
+
+    auth = (auth or "").strip()
+    if _cfg.API_KEY and auth:
+        scheme, _, token = auth.partition(" ")
+        presented = token.strip() if scheme.lower() == "bearer" else auth
+        if hmac.compare_digest(presented.encode(), _cfg.API_KEY.encode()):
+            return ""
+    return auth
+
+
+def _chat_url(upstream: str) -> str:
+    """The chat-completions URL under *upstream*, whether or not it ends in /v1."""
+    base = upstream.rstrip("/")
+    if base.endswith("/v1"):
+        base = base[: -len("/v1")]
+    return f"{base}/v1/chat/completions"
+
+
 async def _post_chat(
     http: httpx.AsyncClient, upstream: str, auth: str, request_body: dict
 ) -> httpx.Response:
@@ -124,18 +192,32 @@ async def _post_chat(
     Some OpenAI-compatible validators reject unknown fields with a 4xx; the
     retry drops the thinking-mode hint so extraction still works.
     """
-    headers = {"Content-Type": "application/json", "Authorization": auth}
-    resp = await http.post(
-        f"{upstream}/v1/chat/completions",
-        headers=headers, json=request_body, timeout=_EXTRACT_TIMEOUT,
-    )
+    # No credential, no header: an empty Authorization is still a header,
+    # and an endpoint that checks for one rejects it.
+    headers = {"Content-Type": "application/json"}
+    credential = _extraction_auth(auth)
+    if credential:
+        headers["Authorization"] = credential
+    url = _chat_url(upstream)
+    resp = await http.post(url, headers=headers, json=request_body, timeout=_EXTRACT_TIMEOUT)
     if 400 <= resp.status_code < 500 and "chat_template_kwargs" in request_body:
         retry_body = {k: v for k, v in request_body.items() if k != "chat_template_kwargs"}
-        resp = await http.post(
-            f"{upstream}/v1/chat/completions",
-            headers=headers, json=retry_body, timeout=_EXTRACT_TIMEOUT,
-        )
+        resp = await http.post(url, headers=headers, json=retry_body, timeout=_EXTRACT_TIMEOUT)
     return resp
+
+
+def _warn_if_failed(entry: dict) -> None:
+    """Log a failed extraction call where an operator will see it.
+
+    The call log is an in-process ring buffer read from the visualizer; a
+    misconfigured endpoint that fails every call was otherwise invisible to
+    anyone reading the server's own log.
+    """
+    if entry["error"]:
+        logger.warning(
+            "%s extraction call failed after %.0f ms: %s",
+            entry["subkind"], entry["duration_ms"], entry["error"],
+        )
 
 
 _ITEM_SHAPES = {
@@ -331,6 +413,7 @@ async def extract_knowledge(
     finally:
         entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
         _log(entry)
+        _warn_if_failed(entry)
 
 
 _COREF_TYPES = {"person", "organization", "project", "role", "tool", "technology", "skill", "location", "event", "topic", "media", "health", "goal", "preference", "constraint"}
@@ -438,12 +521,19 @@ def _register_entity(entity_ids: dict[str, str], name: str, atom_id: str) -> Non
 
 
 def _db_resolve_label(label: str, entity_ids: dict[str, str], mem: "Smrti") -> str | None:
-    """Resolve a claim subject/object to an atom_id, falling back to DB lookup."""
+    """Resolve a claim subject/object to an atom_id, falling back to DB lookup.
+
+    The lookup skips forgotten atoms, as the resolver does: a claim naming
+    one is about a new entity. A label two entity atoms share (Java the
+    place and the language are kept apart) goes to the more salient one.
+    """
     atom_id = entity_ids.get(label) or entity_ids.get(label.lower())
     if atom_id:
         return atom_id
     row = mem.db.fetchone(
-        "SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND tenant_id = ? AND space = ? AND type NOT IN ('relation', 'episode')",
+        f"""SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND tenant_id = ? AND space = ?
+            AND type IN ('concept', 'belief', 'goal') AND NOT {ATOM_FORGOTTEN}
+            ORDER BY (sti + lti) DESC, created_at, id LIMIT 1""",
         (label, mem.tenant_id, mem.write_space),
     )
     if row:
@@ -503,60 +593,56 @@ def _resolve_ner_entities(
     """Resolve a list of {"name", "type"} dicts via the entity cascade.
 
     Returns a mapping of name → atom_id. Also creates mentions edges.
-    Handles pronoun entities: batch-merges where unambiguous, skips type="pronoun",
-    and retroactively merges existing pronoun atoms for resolved named persons.
-    ``context`` is the text the mentions came from; read from the episode
-    when not given.
+    Pronoun entities are folded into the one person the text names, or
+    dropped (see ``merge_pronoun_entities_in_batch``). ``context`` is the
+    text the mentions came from; read from the episode when not given.
     """
+    from .pronouns import merge_pronoun_entities_in_batch
+
     resolver = _resolver(mem, source, episode_id, context)
     entity_ids: dict[str, str] = {}
-
-    # Batch-merge pronoun entities before resolution
-    try:
-        from .ner import get_ner
-        ner = get_ner()
-        from .pronouns import merge_pronoun_entities_in_batch
-        entities = merge_pronoun_entities_in_batch(
-            entities, ner,
-            db=mem.db, tenant_id=mem.tenant_id, spaces=[mem.write_space],
-        )
-    except Exception:
-        ner = None
+    entities = merge_pronoun_entities_in_batch([
+        {**ent, "aliases": _entity_aliases(ent)} for ent in entities if isinstance(ent, dict)
+    ])
 
     for ent in entities:
         name = (ent.get("name") or "").strip()
         etype = ent.get("type", "concept")
-        if not name:
-            continue
-        # Skip pronoun-typed entities that survived batch merge (ambiguous case)
-        if etype == "pronoun":
+        # A pronoun is never an atom of its own, whatever reaches this loop.
+        if not name or etype == "pronoun":
             continue
         if etype not in _VALID_TYPES:
             etype = "concept"
         atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
         _register_entity(entity_ids, name, atom_id)
-        for alias in ent.get("aliases", []):
-            if alias and alias.lower() != name.lower():
-                resolver.aliases.add(atom_id, alias, mem.tenant_id, mem.write_space)
+        # The other names this text uses for the entity, the pronouns folded
+        # into it and the model's aliases, resolve the claims read from the
+        # same text and are never stored. A stored alias is an identity for
+        # the whole space, and which of them is a pronoun or a description
+        # only this speaker can use ("my boss") cannot be told without a
+        # word list: "she", once stored as Bob's, made Bob of every "she".
+        for alias in ent["aliases"]:
+            if alias.lower() != name.lower():
                 entity_ids.setdefault(alias, atom_id)
                 entity_ids.setdefault(alias.lower(), atom_id)
         mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
 
-    # Retroactive merge: for each resolved named person, merge co-mentioned pronoun atoms
-    if ner is not None:
-        from .pronouns import find_and_merge_pronoun_atoms
-        for ent in entities:
-            etype = ent.get("type", "concept")
-            name = (ent.get("name") or "").strip()
-            if etype != "person" or not name:
-                continue
-            atom_id = entity_ids.get(name)
-            if atom_id and not ner.classify_pronoun(name):
-                find_and_merge_pronoun_atoms(
-                    atom_id, episode_id, mem.db, ner, mem.tenant_id, mem.write_space,
-                )
-
     return entity_ids
+
+
+def _entity_aliases(ent: dict) -> list[str]:
+    """The other names an extracted entity carries, as a list of strings.
+
+    The model's output is not held to the shape the prompt asks for: a bare
+    string was read one character at a time, one alias per letter, and a
+    number aborted the whole extraction.
+    """
+    aliases = ent.get("aliases")
+    if isinstance(aliases, str):
+        aliases = [aliases]
+    if not isinstance(aliases, list):
+        return []
+    return [alias.strip() for alias in aliases if isinstance(alias, str) and alias.strip()]
 
 
 # Lower an atom's tone to a claim's, in both pairs. The claim is the model's
@@ -565,17 +651,33 @@ def _resolve_ner_entities(
 # than the neutral default an extracted concept is born with, so it reaches
 # the intrinsic pair that every judgement reads and not only the drifting one
 # propagation moves. Only ever downward: a claim can make a memory graver,
-# never lighter.
-_LOWER_TONE_SQL = """UPDATE atoms SET
+# never lighter. Never on a tone the caller stated: the atom keeps its
+# VALENCE_STATED mark, so the model's reading would pass for the caller's,
+# and a stated −0.1 note lowered to −0.9 became a critical warning.
+_LOWER_TONE_SQL = f"""UPDATE atoms SET
         valence = MIN(valence, ?),
         intensity = MAX(intensity, ?),
         intrinsic_valence = MIN(COALESCE(intrinsic_valence, valence), ?),
         intrinsic_intensity = MAX(COALESCE(intrinsic_intensity, intensity), ?)
-    WHERE id = ?"""
+    WHERE id = ? AND NOT {valence_stated_sql()}"""
 
 def _lower_tone(mem: "Smrti", atom_id: str, valence: float) -> None:
     intensity = min(1.0, abs(valence))
     mem.db.execute(_LOWER_TONE_SQL, (valence, intensity, valence, intensity, atom_id))
+
+
+def _claim_predicate(claim: dict) -> str | None:
+    """The fact a claim states, or None when it states none.
+
+    A blank predicate states none, and the structural relations are the
+    engine's own bookkeeping: a "contradicts" edge drawn from the model's
+    output is one the epoch acts on, weakening whichever endpoint is less
+    confident.
+    """
+    predicate = claim.get("predicate", "related_to").strip()
+    if not predicate or predicate.lower() in _STRUCTURAL_RELATIONS:
+        return None
+    return predicate
 
 
 def _link_claims(
@@ -601,6 +703,10 @@ def _link_claims(
     min_valence = 0.0
     for claim in claims:
         try:
+            predicate = _claim_predicate(claim)
+            if predicate is None:
+                logger.warning("skipping claim with predicate %r", claim.get("predicate"))
+                continue
             subj_raw = claim.get("subject", "")
             obj_raw = claim.get("object", "")
             subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
@@ -612,7 +718,6 @@ def _link_claims(
                 obj_id = claim_resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
                 _register_entity(entity_ids, obj_raw, obj_id)
             if subj_id and obj_id and subj_id != obj_id:
-                predicate = claim.get("predicate", "related_to")
                 claim_valence = max(-1.0, min(1.0, float(claim.get("valence") or 0.0)))
                 # A claim edge read from an agent turn carries the agent's
                 # provenance, as the atoms it joins do: it is what lets the
@@ -680,30 +785,28 @@ def _supersede(
     one as the loser, so the epoch cuts it to ``SUPERSEDED_PROBABILITY``
     rather than adjudicating by confidence (the older claim is usually the
     more confident, having been mentioned more); negative evidence against
-    it, so the log records why; and, on the edge, a ``superseded_by`` mark
-    that drops it from the entity context and from the proxy's rendering of
-    the entity. A superseded belief then reads as a known antipattern at
-    recall: the thing the user used to prefer.
+    it, so the log records why; and a ``superseded_by`` mark naming the new
+    edge, which on the edge drops it from the entity context and from the
+    proxy's rendering of the entity. A superseded belief then reads as a
+    known antipattern at recall, from the mark rather than from a confidence
+    that decays away: the thing the user used to prefer. Only edges are ever
+    filtered on the mark, so on a belief it hides nothing.
     """
     old_obj_id = _db_resolve_label(old_label, entity_ids, mem)
     if not old_obj_id or old_obj_id == new_obj_id:
         return
-    edge_columns = f"id, relation, created_at, updated_at, {ATOM_SOURCE} AS author"
+    # Only a claim under the same predicate is replaced. Falling back to any
+    # factual edge to the old object, in case the earlier claim was worded
+    # differently, cannot tell a rewording from a different fact: "works_in
+    # Paris, supersedes Madrid" found "born_in Madrid" and cut it. The model
+    # is shown the recorded facts with their predicates, so it can name the
+    # one it means.
     old_edge = mem.db.fetchone(
-        f"""SELECT {edge_columns} FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
-           AND relation = ? AND tenant_id = ? AND space = ? AND id != ?""",
+        f"""SELECT id, relation, created_at, updated_at, {ATOM_SOURCE} AS author
+            FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
+            AND relation = ? AND tenant_id = ? AND space = ? AND id != ?""",
         (subj_id, old_obj_id, predicate, mem.tenant_id, mem.write_space, new_edge_id),
     )
-    if old_edge is None:
-        # The earlier claim may have been extracted under a different wording
-        # of the same predicate; any factual edge to the old object will do.
-        rel_ph = ",".join("?" * len(_STRUCTURAL_RELATIONS))
-        old_edge = mem.db.fetchone(
-            f"""SELECT {edge_columns} FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
-                AND relation NOT IN ({rel_ph}) AND tenant_id = ? AND space = ? AND id != ?
-                ORDER BY created_at DESC LIMIT 1""",
-            (subj_id, old_obj_id, *_STRUCTURAL_RELATIONS, mem.tenant_id, mem.write_space, new_edge_id),
-        )
     if old_edge is None:
         return
     old_edge_id = old_edge["id"]
@@ -723,12 +826,6 @@ def _supersede(
     ):
         return
 
-    mem.db.execute(
-        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}', ?)
-            WHERE id = ? AND tenant_id = ? AND space = ?""",
-        (new_edge_id, old_edge_id, mem.tenant_id, mem.write_space),
-    )
-
     new_obj = mem.db.fetchone("SELECT label FROM atoms WHERE id = ?", (new_obj_id,))
     note = f"superseded: {predicate} {old_label} -> {new_obj['label'] if new_obj else new_obj_id}"
     trust = _agent_trust(mem) if source == SOURCE_AGENT else 1.0
@@ -745,6 +842,11 @@ def _supersede(
     ):
         pairs.append((new_obj_id, old_obj_id))
     for winner, loser in pairs:
+        mem.db.execute(
+            f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}', ?)
+                WHERE id = ? AND tenant_id = ? AND space = ?""",
+            (new_edge_id, loser, mem.tenant_id, mem.write_space),
+        )
         mem.atomspace.link_atoms(
             winner, loser, "contradicts", mem.tenant_id, mem.write_space,
             metadata={"loser": loser},
@@ -848,6 +950,17 @@ def _is_superseded(mem: "Smrti", edge_id: str) -> bool:
     return row is not None
 
 
+def _superseder_author(mem: "Smrti", edge_id: str) -> str | None:
+    """Who stated the claim that replaced *edge_id*, or None if it is gone."""
+    row = mem.db.fetchone(
+        f"""SELECT {ATOM_SOURCE} AS author FROM atoms WHERE id = (
+                SELECT json_extract({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}')
+                FROM atoms WHERE id = ?)""",
+        (edge_id,),
+    )
+    return row["author"] if row else None
+
+
 # What a revived claim, and the belief it points at, are held at once more.
 # The supersession cut them to SUPERSEDED_PROBABILITY by policy; this is the
 # same policy run backwards, to the probability a claim edge is born with.
@@ -868,9 +981,17 @@ def _revive(
     deleted, since an unresolved one would cut the claim again at the next
     epoch and a resolved one has nothing left to say; the probability is
     lifted back by the policy write that lowered it, so a preference the
-    user returned to stops reading as a known antipattern; and evidence of
-    the revival is filed, so the log says why.
+    user returned to stops reading as a known antipattern; the supersession's
+    negative evidence not yet applied is retired, since the next epoch would
+    otherwise pull the revived claim back down; and evidence of the revival
+    is filed, so the log says why.
+
+    The rule :func:`_supersede` applies holds here too: a model restating a
+    claim the user replaced is not the user taking the replacement back.
     """
+    if source == SOURCE_AGENT and _superseder_author(mem, edge_id) != SOURCE_AGENT:
+        logger.info("agent restatement does not revive claim %s the user replaced", edge_id)
+        return
     losers = mem.db.fetchall(
         """SELECT id, CASE WHEN json_valid(metadata)
                            THEN json_extract(metadata, '$.loser') END AS loser
@@ -890,6 +1011,13 @@ def _revive(
                     metadata = json_remove({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}')
                 WHERE id = ? AND tenant_id = ? AND space = ?""",
             (_REVIVED_PROBABILITY, atom_id, mem.tenant_id, mem.write_space),
+        )
+        # Marked processed rather than deleted: the evidence log is append-only.
+        mem.db.execute(
+            """UPDATE evidence SET processed = 1
+               WHERE atom_id = ? AND processed = 0 AND observed_probability = ?
+                 AND tenant_id = ? AND space = ?""",
+            (atom_id, SUPERSEDED_PROBABILITY, mem.tenant_id, mem.write_space),
         )
         mem.atomspace.add_evidence(Evidence(
             atom_id=atom_id,
@@ -1035,6 +1163,7 @@ async def extract_claims_only(
     finally:
         entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
         _log(entry)
+        _warn_if_failed(entry)
 
 
 # ── Hybrid dispatch ───────────────────────────────────────────────────────────
@@ -1077,11 +1206,11 @@ async def extract_and_link_hybrid(
     Modes:
       - "llm"    — full LLM path (backward compatible)
       - "hybrid" — GLiNER entities + LLM claims when 2+ entities
-      - "local"  — GLiNER entities only, no LLM calls
-    source == "agent" takes the full LLM path. The routing gate, when the
-    ``routing`` decision task is on, runs before any of that and may route
-    a message past the LLM (local entities only) or to it (a durable fact
-    or correction with fewer than two entities).
+      - "local"  — GLiNER entities only, no LLM calls, for agent turns too
+    Outside local mode, source == "agent" takes the full LLM path. The
+    routing gate, when the ``routing`` decision task is on, runs before any
+    of that and may route a message past the LLM (local entities only) or to
+    it (a durable fact or correction with fewer than two entities).
     """
     mode = _effective_mode(mode, upstream)
     loop = asyncio.get_running_loop()
@@ -1112,7 +1241,7 @@ async def extract_and_link_hybrid(
             await _link_local_entities(episode_id, content, mem, source)
         return
 
-    if source == "agent" or mode == "llm":
+    if mode == "llm" or (source == "agent" and mode != "local"):
         await extract_and_link(episode_id, content, mem, auth, model, upstream, source, entity_context)
         return
 
@@ -1202,8 +1331,8 @@ async def extract_and_link_hybrid(
 
     def _sync_resolve_and_link() -> None:
         # Resolve new entities the LLM emitted: goals (new atoms) and
-        # preference/constraint reclassifications (resolve to existing atom,
-        # updating its entity_type so it becomes a belief atom).
+        # preferences and constraints (the resolver makes a concept of the
+        # same name the belief they say it is).
         _ALLOWED_NEW_TYPES = {"goal", "preference", "constraint", "role", "technology", "skill", "topic", "media", "health", "concept"}
         new_entities = claims_result.get("entities", [])
         if new_entities:
@@ -1215,13 +1344,7 @@ async def extract_and_link_hybrid(
                     continue
                 atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
                 _register_entity(entity_ids, name, atom_id)
-                if etype in ("preference", "constraint"):
-                    # Reclassify the atom: concept → belief, update entity_type
-                    mem.db.execute(
-                        "UPDATE atoms SET type = 'belief', entity_type = ? WHERE id = ? AND type = 'concept'",
-                        (etype, atom_id),
-                    )
-                elif etype not in ("goal", "preference", "constraint"):
+                if etype not in ("goal", "preference", "constraint"):
                     mem.atomspace.link_atoms(episode_id, atom_id, "mentions", mem.tenant_id, mem.write_space)
         _link_claims(claims_result.get("claims", []), entity_ids, mem, episode_id, source)
         _store_temporal(episode_id, mem, claims_result.get("temporal", []))
@@ -1270,7 +1393,7 @@ async def extract_and_link_serialized(
     Cross-session concurrency is preserved (different keys = different locks).
     """
     key = f"{mem.tenant_id}:{mem.write_space}"
-    async with _session_locks.get_lock(key):
+    async with _session_locks.session(key):
         await extract_and_link_hybrid(
             episode_id, content, mem, auth, model, upstream, source, mode
         )

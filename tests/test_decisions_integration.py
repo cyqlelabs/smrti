@@ -566,10 +566,11 @@ def test_an_uncertain_fuzzy_match_is_verified_against_the_sentence(tmp_path):
     rivera3 = EntityResolver(mem3.db, mem3.embed).resolve(stored, "person", "t", "s", ["s"])
     assert _resolver(mem3, _choice_provider("c0", confidence=0.2)).resolve(mention, "person", "t", "s", ["s"]) != rivera3
 
-    # shadow: the fuzzy match stands, the verdict is only recorded
+    # shadow: the verdict is only recorded, and the mention is an atom of its
+    # own, as it is with the task off
     mem4 = _mem(tmp_path, _engine(None), name="d4")
     rivera4 = EntityResolver(mem4.db, mem4.embed).resolve(stored, "person", "t", "s", ["s"])
-    assert _resolver(mem4, _choice_provider("none"), mode="shadow").resolve(mention, "person", "t", "s", ["s"]) == rivera4
+    assert _resolver(mem4, _choice_provider("c0"), mode="shadow").resolve(mention, "person", "t", "s", ["s"]) != rivera4
     assert any(r["task"] == "entity" and not r["applied"] for r in audit.get_all())
 
 
@@ -587,12 +588,20 @@ def test_an_embedding_match_is_verified_too(tmp_path):
     # fuzzy is switched off so the mention reaches the embedding tier, where the
     # bag-of-words stand-in puts "Alice" within reach of "Alice Smith"
     kwargs = dict(fuzzy_threshold=101.0, cosine_threshold=0.5)
-    assert EntityResolver(mem.db, mem.embed, **kwargs).resolve("Alice", "person", "t", "s", ["s"]) == smith
+    provider = _choice_provider("c0")
+    assert _resolver(mem, provider, **kwargs).resolve("Alice", "person", "t", "s", ["s"]) == smith
+    assert provider.calls and provider.calls[0]["state"]["candidates"][0]["label"] == "Alice Smith"
 
     provider = _choice_provider("none")
-    duplicate = _resolver(mem, provider, **kwargs).resolve("Alice", "person", "t", "s", ["s"])
-    assert duplicate != smith
-    assert provider.calls and provider.calls[0]["state"]["candidates"][0]["label"] == "Alice Smith"
+    mem2 = _mem(tmp_path, _engine(None), name="d2")
+    smith2 = EntityResolver(mem2.db, mem2.embed).resolve("Alice Smith", "person", "t", "s", ["s"])
+    assert _resolver(mem2, provider, **kwargs).resolve("Alice", "person", "t", "s", ["s"]) != smith2
+    assert provider.calls
+
+    # unverified, the embedding match is only a proposal
+    mem3 = _mem(tmp_path, _engine(None), name="d3")
+    smith3 = EntityResolver(mem3.db, mem3.embed).resolve("Alice Smith", "person", "t", "s", ["s"])
+    assert EntityResolver(mem3.db, mem3.embed, **kwargs).resolve("Alice", "person", "t", "s", ["s"]) != smith3
 
 
 # ── tone ─────────────────────────────────────────────────────────────────────

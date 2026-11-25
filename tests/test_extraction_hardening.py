@@ -254,7 +254,7 @@ def test_serialized_works_across_sequential_loops():
     assert len(calls) == 2
 
 
-# ── Pronoun merge alias hygiene ──────────────────────────────────────────────
+# ── Person fixtures ───────────────────────────────────────────────────────────
 
 
 def _insert_person(mem, atom_id: str, label: str, space: str = "default") -> None:
@@ -262,34 +262,6 @@ def _insert_person(mem, atom_id: str, label: str, space: str = "default") -> Non
         "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
         (atom_id, "concept", label, "person", "test", space),
     )
-
-
-def test_merge_pronoun_does_not_persist_pronoun_alias(mem):
-    from smrti.extraction.pronouns import merge_pronoun_into_named
-
-    _insert_person(mem, "pron-1", "I")
-    _insert_person(mem, "named-1", "Elara")
-
-    merge_pronoun_into_named("pron-1", "named-1", mem.db, "test", "default")
-
-    assert mem.db.fetchone("SELECT id FROM atoms WHERE id = 'pron-1'", ()) is None
-    alias_row = mem.db.fetchone(
-        "SELECT atom_id FROM aliases WHERE alias = 'I' AND tenant_id = 'test'", ()
-    )
-    assert alias_row is None
-
-
-def test_merge_pronoun_delete_is_space_scoped(mem):
-    from smrti.extraction.pronouns import merge_pronoun_into_named
-
-    _insert_person(mem, "pron-other", "I", space="other")
-    _insert_person(mem, "named-2", "Elara")
-
-    merge_pronoun_into_named("pron-other", "named-2", mem.db, "test", "default")
-
-    # Pronoun atom lives in a different space — must survive the merge
-    row = mem.db.fetchone("SELECT id FROM atoms WHERE id = 'pron-other'", ())
-    assert row is not None
 
 
 # ── Unicode-aware label matching (u_lower) ───────────────────────────────────
@@ -312,30 +284,32 @@ def test_u_lower_merges_non_ascii_case_variants(resolver):
 # ── Fuzzy / embedding alias persistence gates ────────────────────────────────
 
 
-def test_fuzzy_high_score_persists_alias(resolver):
-    """WRatio('Tensorflow2', 'Tensorflow') is ~95 — above the persist gate."""
+def test_an_unverified_high_fuzzy_score_is_a_new_atom_and_no_alias(resolver):
+    """WRatio('Tensorflow2', 'Tensorflow') is ~95, and so is Daniela against
+    Daniel: without the entity task to confirm it, the score proves nothing,
+    and the alias it used to persist made the merge permanent."""
     id1 = resolver.resolve("Tensorflow", "technology", "test", "default", ["default"])
     id2 = resolver.resolve("Tensorflow2", "technology", "test", "default", ["default"])
-    assert id1 == id2
+    assert id1 != id2
     row = resolver.db.fetchone(
         "SELECT atom_id FROM aliases WHERE alias = 'Tensorflow2' AND tenant_id = 'test'", ()
     )
-    assert row is not None
+    assert row is None
 
 
-def test_fuzzy_threshold_score_matches_without_persisting_alias(resolver):
-    """WRatio('PostgreSQL Database', 'PostgreSQL') is 90 — matches at the
-    fuzzy threshold (85) but must not be persisted as an alias (< 92)."""
+def test_an_unverified_threshold_fuzzy_score_is_a_new_atom_and_no_alias(resolver):
+    """WRatio('PostgreSQL Database', 'PostgreSQL') is 90 — over the fuzzy
+    threshold (85), which only proposes a match the entity task may confirm."""
     id1 = resolver.resolve("PostgreSQL", "technology", "test", "default", ["default"])
     id2 = resolver.resolve("PostgreSQL Database", "technology", "test", "default", ["default"])
-    assert id1 == id2
+    assert id1 != id2
     row = resolver.db.fetchone(
         "SELECT atom_id FROM aliases WHERE alias = 'PostgreSQL Database' AND tenant_id = 'test'", ()
     )
     assert row is None
 
 
-def test_embedding_tier_never_persists_alias(resolver):
+def test_an_unverified_embedding_match_is_a_new_atom_and_no_alias(resolver):
     id1 = resolver.resolve("machine learning", "topic", "test", "default", ["default"])
     real_vec = resolver.embed_engine.embed("machine learning")
 
@@ -344,7 +318,7 @@ def test_embedding_tier_never_persists_alias(resolver):
         resolver.cosine_threshold = 1.0
         id2 = resolver.resolve("statistical modelling", "topic", "test", "default", ["default"])
 
-    assert id2 == id1
+    assert id2 != id1
     row = resolver.db.fetchone(
         "SELECT atom_id FROM aliases WHERE alias = 'statistical modelling' AND tenant_id = 'test'", ()
     )

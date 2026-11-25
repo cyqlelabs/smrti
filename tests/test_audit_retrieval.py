@@ -112,3 +112,32 @@ def test_a_restatement_too_short_to_compare_is_still_an_echo(mem):
     short_answer = mem.remember("favorite color: blue")
     hits = {r.atom.id for r in mem.recall("favorite color", min_confidence=0.0, boost=False)}
     assert short_answer in hits
+
+
+# ── text: words keep their marks, lexical terms fold as the index does ───────
+
+def test_combining_marks_stay_inside_the_word_they_modify():
+    """``\\w`` drops combining marks, which cut Hindi and vowelled Arabic
+    into single letters that any two sentences share."""
+    from smrti.retrieval.text import words
+
+    assert words("मेरी बहन का नाम लौरा है") == ["मेरी", "बहन", "का", "नाम", "लौरा", "है"]
+    assert words("أُخْتِي اسْمُهَا لَوْرَا") == ["أُخْتِي", "اسْمُهَا", "لَوْرَا"]
+
+
+@pytest.mark.parametrize("stored, query", [
+    ("Ich wohne in der Hauptstraße zwölf", "Hauptstraße"),
+    ("İstanbul'da yaşıyorum", "İstanbul"),
+    ("the ﬁnal report", "ﬁnal"),
+    ("मेरी बहन का नाम लौरा है", "लौरा"),
+])
+def test_a_lexical_query_term_finds_the_word_it_names(table_mem, stored, query):
+    """Python's casefold is not the index tokenizer's folding: "ß" became
+    "ss", "ﬁ" became "fi" and "İ" an "i" plus a combining dot, so the
+    lexical half never found the atom holding the very word asked for."""
+    from smrti.retrieval.fan_out import _lexical_entry_points
+
+    atom_id = _add(table_mem, stored, 0.1)
+    _add(table_mem, "an unrelated note about the weather", 0.1)
+    hits = _lexical_entry_points(query, "t", ["s"], table_mem.db, 10, 0.0)
+    assert hits == [atom_id]

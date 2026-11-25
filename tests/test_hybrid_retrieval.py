@@ -231,7 +231,7 @@ def test_a_vector_written_under_the_old_scheme_is_refiled_on_open(tmp_path):
 
 
 def test_terms_are_deduplicated_in_order_of_first_appearance():
-    assert _term_list("San Benito, san benito, Roxana") == ["san", "benito", "roxana"]
+    assert _term_list("San Benito, san benito, Roxana") == ["San", "Benito", "Roxana"]
 
 
 def test_term_list_is_capped():

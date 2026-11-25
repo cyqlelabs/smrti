@@ -12,7 +12,7 @@ from smrti.personality.params import personality_params
 from smrti.retrieval.classify import is_critical_warning
 from smrti.retrieval.diversify import diversify
 from smrti.retrieval.salience import compute_salience
-from smrti.retrieval.text import comparable, coverage, word_set, words
+from smrti.retrieval.text import comparable, coverage, lexical_terms, word_set
 
 # The KNN entry pool scales with the graph. A fixed pool lets conversational
 # froth crowd the gate long before the graph is large: a fact ranked just past
@@ -117,14 +117,16 @@ def _blob_to_vec(blob) -> list[float]:
 def _term_list(text: str) -> list[str]:
     """Query terms in order of first appearance, deduplicated.
 
-    Same tokenization as the echo test, but ordered: an FTS5 query string has
-    to be built the same way every time or the same question returns different
-    candidate pools on different runs.
+    Ordered, because an FTS5 query string has to be built the same way every
+    time or the same question returns different candidate pools on different
+    runs; and unfolded, because the index's tokenizer does the folding — see
+    :func:`lexical_terms`. Spellings that differ only in case query the same
+    postings, so the first one stands for the rest.
     """
-    seen: dict[str, None] = {}
-    for token in words(text):
-        seen.setdefault(token, None)
-    return list(seen)[:_FTS_MAX_TERMS]
+    seen: dict[str, str] = {}
+    for token in lexical_terms(text):
+        seen.setdefault(token.lower(), token)
+    return list(seen.values())[:_FTS_MAX_TERMS]
 
 
 def _fts_query(terms: list[str]) -> str:

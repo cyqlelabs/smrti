@@ -1,6 +1,8 @@
 """Salience-scored fan-out retrieval."""
 from __future__ import annotations
 
+import logging
+import sqlite3
 import struct
 from typing import Callable
 
@@ -14,6 +16,7 @@ from smrti.retrieval.diversify import diversify
 from smrti.retrieval.salience import compute_salience
 from smrti.retrieval.text import comparable, coverage, lexical_terms, word_set
 
+logger = logging.getLogger("smrti.retrieval.fan_out")
 # The KNN entry pool scales with the graph. A fixed pool lets conversational
 # froth crowd the gate long before the graph is large: a fact ranked just past
 # the cutoff by raw distance never reaches scoring, so truth, attention, and
@@ -82,6 +85,10 @@ _ID_CHUNK = 400
 # on the far end, so a hub with a hundred edges to trivia cannot evict the
 # one edge that leads somewhere worth recalling.
 _EXPANSION_EDGES = 100
+
+# The kinds of atom recall returns. Relation edges are how candidates are
+# reached, not candidates themselves.
+_CANDIDATE_TYPES = "('concept', 'belief', 'episode', 'goal')"
 
 # Reciprocal Rank Fusion constant. Vector distance and BM25 are not on a
 # common scale and no normalization between them is stable across graphs, so
@@ -320,16 +327,39 @@ def boost_attention(db, atom_ids: list[str], tenant_id: str, write_space: str, s
     (``recall(top_k=40, boost=False)``) and keeps five can boost the five
     it read and not the thirty-five it discarded — and so that nobody
     reaches for ``reinforce()`` in its place, which is evidence about
-    truth, not attention. Returns how many ids were written.
+    truth, not attention.
+
+    A forgotten atom is never raised: attention is what the epoch promotes
+    into a long-term floor, and boosting one kept it from the pruner that
+    forgetting hands it to. Nor is a relation edge, which recall never
+    returns. Returns how many atoms were raised.
+
+    The boost is the one write a read makes, and the read is already done:
+    when another writer holds the database past the busy timeout, the
+    boost is logged and dropped rather than turning a finished recall into
+    an error.
     """
     ids = [atom_id for atom_id in dict.fromkeys(atom_ids) if atom_id]
     if sti_boost <= 0 or not ids:
         return 0
-    db.execute_many(
-        "UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now') WHERE id = ? AND tenant_id = ? AND space = ?",
-        [(sti_boost, atom_id, tenant_id, write_space) for atom_id in ids],
-    )
-    return len(ids)
+    raised = 0
+    try:
+        for start in range(0, len(ids), _ID_CHUNK):
+            chunk = ids[start : start + _ID_CHUNK]
+            ph = ",".join("?" * len(chunk))
+            raised += db.execute(
+                f"""UPDATE atoms SET sti = MIN(sti + ?, 3.0), updated_at = datetime('now')
+                    WHERE id IN ({ph}) AND +tenant_id = ? AND +space = ?
+                      AND type != 'relation' AND NOT {ATOM_FORGOTTEN}""",
+                (sti_boost, *chunk, tenant_id, write_space),
+            ).rowcount
+    except sqlite3.OperationalError as exc:
+        # SQLite's own message for SQLITE_BUSY and SQLITE_LOCKED; the error
+        # code attribute only exists from Python 3.11.
+        if "locked" not in str(exc):
+            raise
+        logger.warning("access boost dropped, the database is locked: %s", exc)
+    return raised
 
 
 def retrieve(
@@ -497,7 +527,12 @@ def rank_candidates(
     # Step 2: 1-hop expansion via relation atoms, capped so a hub atom cannot
     # pull an unbounded neighborhood into the scoring set. The budget goes to
     # the highest-standing endpoints first: an unordered LIMIT hands it to
-    # whatever the scan meets, which in a chatty graph is froth.
+    # whatever the scan meets, which in a chatty graph is froth. And it goes
+    # only to endpoints that could be returned — eligible, a candidate kind,
+    # in a read space — since a hub's hundred forgotten or sunk neighbours
+    # used to take the whole budget and be dropped afterwards, while its one
+    # live neighbour waited past the cut. An endpoint reached by several
+    # edges takes one place.
     #
     # Nothing else enters. An earlier version also added the three
     # highest-standing person atoms to every candidate set "to anchor the
@@ -508,39 +543,31 @@ def rank_candidates(
     # edge out of something the query found.
     id_ph = ",".join("?" * len(entry_ids))
     expanded_ids: set[str] = set(entry_ids)
-
-    forward = db.fetchall(
-        f"""SELECT r.target_id FROM atoms r JOIN atoms t ON t.id = r.target_id
-            WHERE r.source_id IN ({id_ph}) AND r.type = 'relation'
-              AND r.tenant_id = ? AND r.space IN ({spaces_ph})
-            ORDER BY (t.sti + t.lti + t.confidence) DESC LIMIT {_EXPANSION_EDGES}""",
-        (*entry_ids, tenant_id, *read_spaces),
-    )
-    expanded_ids.update(r["target_id"] for r in forward if r["target_id"])
-
-    backward = db.fetchall(
-        f"""SELECT r.source_id FROM atoms r JOIN atoms s ON s.id = r.source_id
-            WHERE r.target_id IN ({id_ph}) AND r.type = 'relation'
-              AND r.tenant_id = ? AND r.space IN ({spaces_ph})
-            ORDER BY (s.sti + s.lti + s.confidence) DESC LIMIT {_EXPANSION_EDGES}""",
-        (*entry_ids, tenant_id, *read_spaces),
-    )
-    expanded_ids.update(r["source_id"] for r in backward if r["source_id"])
-    expanded_ids.discard(None)
-
-    if not expanded_ids:
-        return [], sti_boost, min_confidence
+    for near, far in (("source_id", "target_id"), ("target_id", "source_id")):
+        expanded_ids.update(
+            r["id"]
+            for r in db.fetchall(
+                f"""SELECT id FROM atoms
+                    WHERE id IN (SELECT {far} FROM atoms
+                                 WHERE {near} IN ({id_ph}) AND +type = 'relation'
+                                   AND +tenant_id = ? AND +space IN ({spaces_ph}))
+                      AND +tenant_id = ? AND +space IN ({spaces_ph})
+                      AND +type IN {_CANDIDATE_TYPES} AND {_ELIGIBLE}
+                    ORDER BY (sti + lti + confidence) DESC LIMIT {_EXPANSION_EDGES}""",
+                (*entry_ids, tenant_id, *read_spaces, tenant_id, *read_spaces, min_confidence),
+            )
+        )
 
     # Step 3: Fetch candidate atoms — space-filtered here (overlay boundary),
-    # and eligibility-filtered again for what the expansion pulled in.
+    # and eligibility-filtered again for what the lexical half found.
     exp_list = list(expanded_ids)
     exp_ph = ",".join("?" * len(exp_list))
     atoms_rows = db.fetchall(
         f"""SELECT * FROM atoms
             WHERE id IN ({exp_ph})
-              AND tenant_id = ?
-              AND space IN ({spaces_ph})
-              AND type IN ('concept', 'belief', 'episode', 'goal')
+              AND +tenant_id = ?
+              AND +space IN ({spaces_ph})
+              AND +type IN {_CANDIDATE_TYPES}
               AND {_ELIGIBLE}""",
         (*exp_list, tenant_id, *read_spaces, min_confidence),
     )

@@ -177,3 +177,57 @@ def test_a_belief_with_no_bearing_on_the_question_claims_no_reserved_slot():
 
     terse = _ranked("a terse fact on the topic", 0.08, 0.25, AtomType.BELIEF)
     assert terse in diversify(episodes + [terse], top_k=5)
+
+
+# ── T15: forgotten atoms neither take attention nor spend the budget ──────────
+
+def test_attend_raises_only_live_atoms_and_reports_what_it_raised(table_mem):
+    """attend() boosted forgotten atoms, which kept them from the pruner, and
+    reported every id it was handed whether or not a row moved."""
+    live = _add(table_mem, "a live memory", 0.5)
+    gone = _add(table_mem, "a forgotten memory", 0.5)
+    other = _add(table_mem, "a neighbour", 0.5)
+    edge = table_mem.atomspace.link_atoms(live, other, "related", "t", "s")
+    foreign = _add(table_mem, "a memory in another space", 0.5, space="elsewhere")
+    table_mem.forget(atom_ids=[gone])
+    before = {r["id"]: r["sti"] for r in table_mem.db.fetchall("SELECT id, sti FROM atoms")}
+
+    assert table_mem.attend([live, gone, edge, foreign, "no-such-id"]) == 1
+
+    after = {r["id"]: r["sti"] for r in table_mem.db.fetchall("SELECT id, sti FROM atoms")}
+    assert after[live] > before[live]
+    assert all(after[i] == before[i] for i in (gone, edge, foreign))
+
+
+def test_sunk_neighbours_do_not_spend_the_expansion_budget(table_mem):
+    """A hub's hundred sunk, high-attention neighbours took the whole budget
+    of 100 edges and were dropped afterwards; the live neighbour holding the
+    answer never became a candidate."""
+    hub = _add(table_mem, "project atlas hub", 0.9)
+    useful = _add(table_mem, "atlas ships on the third of march", 0.10, confidence=0.2)
+    table_mem.atomspace.link_atoms(hub, useful, "related", "t", "s")
+    for n in range(60):
+        _add(table_mem, f"filler note {n}", 0.40 - n / 1000)
+    for n in range(100):
+        stale = _add(table_mem, f"stale atlas note {n}", 0.05, sti=3.0, lti=0.5, confidence=0.01)
+        table_mem.atomspace.link_atoms(hub, stale, "related", "t", "s")
+    table_mem.embed.table["launch date?"] = QUERY
+
+    ids = {r.atom.id for r in table_mem.recall("launch date?", top_k=60, boost=False)}
+    assert useful in ids
+
+
+def test_a_locked_database_does_not_fail_a_finished_recall(table_mem, monkeypatch):
+    """The access boost is the one write a read makes; a writer holding the
+    database past the busy timeout turned a finished recall into an error."""
+    import sqlite3
+
+    atom_id = _add(table_mem, "a memory worth reading", 0.8)
+    table_mem.embed.table["q"] = QUERY
+
+    def locked(*_args, **_kwargs):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(table_mem.db, "execute", locked)
+    assert [r.atom.id for r in table_mem.recall("q")] == [atom_id]
+    assert table_mem.attend([atom_id]) == 0

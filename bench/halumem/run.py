@@ -26,6 +26,7 @@ from ..harness import (
     consolidate,
     load_baseline,
     load_json,
+    measured_config,
     require_dataset,
     require_decisions,
     resolve_answering,
@@ -40,9 +41,15 @@ BASELINE_PATH = os.path.join(_HERE, "baseline.json")
 
 GATED_METRIC = "hallucination_rate"
 BASELINE_KEYS = (
-    "config_hash", "recorded_at", "questions", "correct_rate",
+    "config_hash", "recorded_at", "answer_model", "judge_model", "questions", "correct_rate",
     GATED_METRIC, "omission_rate", "boundary_hallucination_rate",
 )
+# The models that wrote and graded the answers. They decide the gated number
+# as much as retrieval does, yet every HaluMem run names one, so they cannot
+# join the fingerprint without refusing the baseline on file for every run:
+# they are recorded beside it, and a baseline that names them gates only a
+# run made with the same two.
+ANSWERING_KEYS = ("answer_model", "judge_model")
 
 DATASET_HINT = "Run `make datasets` to fetch it, or point --dataset at your own copy."
 
@@ -103,7 +110,9 @@ def run(config: dict, dataset: str, db_path: str, answering: dict,
 
     return {
         **aggregate(rows),
-        "config_hash": config_hash(config),
+        "config_hash": config_hash(measured_config(config, extraction)),
+        "answer_model": answering.get("model"),
+        "judge_model": answering.get("judge_model"),
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "rows": rows,
     }
@@ -117,6 +126,12 @@ def _compare_downward(result: dict, baseline: dict, tolerance: float) -> tuple[b
             f"no baseline recorded — this run measured {GATED_METRIC}="
             f"{result[GATED_METRIC]:.3f}; commit it with --update-baseline"
         )
+    for key in ANSWERING_KEYS:
+        if baseline.get(key) is not None and baseline[key] != result.get(key):
+            return False, (
+                f"baseline was answered with {key}={baseline[key]!r}, this run with "
+                f"{result.get(key)!r}; the hallucination rates of two models are not one gate"
+            )
     mirrored_result = {**result, GATED_METRIC: -result[GATED_METRIC]}
     mirrored_baseline = {**baseline, GATED_METRIC: -recorded}
     ok, _ = compare(mirrored_result, mirrored_baseline, tolerance, GATED_METRIC)

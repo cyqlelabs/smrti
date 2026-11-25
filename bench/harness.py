@@ -119,6 +119,21 @@ def build_parser(prog: str, config_path: str, baseline_path: str) -> argparse.Ar
     return parser
 
 
+def measured_config(config: dict, extraction: dict | None) -> dict:
+    """The config a run's fingerprint is taken over: *config*, plus the
+    extraction model and mode when extraction is on.
+
+    ``extraction`` alone said only that a graph was built, so runs whose
+    graphs came from different models, or from the LLM against the local
+    tagger, shared a fingerprint and gated against each other. The two join
+    only when extraction is on, so the default run keeps the fingerprint
+    its baseline was recorded under.
+    """
+    if not extraction:
+        return config
+    return {**config, "extract_model": extraction.get("model", ""), "extract_mode": extraction.get("mode", "")}
+
+
 def apply_run_modes(args, config: dict) -> None:
     """Fold run modes into the config the fingerprint is taken from.
 

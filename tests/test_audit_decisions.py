@@ -449,3 +449,61 @@ def test_an_overlap_embeds_every_neighbourhood_in_one_call(tmp_path):
     engine = Counting(a.embed)
     overlap = space_overlap("t", "a", "b", a.db, 0.85, engine)
     assert overlap.pairs and engine.single == 0 and engine.batches == 1
+
+
+# ── the benchmark harness ───────────────────────────────────────────────────
+
+
+def test_a_run_with_decisions_on_refuses_to_measure_the_fallback(monkeypatch):
+    """``--decisions active`` on a machine without the runtime measured the
+    deterministic fallback under the active run's fingerprint; and the
+    decision benches read preload's False as success."""
+    import smrti.decisions as decisions
+    from bench.harness import decisions_unavailable, require_decisions
+
+    class _NoRuntime:
+        name = "laya"
+        model = ""
+
+        def preload(self, timeout=None):
+            return False
+
+        def ask(self, state, questions, *, timeout):
+            raise DecisionUnavailable("the decision model is not available: no module named edgejev")
+
+    broken = DecisionEngine(_policy(tone="active"), _NoRuntime())
+    assert "edgejev" in decisions_unavailable(broken)
+    assert decisions_unavailable(DecisionEngine(_policy(tone="active"), StaticProvider(_tone_thing))) is None
+    monkeypatch.setattr(decisions, "get_decisions", lambda: broken)
+    require_decisions("off")
+    with pytest.raises(SystemExit, match="refusing to measure"):
+        require_decisions("active")
+
+
+def _tone_thing(_key, question, _state):
+    return {"type": "choice", "choice": "thing", "probabilities": {"thing": 0.9, "speaker": 0.1}, "confidence": 0.8}
+
+
+def test_halumem_tells_apart_runs_with_different_models():
+    """The fingerprint omitted the extraction model and mode, and the gate
+    never looked at the answering and judge models, so a run with other
+    models was compared against the baseline as if it were the same run."""
+    import bench.halumem.run as halumem
+    from bench.harness import config_hash
+
+    config = {"top_k": 50, "extraction": True}
+    original = halumem.load_users
+    halumem.load_users = lambda *args: []
+    try:
+        a = halumem.run(dict(config), "-", "-", {"model": "A", "judge_model": "J"}, {"mode": "llm", "model": "x"})
+        b = halumem.run(dict(config), "-", "-", {"model": "A", "judge_model": "J"}, {"mode": "local", "model": "x"})
+        plain = halumem.run({"top_k": 50, "extraction": False}, "-", "-", {"model": "A", "judge_model": "J"})
+    finally:
+        halumem.load_users = original
+    assert a["config_hash"] != b["config_hash"]
+    assert plain["config_hash"] == config_hash({"top_k": 50, "extraction": False})
+    recorded = {**plain, "hallucination_rate": 0.4}
+    ok, message = halumem._compare_downward({**plain, "hallucination_rate": 0.4, "answer_model": "B"}, recorded, 0.01)
+    assert not ok and "answer_model" in message
+    ok, _ = halumem._compare_downward({**plain, "hallucination_rate": 0.4}, recorded, 0.01)
+    assert ok

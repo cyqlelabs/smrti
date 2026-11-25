@@ -25,6 +25,7 @@ from ..harness import (
     consolidate,
     finish,
     load_json,
+    measured_config,
     require_dataset,
     require_decisions,
     resolve_answering,
@@ -112,7 +113,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None,
             if judged
             else None
         ),
-        "config_hash": config_hash(config),
+        "config_hash": config_hash(measured_config(config, extraction)),
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "rows": rows,
     }

@@ -49,9 +49,9 @@ TASKS = (TASK_ROUTING, TASK_RERANK, TASK_SUPERSESSION, TASK_ENTITY, TASK_TONE)
 # by default only where it was measured to help and cannot make the engine
 # less reliable; the rest are off until a measurement says otherwise.
 #
-# - rerank: off. On LongMemEval-S at the proxy's top_k of 5 it retrieved
-#   0.650 against 0.675 without it, and it turned a 17 ms recall into about
-#   4.5 s uncached.
+# - rerank: off. On LongMemEval-S at top_k 5, with the vectors of 0.23.0,
+#   it retrieved 0.650 against 0.675 without it, and it turned a 17 ms
+#   recall into about 4.5 s uncached.
 # - routing: off. On the gate set it avoided 1 of 11 skippable LLM calls
 #   and skipped claim extraction for 2 of 11 durable facts; a claim never
 #   extracted is lost for good.

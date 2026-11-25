@@ -176,7 +176,7 @@ Laya needs AVX2. Without it, a 2011 dual-core took 30 to 48 seconds per decision
 | Task           | Decides | Default | Measurement behind the default |
 | -------------- | ------- | ------- | ------------------------------ |
 | `routing`      | Whether an episode needs the LLM claim extraction. Chatter skips it; a durable fact that names no entity can force it. | `off` | On the gate set (`make bench-decisions`) it avoided 1 of 11 skippable LLM calls and skipped claim extraction for 2 of 11 durable facts. "Never deploy on Fridays." was not forced to the LLM. |
-| `rerank`       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience. | `off` | LongMemEval-S at `top_k=5`: hit rate 0.650 with it, 0.675 without. It added about 4.5 s to each uncached recall. |
+| `rerank`       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience. | `off` | LongMemEval-S at `top_k=5`, with 0.23.0's vectors: hit rate 0.650 with it, 0.675 without. It added about 4.5 s to each uncached recall. |
 | `supersession` | Whether a new claim replaces an older one. Ambiguity keeps both. | `off` | On 25 English and Spanish pairs (`make bench-supersession`) it blocked 12 of 13 wrong cuts of a current fact but let one through, and blocked 7 of 8 real updates. |
 | `entity`       | Which existing atom an uncertain mention names. Under the confidence line, a duplicate is made rather than a wrong merge. | `off` | On 17 cases (`make bench-entity`) no answer reached the 0.6 line: no wrong merges, and none of the 9 true ones. |
 | `tone`         | Whose an *estimated* negative valence is: about the thing the memory describes, or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned. | `active` | On 29 sentences (`make bench-tone`) it damped 2 of 14 speaker-toned ones, both apologies, and none of the 15 about a failure, bug, rule or preference. |
@@ -622,12 +622,11 @@ Two harnesses in `bench/` ingest a published dataset as episodes and answer its 
 
 | `top_k` | Decisions | Hit rate | Evidence recall | Session hit rate |
 | ------- | --------- | -------- | --------------- | ---------------- |
-| 5 (proxy default) | off | **0.675** | 0.533 | 0.950 |
-| 5 | every task active (Laya) | 0.650 | 0.481 | 0.925 |
-| 10 (MCP and Python default) | off | **0.775** | 0.653 | 0.975 |
-| 50 | off | **0.975** | 0.952 | 1.000 |
+| 5 | off | **0.775** | 0.634 | 0.950 |
+| 10 (proxy, MCP and Python default) | off | **0.825** | 0.737 | 0.975 |
+| 50 | off | **0.950** | 0.928 | 1.000 |
 
-At `top_k=50` five of six abilities retrieve without a miss (multi-session misses 1 of 7). At `top_k=5` the weakest are questions about the assistant's own words (2 of 6) and temporal reasoning (4 of 7); with every decision task active, temporal reasoning falls to 2 of 7.
+0.23.1 embeds an episode's text once, where earlier versions embedded its opening twice. On the same 40 questions that gained four at `top_k=5` (0.675 before), two at 10 (0.775) and lost one temporal-reasoning question at 50 (0.975). At `top_k=50` four of six abilities retrieve without a miss (multi-session and temporal reasoning miss 1 of 7 each). At `top_k=5` the weakest are questions about the assistant's own words (2 of 6). With 0.23.0's vectors, turning every decision task on lowered `top_k=5` from 0.675 to 0.650 (evidence recall 0.533 to 0.481); that has not been re-run.
 
 **Answers** (2026-08-26, older ranking formula): `top_k=50` · gemini-3.7-flash answering and judging · otherwise the same config. Re-run before reading these against the current engine.
 

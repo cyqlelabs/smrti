@@ -91,6 +91,29 @@ def test_shared_logs_are_filtered_by_tenant_and_only_the_admin_key_clears_them(k
     assert keyed.delete("/llm-calls", headers=ADMIN).status_code == 200
 
 
+def test_decision_records_are_read_per_tenant(keyed, monkeypatch):
+    """/decisions served every tenant's queries; it now serves the caller's tenants,
+    and with no key configured the server's own tenant."""
+    from smrti.decisions import audit
+    from smrti.servers import config as cfg
+
+    audit.clear()
+    for tenant in ("default", "acme", "beta"):
+        audit.record(task="tone", mode="active", tenant_id=tenant, space="default",
+                     provider="static", model="m", outcome="kept", applied=False)
+
+    def tenants(headers=None):
+        return sorted(r["tenant_id"] for r in keyed.get("/decisions", headers=headers or {}).json())
+
+    assert tenants(ACME) == ["acme"]
+    assert tenants(MULTI) == ["beta"]
+    assert tenants(ADMIN) == ["acme", "beta", "default"]
+    monkeypatch.setattr(cfg, "API_KEY", "")
+    monkeypatch.setattr(cfg, "API_KEYS", {})
+    assert tenants() == ["default"]
+    audit.clear()
+
+
 def test_a_bound_key_may_not_open_another_database(keyed):
     """An alternate ?db= has tenants of its own, which no key was bound to."""
     response = keyed.get("/tenants", params={"db": keyed.db}, headers=ACME)

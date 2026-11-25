@@ -115,6 +115,18 @@ class _Reader:
         return {"nodes": nodes, "edges": edges}
 
 
+def _decision_tenants(request: Request) -> Optional[tuple[str, ...]]:
+    """The tenants whose decision records a request may read, None for every one.
+
+    A key's own tenants, every tenant for the all-tenants key, and with no key
+    configured the server's configured tenant — the ``tenant_ids`` that
+    ``audit.records()`` filters by.
+    """
+    if not (cfg.API_KEY or cfg.API_KEYS):
+        return (cfg.TENANT_ID,)
+    return getattr(request.state, "tenants", None)
+
+
 def _db_mem(db_path: str) -> _Reader:
     """Return a cached read handle for *db_path* — registry or allowlist only.
 
@@ -301,7 +313,8 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         first, with the mode it ran under and whether it was applied — the
         record shadow mode exists to produce."""
         from smrti.decisions import audit
-        return [r for r in audit.get_all() if visible(request, r.get("tenant_id"))]
+        tenants = _decision_tenants(request)
+        return [r for r in audit.get_all() if tenants is None or r.get("tenant_id") in tenants]
 
     @router.delete("/decisions")
     async def clear_decisions_log():

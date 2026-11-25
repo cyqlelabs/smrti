@@ -29,6 +29,13 @@ def never_open_the_users_memory(tmp_path_factory):
     patch.setenv("SMRTI_RUN_DIR", str(home / "run"))
     patch.setenv("SMRTI_TOWN_DB", str(home / "town.db"))
     patch.setattr(cfg, "DB", str(home / "memory.db"))
+    # Read once at import, like cfg.DB: tests that start or stop a server
+    # wrote and removed PID files beside the user's live servers'.
+    from pathlib import Path
+
+    from smrti import cli
+
+    patch.setattr(cli, "_RUN_DIR", Path(home) / "run")
 
     protected = os.path.realpath(os.path.expanduser("~/.smrti"))
     original_init = db_module.Database.__init__

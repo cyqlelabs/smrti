@@ -278,6 +278,35 @@ async def drain(tasks: set) -> None:
         await asyncio.wait(list(tasks), timeout=DRAIN_SECONDS)
 
 
+def cached_instance(cache: OrderedDict, key, mint, lock, limit: int, tasks: set):
+    """The instance *cache* holds under *key*, minting one with *mint* when absent.
+
+    *lock* guards the dictionary and nothing else: minting writes the space's
+    personality row, which can wait seconds on an epoch's write lock, so it
+    runs outside it, and a request for a cached instance — the event loop's
+    included — never waits behind another's mint. Two requests minting one
+    key at once keep the first stored. Instances evicted past *limit* get
+    the epoch they are owed (see :func:`consolidate_evicted`), also outside
+    the lock.
+    """
+    with lock:
+        if key in cache:
+            cache.move_to_end(key)
+            return cache[key]
+    fresh = mint()
+    evicted = []
+    with lock:
+        if key not in cache:
+            while len(cache) >= limit:
+                evicted.append(cache.popitem(last=False)[1])
+            cache[key] = fresh
+        cache.move_to_end(key)
+        mem = cache[key]
+    for old in evicted:
+        consolidate_evicted(old, tasks)
+    return mem
+
+
 def consolidate_evicted(mem, tasks: set) -> None:
     """Run the epoch an instance evicted from a cache is owed.
 

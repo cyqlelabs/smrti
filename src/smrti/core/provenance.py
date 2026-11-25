@@ -68,6 +68,10 @@ SUPERSEDED_BY = "superseded_by"
 # episode recorded here is forgotten: co-mention says nothing about who
 # stated a fact.
 CLAIM_EPISODES = "episodes"
+# Recorded in place of the episodes a claim edge had before claims recorded
+# them, when extraction reuses such an edge: who stated it is unknown, so no
+# forget can take it.
+UNRECORDED_ASSERTION = "unrecorded"
 
 
 def claim_current_sql(table: str = "") -> str:

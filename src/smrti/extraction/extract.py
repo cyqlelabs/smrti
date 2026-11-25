@@ -20,6 +20,7 @@ from smrti.core.provenance import (
     ATOM_SOURCE,
     CLAIM_EPISODES,
     SOURCE_AGENT,
+    UNRECORDED_ASSERTION,
     SUPERSEDED_BY,
     claim_current_sql,
     forgotten_sql,
@@ -728,7 +729,10 @@ def _link_claims(
                     subj_id, obj_id, predicate,
                     mem.tenant_id, mem.write_space,
                     valence=claim_valence,
-                    metadata={"source": SOURCE_AGENT} if source == SOURCE_AGENT else None,
+                    metadata={
+                        **({"source": SOURCE_AGENT} if source == SOURCE_AGENT else {}),
+                        **({CLAIM_EPISODES: [episode_id]} if episode_id else {}),
+                    },
                 )
                 _record_assertion(mem, new_edge, episode_id)
                 if _is_superseded(mem, new_edge):
@@ -964,7 +968,12 @@ def _record_assertion(mem: "Smrti", edge_id: str, episode_id: str | None) -> Non
     except ValueError:
         meta = {}
     episodes = meta.get(CLAIM_EPISODES) if isinstance(meta, dict) else None
-    episodes = [e for e in episodes if isinstance(e, str)] if isinstance(episodes, list) else []
+    # An edge with no record predates the record: older episodes stated it,
+    # and naming only this one would let forgetting it take their fact.
+    episodes = (
+        [e for e in episodes if isinstance(e, str)] if isinstance(episodes, list)
+        else [UNRECORDED_ASSERTION]
+    )
     if episode_id in episodes:
         return
     mem.db.execute(

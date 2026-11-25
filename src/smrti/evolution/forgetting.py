@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 
 from smrti.core.models import STRUCTURAL_RELATIONS
-from smrti.core.provenance import ATOM_FORGOTTEN, CLAIM_EPISODES, forgotten_sql
+from smrti.core.provenance import ATOM_FORGOTTEN, CLAIM_EPISODES, UNRECORDED_ASSERTION, forgotten_sql
 
 # Ids per statement: SQLite before 3.32 allows 999 bound variables.
 _CHUNK = 400
@@ -50,8 +50,13 @@ def derived_only_from(
     )
 
     def unsupported(episodes: set[str]) -> bool:
-        # A forgotten episode asserted it, and no live one did.
-        return bool(episodes & source) and not (episodes - source) & live_supporters
+        # A forgotten episode asserted it, no live one did, and nothing
+        # unrecorded might have.
+        return (
+            bool(episodes & source)
+            and UNRECORDED_ASSERTION not in episodes
+            and not (episodes - source) & live_supporters
+        )
 
     doomed = {c["id"]: c["label"] for c in claims if unsupported(supporters[c["id"]])}
     held = {

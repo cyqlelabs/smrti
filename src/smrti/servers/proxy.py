@@ -31,7 +31,7 @@ from smrti.servers.common import (
     BodyLimit,
     api_key_middleware,
     api_root,
-    consolidate_evicted,
+    cached_instance,
     drain,
     serve,
     tenant_for,
@@ -139,37 +139,29 @@ def _bootstrap() -> tuple[str, str, str]:
         _default_tenant_id = default.tenant_id
         _default_write_space = default.write_space
         _default_db_path = cfg.DB
-        _instances[(_default_tenant_id, _default_write_space)] = default
+        with _mints:
+            _instances[(_default_tenant_id, _default_write_space)] = default
     return _default_tenant_id, _default_write_space, _default_db_path  # type: ignore[return-value]
 
 
-# Guards the instance cache: instances are minted in the executor, since
-# minting writes a personality row that can wait on an epoch's write lock.
-_mints = threading.RLock()
+# Guards the instance cache's dictionary (see cached_instance).
+_mints = threading.Lock()
 
 
 def get_mem(tenant_id: str, write_space: str) -> Smrti:
-    with _mints:
-        return _get_mem(tenant_id, write_space)
-
-
-def _get_mem(tenant_id: str, write_space: str) -> Smrti:
-    key = (tenant_id, write_space)
-    if key not in _instances:
-        _, _, db_path = _bootstrap()
-        if key not in _instances:  # _bootstrap may have registered the default key
-            while len(_instances) >= _INSTANCES_MAX:
-                consolidate_evicted(_instances.popitem(last=False)[1], _background_tasks)
-            _instances[key] = Smrti(
-                db_path=db_path,
-                personality=cfg.PERSONALITY,
-                tenant_id=tenant_id,
-                write_space=write_space,
-                ignore_patterns=cfg.IGNORE_PATTERNS or None,
-                temporal=cfg.TEMPORAL,
-            )
-    _instances.move_to_end(key)
-    return _instances[key]
+    _, _, db_path = _bootstrap()
+    return cached_instance(
+        _instances, (tenant_id, write_space),
+        lambda: Smrti(
+            db_path=db_path,
+            personality=cfg.PERSONALITY,
+            tenant_id=tenant_id,
+            write_space=write_space,
+            ignore_patterns=cfg.IGNORE_PATTERNS or None,
+            temporal=cfg.TEMPORAL,
+        ),
+        _mints, _INSTANCES_MAX, _background_tasks,
+    )
 
 
 app.include_router(create_viz_router(get_mem))

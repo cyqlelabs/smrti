@@ -16,7 +16,7 @@ from smrti.servers.common import (
     BodyLimit,
     api_key_middleware,
     api_root,
-    consolidate_evicted,
+    cached_instance,
     drain,
     serve,
     tenant_for,
@@ -62,10 +62,11 @@ _SPACE_MEMS_MAX = 64
 # same way. A space of "" is that tenant's view of the configured space.
 _tenant_mems: OrderedDict[tuple[str, str], Smrti] = OrderedDict()
 
-# Guards both caches. Instances are resolved in the executor: minting one
-# writes its personality row, which waits on any epoch holding the write lock,
-# and on the event loop that wait stalled every other request.
-_mints = threading.RLock()
+# Guards both caches' dictionaries (see cached_instance). Instances are also
+# resolved in the executor: minting one writes its personality row, which
+# waits on any epoch holding the write lock, and on the event loop that wait
+# stalled every other request.
+_mints = threading.Lock()
 
 # Strong references to fire-and-forget tasks so the GC cannot cancel them mid-flight
 _background_tasks: set[asyncio.Task] = set()
@@ -80,43 +81,45 @@ def get_mem(space: Optional[str] = None, tenant: Optional[str] = None) -> Smrti:
     *tenant* is the configured one; another tenant gets the same treatment in
     its own partition.
 
-    Routes call it from the executor (see ``_amem_for``), under ``_mints``.
+    Routes call it from the executor (see ``_amem_for``); ``_mints`` guards
+    the caches (see :func:`cached_instance`).
     """
-    with _mints:
-        return _get_mem(space, tenant)
-
-
-def _get_mem(space: Optional[str], tenant: Optional[str]) -> Smrti:
-    global _mem
-    if _mem is None:
-        _mem = create_smrti()
-    if tenant and tenant != _mem.tenant_id:
+    home = _home()
+    if tenant and tenant != home.tenant_id:
         return _tenant_mem(tenant, space or "")
-    if not space or space == _mem.write_space:
-        return _mem
-    if space not in _space_mems:
-        while len(_space_mems) >= _SPACE_MEMS_MAX:
-            consolidate_evicted(_space_mems.popitem(last=False)[1], _background_tasks)
-        _space_mems[space] = Smrti(
+    if not space or space == home.write_space:
+        return home
+    return cached_instance(
+        _space_mems, space,
+        lambda: Smrti(
             db_path=cfg.DB,
             personality=cfg.PERSONALITY,
             tenant_id=cfg.TENANT_ID,
             write_space=space,
             ignore_patterns=cfg.IGNORE_PATTERNS or None,
             temporal=cfg.TEMPORAL,
-        )
-    _space_mems.move_to_end(space)
-    return _space_mems[space]
+        ),
+        _mints, _SPACE_MEMS_MAX, _background_tasks,
+    )
+
+
+def _home() -> Smrti:
+    """The configured instance, built once."""
+    global _mem
+    if _mem is None:
+        fresh = create_smrti()
+        with _mints:
+            if _mem is None:
+                _mem = fresh
+    return _mem
 
 
 def _tenant_mem(tenant: str, space: str) -> Smrti:
     if space == cfg.SPACE:
         space = ""  # the configured space by name is the same partition and overlay
-    key = (tenant, space)
-    if key not in _tenant_mems:
-        while len(_tenant_mems) >= _SPACE_MEMS_MAX:
-            consolidate_evicted(_tenant_mems.popitem(last=False)[1], _background_tasks)
-        _tenant_mems[key] = Smrti(
+    return cached_instance(
+        _tenant_mems, (tenant, space),
+        lambda: Smrti(
             db_path=cfg.DB,
             personality=cfg.PERSONALITY,
             tenant_id=tenant,
@@ -124,9 +127,9 @@ def _tenant_mem(tenant: str, space: str) -> Smrti:
             read_spaces=None if space else cfg.READ_SPACES,
             ignore_patterns=cfg.IGNORE_PATTERNS or None,
             temporal=cfg.TEMPORAL,
-        )
-    _tenant_mems.move_to_end(key)
-    return _tenant_mems[key]
+        ),
+        _mints, _SPACE_MEMS_MAX, _background_tasks,
+    )
 
 
 def _mem_for(request: Request, space: Optional[str] = None) -> Smrti:
@@ -147,8 +150,9 @@ async def _amem_for(request: Request, space: Optional[str] = None) -> Smrti:
 
 def _all_mems() -> list[Smrti]:
     """Every live instance, for the reflect loop — each space gets its own epochs."""
+    home = _home()
     with _mints:
-        return [get_mem(), *_space_mems.values(), *_tenant_mems.values()]
+        return [home, *_space_mems.values(), *_tenant_mems.values()]
 
 
 async def _run_sync(fn, *args):

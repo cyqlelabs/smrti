@@ -484,3 +484,30 @@ def test_a_claim_edge_records_every_episode_that_asserted_it(tmp_path):
     )
     assert json.loads(row["metadata"])["episodes"] == [first, second]
     mem.close()
+
+
+def test_a_reused_claim_from_before_the_record_is_never_taken_by_forget(tmp_path):
+    """Reusing a claim edge written before claims recorded their episodes
+    named only the new episode, so forgetting it deleted a fact older
+    episodes had stated."""
+    import json
+
+    from smrti import Smrti
+    from smrti.extraction.extract import _link_claims
+    from smrti.extraction.resolve import EntityResolver
+
+    mem = Smrti(db_path=str(tmp_path / "l.db"), tenant_id="t", write_space="s")
+    resolver = EntityResolver(mem.db, mem.embed)
+    ids = {name: resolver.resolve(name, kind, "t", "s", ["s"])
+           for name, kind in (("Eve", "person"), ("Oslo", "location"))}
+    legacy = mem.atomspace.link_atoms(ids["Eve"], ids["Oslo"], "lives_in", "t", "s")
+    episode = mem.remember("Eve lives in Oslo")
+    mem.atomspace.link_atoms(episode, ids["Eve"], "mentions", "t", "s")
+    mem.atomspace.link_atoms(episode, ids["Oslo"], "mentions", "t", "s")
+    _link_claims([{"subject": "Eve", "predicate": "lives_in", "object": "Oslo"}], ids, mem, episode)
+    meta = json.loads(mem.db.fetchone("SELECT metadata FROM atoms WHERE id = ?", (legacy,))["metadata"])
+    assert meta["episodes"] == ["unrecorded", episode]
+
+    mem.forget(atom_ids=[episode], cascade=True)
+    assert mem.db.fetchone("SELECT id FROM atoms WHERE id = ?", (legacy,)) is not None
+    mem.close()

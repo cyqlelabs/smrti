@@ -32,6 +32,9 @@ from typing import Any, Mapping
 from . import audit
 from .policies import MODE_ACTIVE, MODE_OFF, DecisionPolicy
 from .provider import (
+    DecisionBusy,
+    DecisionInvalid,
+    DecisionNotReady,
     DecisionProvider,
     DecisionTimeout,
     DecisionUnavailable,
@@ -72,8 +75,14 @@ class DecisionEngine:
         # just could not answer is unlikely to answer the next caller either,
         # and the deadline is paid by the request the caller is waiting on, so
         # asking every time turns one unavailable model into a fixed delay in
-        # front of every recall. See ``_offline``/``_note``.
+        # front of every recall. See ``_offline``/``_cool``. Two scopes: a
+        # provider that is down (a failed load, an unreachable server, a model
+        # that ran out of time with the worker to itself) is not asked for
+        # anything; one that answered a task's question badly is not asked
+        # that task's questions. One malformed rerank reply used to silence
+        # tone, supersession, entity and routing for a minute.
         self._retry_at = 0.0
+        self._task_retry_at: dict[str, float] = {}
         self._retry_lock = threading.Lock()
         self._unanswered: set[str] = set()
         self._unanswered_lock = threading.Lock()
@@ -109,8 +118,14 @@ class DecisionEngine:
 
     @property
     def offline(self) -> bool:
-        """Whether the provider is inside its cooldown after a failure."""
+        """Whether the provider is inside its cooldown after failing as a
+        whole, which stops every task."""
         return self._offline()
+
+    def offline_for(self, task: str) -> bool:
+        """Whether *task* is not being asked: the provider is offline, or
+        this task's own cooldown is open after a reply it could not use."""
+        return self._offline(task)
 
     def active(self, task: str) -> bool:
         return self.mode(task) == MODE_ACTIVE
@@ -156,12 +171,6 @@ class DecisionEngine:
             self._cache.move_to_end(key)
             while len(self._cache) > self.policy.cache_size:
                 self._cache.popitem(last=False)
-
-    def invalidate(self) -> None:
-        """Drop every cached decision — after a forget or a bulk change a
-        caller cannot name in a state key."""
-        with self._cache_lock:
-            self._cache.clear()
 
     # ── deciding ─────────────────────────────────────────────────────────
 
@@ -212,17 +221,31 @@ class DecisionEngine:
         except Exception:  # the log is a convenience, never a failure
             logger.debug("could not mirror a decision into the call log", exc_info=True)
 
-    def _offline(self) -> bool:
-        """Whether the provider is inside its cooldown after a failure."""
+    def _offline(self, task: str | None = None) -> bool:
+        """Whether the provider, or *task* on it, is inside its cooldown."""
         if self.policy.cooldown <= 0:
             return False
+        now = time.monotonic()
         with self._retry_lock:
-            return bool(self._retry_at) and time.monotonic() < self._retry_at
+            if now < self._retry_at:
+                return True
+            return task is not None and now < self._task_retry_at.get(task, 0.0)
 
-    def _note(self, ok: bool) -> None:
-        """Record that the provider answered, or did not."""
+    def _cool(self, task: str | None) -> None:
+        """Stop asking for a while: the whole provider when *task* is None,
+        otherwise that task's questions only."""
+        until = time.monotonic() + max(0.0, self.policy.cooldown)
         with self._retry_lock:
-            self._retry_at = 0.0 if ok else time.monotonic() + max(0.0, self.policy.cooldown)
+            if task is None:
+                self._retry_at = until
+            else:
+                self._task_retry_at[task] = until
+
+    def _answered(self, task: str) -> None:
+        """The provider answered *task*: whatever cooldown it was under is over."""
+        with self._retry_lock:
+            self._retry_at = 0.0
+            self._task_retry_at.pop(task, None)
 
     def decide(
         self,
@@ -255,7 +278,7 @@ class DecisionEngine:
         hit = self._cached(key)
         if hit is not None:
             return DecisionOutcome(decisions=hit, mode=mode, cached=True)
-        if self._offline():
+        if self._offline(task):
             # No record and no log line: the failure that opened the cooldown
             # filed both, and one entry per skipped call would bury it.
             return None
@@ -264,38 +287,49 @@ class DecisionEngine:
             decisions = self.provider.ask(
                 state, questions, timeout=self.policy.timeout if timeout is None else timeout
             )
-        except DecisionUnsupported as exc:
-            # The provider is fine; this question is not one it answers.
-            self._record(task, mode, tenant_id, space, outcome="unsupported", applied=False, error=str(exc))
-            self._mirror(task, tenant_id, state, questions, None, str(exc), started)
+        except Exception as exc:
+            self._failed(exc, task, mode, tenant_id, space, state, questions, started, partial)
             return None
-        except DecisionUnavailable as exc:
-            self._unavailable(exc, task, mode, tenant_id, space, state, questions, started, partial)
-            return None
-        except Exception as exc:  # a provider bug is not the engine's failure to bear
-            self._note(False)
-            self._record(task, mode, tenant_id, space, outcome="unavailable", applied=False, error=repr(exc))
-            self._mirror(task, tenant_id, state, questions, None, repr(exc), started)
-            logger.warning("decision %s failed: %r", task, exc, exc_info=True)
-            return None
-        self._note(True)
+        self._answered(task)
         self._store(key, decisions)
         self._mirror(task, tenant_id, state, questions, decisions, None, started)
         return DecisionOutcome(decisions=decisions, mode=mode)
 
-    def _unavailable(
-        self, exc: DecisionUnavailable, task: str, mode: str, tenant_id: str, space: str,
+    def _failed(
+        self, exc: Exception, task: str, mode: str, tenant_id: str, space: str,
         state: State, questions: Mapping[str, Question], started: float, partial: bool,
     ) -> None:
-        if partial and isinstance(exc, DecisionTimeout):
-            self._record(task, mode, tenant_id, space, outcome="budget", applied=False, error=str(exc))
-            self._mirror(task, tenant_id, state, questions, None, str(exc), started)
-            logger.debug("decision %s ran out of its slice of the budget: %s", task, exc)
-            return
-        self._note(False)
-        self._record(task, mode, tenant_id, space, outcome="unavailable", applied=False, error=str(exc))
-        self._mirror(task, tenant_id, state, questions, None, str(exc), started)
-        logger.warning("decision %s unavailable: %s", task, exc)
+        """File a question the provider did not answer, and decide how long
+        to stop asking — and whom: nobody, this task, or the whole provider."""
+        error = str(exc) if isinstance(exc, DecisionUnavailable) else repr(exc)
+        if isinstance(exc, DecisionUnsupported):
+            # The provider is fine; this question is not one it answers.
+            outcome = "unsupported"
+        elif isinstance(exc, DecisionNotReady):
+            # Ready in a moment: this caller falls back, the next one asks.
+            outcome = "loading"
+            logger.debug("decision %s skipped while the model loads", task)
+        elif isinstance(exc, DecisionBusy) or (partial and isinstance(exc, DecisionTimeout)):
+            # The caller's own budget ran out — on a queue behind other
+            # callers, or on the last slice of a walk — and the provider is
+            # answering everyone else.
+            outcome = "budget"
+            logger.debug("decision %s ran out of its budget: %s", task, exc)
+        elif isinstance(exc, DecisionInvalid) or not isinstance(exc, DecisionUnavailable):
+            # An answer this task cannot use, or a provider bug met on this
+            # task's question: the other tasks' questions may be fine.
+            outcome = "unavailable"
+            self._cool(task)
+            if isinstance(exc, DecisionUnavailable):
+                logger.warning("decision %s unavailable: %s", task, exc)
+            else:
+                logger.warning("decision %s failed: %r", task, exc, exc_info=True)
+        else:
+            outcome = "unavailable"
+            self._cool(None)
+            logger.warning("decision %s unavailable: %s", task, exc)
+        self._record(task, mode, tenant_id, space, outcome=outcome, applied=False, error=error)
+        self._mirror(task, tenant_id, state, questions, None, error, started)
 
     async def decide_async(
         self,
@@ -315,7 +349,7 @@ class DecisionEngine:
         hit = self._cached(key)
         if hit is not None:
             return DecisionOutcome(decisions=hit, mode=mode, cached=True)
-        if self._offline():
+        if self._offline(task):
             # No record and no log line: the failure that opened the cooldown
             # filed both, and one entry per skipped call would bury it.
             return None
@@ -324,20 +358,10 @@ class DecisionEngine:
             decisions = await self.provider.ask_async(
                 state, questions, timeout=self.policy.timeout if timeout is None else timeout
             )
-        except DecisionUnsupported as exc:
-            self._record(task, mode, tenant_id, space, outcome="unsupported", applied=False, error=str(exc))
-            self._mirror(task, tenant_id, state, questions, None, str(exc), started)
-            return None
-        except DecisionUnavailable as exc:
-            self._unavailable(exc, task, mode, tenant_id, space, state, questions, started, partial)
-            return None
         except Exception as exc:
-            self._note(False)
-            self._record(task, mode, tenant_id, space, outcome="unavailable", applied=False, error=repr(exc))
-            self._mirror(task, tenant_id, state, questions, None, repr(exc), started)
-            logger.warning("decision %s failed: %r", task, exc, exc_info=True)
+            self._failed(exc, task, mode, tenant_id, space, state, questions, started, partial)
             return None
-        self._note(True)
+        self._answered(task)
         self._store(key, decisions)
         self._mirror(task, tenant_id, state, questions, decisions, None, started)
         return DecisionOutcome(decisions=decisions, mode=mode)

@@ -44,7 +44,7 @@ from smrti.decisions.extraction import (
     verify_supersession,
 )
 from smrti.decisions.laya import DEFAULT_MODEL, LayaProvider
-from smrti.decisions.policies import MODE_ACTIVE, MODE_OFF, MODE_SHADOW, TASK_RERANK, TASKS
+from smrti.decisions.policies import DEFAULT_MODES, MODE_ACTIVE, MODE_OFF, MODE_SHADOW, TASK_RERANK, TASKS
 from smrti.decisions.provider import parse_response, questions_payload
 from smrti.decisions.retrieval import fold_evidence, rerank
 from smrti.core.models import Atom, AtomType, RecallResult
@@ -331,10 +331,13 @@ def test_a_provider_with_no_model_named_resolves_one_when_it_loads():
 # ── policy ───────────────────────────────────────────────────────────────────
 
 
-def test_every_task_is_active_by_default():
+def test_each_task_takes_its_measured_default():
     policy = DecisionPolicy.from_env({})
-    assert all(policy.mode(t) == MODE_ACTIVE for t in TASKS)
-    assert policy.any_enabled
+    assert {t: policy.mode(t) for t in TASKS} == DEFAULT_MODES
+    # Rerank and routing cost more than they gave when measured; the tone
+    # check is the one left on, so an unconfigured engine still has a task.
+    assert policy.mode(TASK_RERANK) == MODE_OFF and policy.mode("routing") == MODE_OFF
+    assert policy.mode("tone") == MODE_ACTIVE and policy.any_enabled
 
 
 def test_the_global_off_switch_restores_the_deterministic_path():
@@ -400,9 +403,6 @@ def test_the_cache_answers_a_repeated_state_without_the_provider():
     third = engine.decide("rerank", {"v": 2}, {"q": Noul("?")}, tenant_id="t", space="s")
     assert first.applied and second.cached and not third.cached
     assert len(provider.calls) == 2
-    engine.invalidate()
-    engine.decide("rerank", {"v": 1}, {"q": Noul("?")}, tenant_id="t", space="s")
-    assert len(provider.calls) == 3
 
 
 def test_a_failing_provider_yields_no_decision_and_an_audit_record():
@@ -482,8 +482,11 @@ def test_the_shared_engine_is_built_once_and_can_be_replaced(monkeypatch):
     reset_decisions(None)
     first = get_decisions()
     assert get_decisions() is first
-    assert first.mode("rerank") == MODE_ACTIVE
+    assert first.mode("tone") == MODE_ACTIVE and first.mode("rerank") == MODE_OFF
     assert isinstance(first.provider, LayaProvider)
+    # Built, not loaded: the model waits for the first question an enabled
+    # task actually asks.
+    assert not first.provider.ready and first.provider._loader is None
     closed = []
     monkeypatch.setattr(first.provider, "close", lambda: closed.append(True))
     replacement = DecisionEngine(_policy(), None)

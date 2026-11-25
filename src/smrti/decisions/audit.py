@@ -19,7 +19,7 @@ import threading
 import uuid
 from collections import Counter, deque
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Collection
 
 _MAX_RECORDS = 500
 
@@ -83,6 +83,17 @@ def get_all() -> list[dict[str, Any]]:
     """Every record, newest first."""
     with _lock:
         return list(reversed(_records))
+
+
+def records(tenant_ids: Collection[str] | None = None) -> list[dict[str, Any]]:
+    """The records filed for *tenant_ids*, newest first; every record when
+    None. A record holds the text the provider was asked about, so a reader
+    serving one tenant reads that tenant's decisions and nobody else's."""
+    if tenant_ids is None:
+        return get_all()
+    wanted = set(tenant_ids)
+    with _lock:
+        return [r for r in reversed(_records) if r["tenant_id"] in wanted]
 
 
 def counters() -> dict[tuple[str, str, str], int]:

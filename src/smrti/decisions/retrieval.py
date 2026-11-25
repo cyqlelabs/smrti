@@ -209,7 +209,7 @@ def _walk(
             timeout=max(remaining, 0.001), partial=bool(outcomes),
         )
         if outcome is None:
-            return outcomes, STOP_UNAVAILABLE if engine.offline or not outcomes else STOP_BUDGET
+            return outcomes, STOP_UNAVAILABLE if engine.offline_for(TASK_RERANK) or not outcomes else STOP_BUDGET
         if not outcome.cached:
             slowest = max(slowest, time.monotonic() - started)
         outcomes.append(outcome)

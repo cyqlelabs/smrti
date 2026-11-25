@@ -15,8 +15,9 @@ Five tasks, each with its own mode and its own rollback switch:
   estimate when it is the mood. A stated valence is never questioned.
 
 Each runs ``off`` (the deterministic fallback), ``shadow`` (ask, record the
-decision, apply nothing) or ``active`` (the default). ``SMRTI_DECISIONS``
-sets all five; ``SMRTI_DECISIONS_<TASK>`` overrides one. Thresholds are the
+decision, apply nothing) or ``active``. Unset, each task takes its own
+default (``DEFAULT_MODES``); ``SMRTI_DECISIONS`` sets all five and
+``SMRTI_DECISIONS_<TASK>`` overrides one. Thresholds are the
 lines the code draws through the provider's probabilities: the provider says
 how likely, the policy says what follows, and a decision below its line is
 the same as no decision at all.
@@ -43,6 +44,24 @@ TASK_SUPERSESSION = "supersession"
 TASK_ENTITY = "entity"
 TASK_TONE = "tone"
 TASKS = (TASK_ROUTING, TASK_RERANK, TASK_SUPERSESSION, TASK_ENTITY, TASK_TONE)
+
+# The mode each task runs in when the environment names none. A task is on
+# by default only where it was measured to help and cannot make the engine
+# less reliable; the rest are off until a measurement says otherwise.
+#
+# - rerank: off. On LongMemEval-S at the proxy's top_k of 5 it retrieved
+#   0.650 against 0.675 without it, and it turned a 17 ms recall into about
+#   4.5 s uncached.
+# - routing: off. On the gate set it avoided 1 of 11 skippable LLM calls
+#   and skipped claim extraction for 2 of 11 durable facts; a claim never
+#   extracted is lost for good.
+DEFAULT_MODES = {
+    TASK_ROUTING: MODE_OFF,
+    TASK_RERANK: MODE_OFF,
+    TASK_SUPERSESSION: MODE_OFF,
+    TASK_ENTITY: MODE_OFF,
+    TASK_TONE: MODE_ACTIVE,
+}
 
 # The routing gate's lines. A message every one of whose three judgements
 # sits under ``skip`` gets no claim extraction; one whose durable-fact or
@@ -151,6 +170,8 @@ def _int(environ: Mapping[str, str], name: str, default: int) -> int:
 
 @dataclass(frozen=True)
 class DecisionPolicy:
+    # A policy built in code names the modes it wants and asks every task
+    # when it names none; the environment's defaults are ``DEFAULT_MODES``.
     modes: dict[str, str] = field(default_factory=lambda: {task: MODE_ACTIVE for task in TASKS})
     model: str = ""
     device: str = ""
@@ -174,6 +195,14 @@ class DecisionPolicy:
     entity_candidates: int = DEFAULT_ENTITY_CANDIDATES
     tone_min_confidence: float = DEFAULT_TONE_MIN_CONFIDENCE
     tone_damping: float = DEFAULT_TONE_DAMPING
+
+    def __post_init__(self) -> None:
+        # The damping multiplies an estimated valence: past 1 it pushes the
+        # estimate off the [-1, 1] scale and every remember of a mood fails
+        # validation, under 0 it flips a complaint into praise. Neither is a
+        # setting anybody meant.
+        if not 0.0 <= self.tone_damping <= 1.0:
+            raise ValueError(f"SMRTI_DECISIONS_TONE_DAMPING must be between 0 and 1; got {self.tone_damping!r}")
 
     def mode(self, task: str) -> str:
         return self.modes.get(task, MODE_OFF)
@@ -202,9 +231,13 @@ class DecisionPolicy:
     @classmethod
     def from_env(cls, environ: Mapping[str, str] | None = None) -> "DecisionPolicy":
         env = os.environ if environ is None else environ
-        default_mode = _mode(env.get("SMRTI_DECISIONS"), MODE_ACTIVE, "SMRTI_DECISIONS")
+        every = env.get("SMRTI_DECISIONS")
         modes = {
-            task: _mode(env.get(f"SMRTI_DECISIONS_{task.upper()}"), default_mode, f"SMRTI_DECISIONS_{task.upper()}")
+            task: _mode(
+                env.get(f"SMRTI_DECISIONS_{task.upper()}"),
+                _mode(every, DEFAULT_MODES[task], "SMRTI_DECISIONS"),
+                f"SMRTI_DECISIONS_{task.upper()}",
+            )
             for task in TASKS
         }
         return cls(

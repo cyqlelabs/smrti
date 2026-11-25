@@ -93,31 +93,75 @@ def _spawn(coro) -> asyncio.Task:
     return task
 
 
-# Stores running at once, per event loop (an asyncio semaphore belongs to the
-# loop it was first used on).
-_store_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+# The most stores the proxy admits, running and queued together. Each one
+# holds a whole conversation, and the running limit alone left the queue
+# behind it unbounded: under sustained overload it grew without limit, and
+# whatever was still queued at shutdown was lost.
+_STORES_ADMITTED_MAX = 4 * _BACKGROUND_MAX
+
+
+class _StoreQueue:
+    """One event loop's stores (an asyncio primitive belongs to the loop it
+    was first used on)."""
+
+    def __init__(self) -> None:
+        self.slots = asyncio.Semaphore(_BACKGROUND_MAX)
+        self.admitted = 0
+        self.room = asyncio.Event()
+
+    def release(self, _task) -> None:
+        self.admitted -= 1
+        self.room.set()
+
+
+_store_queues: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, _StoreQueue] = (
     weakref.WeakKeyDictionary()
 )
+
+
+def _store_queue() -> _StoreQueue:
+    loop = asyncio.get_running_loop()
+    queue = _store_queues.get(loop)
+    if queue is None:
+        queue = _store_queues[loop] = _StoreQueue()
+    return queue
+
+
+async def _room_for_store() -> None:
+    """Wait until the proxy may admit another store.
+
+    Returns at once unless _STORES_ADMITTED_MAX stores are already admitted,
+    so a reply waits on memory writes only under sustained overload, where
+    that wait is what keeps the backlog bounded. The caller spawns its store
+    with no await in between, so a freed place goes to one waiter only.
+    """
+    queue = _store_queue()
+    while queue.admitted >= _STORES_ADMITTED_MAX:
+        queue.room.clear()
+        await queue.room.wait()
 
 
 def _spawn_store(coro) -> asyncio.Task:
     """Store an exchange in the background, at most _BACKGROUND_MAX at once.
 
-    The limit is taken inside the task, never on the response path: waiting
-    for a slot before answering made every reply wait on memory writes — each
-    up to two model calls — whenever the proxy was busy. A burst queues its
-    stores instead of losing them.
+    The running limit is taken inside the task, never on the response path:
+    waiting for a slot before answering made every reply wait on memory
+    writes — each up to two model calls — whenever the proxy was busy. A
+    burst queues its stores instead of losing them, up to the admission
+    bound the caller waits for first (see _room_for_store).
     """
-    loop = asyncio.get_running_loop()
-    slots = _store_slots.get(loop)
-    if slots is None:
-        slots = _store_slots[loop] = asyncio.Semaphore(_BACKGROUND_MAX)
+    queue = _store_queue()
 
     async def in_turn():
-        async with slots:
+        async with queue.slots:
             return await coro
 
-    return _spawn(in_turn())
+    queue.admitted += 1
+    task = _spawn(in_turn())
+    # A done callback rather than a finally: a task cancelled before its
+    # first step never enters the coroutine at all.
+    task.add_done_callback(queue.release)
+    return task
 
 _UPSTREAM = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
 # Ten, not five: on LongMemEval-S the evidence reached the prompt for 31 of 40
@@ -925,6 +969,7 @@ async def _non_stream_proxy(
     if response.is_success:
         auth = headers.get("Authorization", "")
         model = body.get("model", "")
+        await _room_for_store()
         _spawn_store(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model, tone))
 
     return JSONResponse(
@@ -1028,6 +1073,7 @@ async def _stream_proxy(
         log_entry["response_snippet"] = full_text[:500]
         log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
         _update_log(log_entry)
+        await _room_for_store()
         _spawn_store(_store_exchange(original_messages, full_text, tenant_id, write_space, auth, model, tone))
 
     try:

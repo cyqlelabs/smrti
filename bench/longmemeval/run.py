@@ -26,6 +26,7 @@ from ..harness import (
     finish,
     load_json,
     require_dataset,
+    require_decisions,
     resolve_answering,
     resolve_extraction,
 )
@@ -135,6 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     extraction = resolve_extraction(args)
     config["extraction"] = bool(extraction)
     apply_run_modes(args, config)
+    require_decisions(args.decisions)
     db_path, scratch = args.db, None
     if db_path is None:
         scratch = tempfile.TemporaryDirectory()

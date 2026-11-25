@@ -27,6 +27,7 @@ from ..harness import (
     load_baseline,
     load_json,
     require_dataset,
+    require_decisions,
     resolve_answering,
     resolve_extraction,
     write_baseline,
@@ -156,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     extraction = resolve_extraction(args)
     config["extraction"] = bool(extraction)
     apply_run_modes(args, config)
+    require_decisions(args.decisions)
     tolerance = config.pop("tolerance", 0.01)
 
     db_path, scratch = args.db, None

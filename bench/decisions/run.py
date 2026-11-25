@@ -142,19 +142,18 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         model = saved.get("model", "")
     else:
-        from smrti.decisions import DecisionPolicy, DecisionUnavailable, build_engine
+        from smrti.decisions import DecisionPolicy, build_engine
+
+        from ..harness import decisions_unavailable
 
         policy = DecisionPolicy.from_env().with_modes(routing="active")
         engine = build_engine(policy)
-        if engine.provider is None:
-            print("no decision provider configured", file=sys.stderr)
-            return 2
-        try:
-            preload = getattr(engine.provider, "preload", None)
-            if preload is not None:
-                preload()
-        except DecisionUnavailable as exc:
-            print(f"could not load local decision model: {exc}", file=sys.stderr)
+        reason = decisions_unavailable(engine)
+        if reason is not None:
+            # preload() reports a failed load by returning False, not by
+            # raising, so the check this replaces never fired and a run
+            # without the model scored the fallback.
+            print(f"the decision provider cannot answer: {reason}", file=sys.stderr)
             return 2
         routes = asyncio.run(route_all(items, engine, args.concurrency))
         model = engine.model

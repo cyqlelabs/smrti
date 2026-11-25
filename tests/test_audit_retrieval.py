@@ -7,6 +7,7 @@ table, so each similarity is exactly the one the scenario needs.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import math
 import random
 
@@ -62,7 +63,7 @@ def table_mem(tmp_path):
     return m
 
 
-_axes = iter(range(2, DIM))
+_axes = itertools.cycle(range(2, DIM))
 
 
 def _add(m, text: str, similarity: float, type: str = "episode", **cols) -> str:
@@ -298,4 +299,27 @@ def test_the_knn_refill_never_asks_for_more_than_sqlite_vec_returns():
     assert _knn_entry_points(b"", "t", "s", db, 50, 0.1) == []
     assert max(db.asked) == 4096
 
+# ── T13: stated warnings are found apart from the candidate pool ─────────────
+
+def test_find_warnings_reaches_a_stated_warning_the_candidate_pool_misses(table_mem):
+    """Seventy memories nearer the query filled the KNN pool, so a stated
+    warning never became a candidate and no top_k could deliver it."""
+    from smrti.retrieval.fan_out import find_warnings
+
+    stated = {"valence_stated": True}
+    warning = _add(table_mem, "never erase recovery snapshots", 0.7,
+                   valence=-1.0, intensity=1.0, metadata=stated)
+    for n in range(70):
+        _add(table_mem, f"filler note {n}", 0.8)
+    _add(table_mem, "never post the api key in chat", 0.1,
+         valence=-0.9, intensity=0.9, metadata=stated)
+    _add(table_mem, "the deploy failed badly last night", 0.75, valence=-0.9, intensity=0.9)
+    forgotten = _add(table_mem, "never skip the nightly backup", 0.72,
+                     valence=-0.9, intensity=0.9, metadata=stated)
+    table_mem.forget(atom_ids=[forgotten])
+    table_mem.embed.table["disaster policy"] = QUERY
+
+    found = find_warnings("disaster policy", "t", ["s"], table_mem.db, table_mem.embed)
+    assert [r.atom.id for r in found] == [warning]
+    assert found[0].similarity == pytest.approx(0.7, abs=1e-3)
 

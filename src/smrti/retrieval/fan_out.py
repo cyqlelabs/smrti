@@ -13,7 +13,15 @@ import numpy as np
 from smrti.core.models import AtomType, RecallResult, atom_from_row
 from smrti.core.atomspace import embedding_text
 from smrti.core.db import stable_rowid
-from smrti.core.provenance import ATOM_FORGOTTEN, SEVERE_RETAINED_SQL
+from smrti.core.provenance import (
+    ATOM_FORGOTTEN,
+    ATOM_OWN_INTENSITY,
+    ATOM_OWN_VALENCE,
+    CRITICAL_WARNING_SQL,
+    SEVERE_RETAINED_SQL,
+    WARNING_INTENSITY,
+    WARNING_VALENCE,
+)
 from smrti.personality.params import personality_params
 from smrti.retrieval.classify import is_critical_warning
 from smrti.retrieval.diversify import diversify
@@ -21,6 +29,7 @@ from smrti.retrieval.salience import compute_salience
 from smrti.retrieval.text import comparable, coverage, lexical_terms, word_set
 
 logger = logging.getLogger("smrti.retrieval.fan_out")
+
 # The KNN entry pool scales with the graph. A fixed pool lets conversational
 # froth crowd the gate long before the graph is large: a fact ranked just past
 # the cutoff by raw distance never reaches scoring, so truth, attention, and
@@ -682,3 +691,68 @@ def rank_candidates(
     # reading from a foreign space must not mutate that space's attention
     # weights, and reading a candidate the cut discarded is not reading.
     return results, sti_boost, min_confidence
+
+
+# How similar a stated warning must be to the query for find_warnings to
+# deliver it. Measured on the multilingual encoder, rules and the requests
+# they govern sit at 0.31–0.57 — "never run migrations without a backup"
+# against "run the database migration", an English rule against the Spanish
+# request to deploy — and unrelated requests at 0.22 and below.
+WARNING_MIN_SIMILARITY = 0.3
+
+
+def find_warnings(
+    query: str,
+    tenant_id: str,
+    read_spaces: list[str],
+    db,
+    embed_engine,
+    limit: int = 3,
+    min_similarity: float = WARNING_MIN_SIMILARITY,
+) -> list[RecallResult]:
+    """The stated warnings in the read spaces that bear on *query*, most
+    similar first, at most *limit*.
+
+    Found apart from recall's candidate pool. A warning seventy memories
+    further from the query than the nearest ones never entered the KNN pool,
+    and one that did could still be cut at top_k, so the one memory the
+    engine promises to deliver was the one a busy graph lost. Every
+    critical warning in the read spaces is scored against the query on its
+    stored vector instead — there are few of them — and those at or above
+    *min_similarity* are returned. Similarity alone ranks them, and is what
+    each result carries as its salience: a rule that bears on the request
+    applies however little attention it has had. Forgotten warnings are
+    never returned, and nothing is written.
+
+    The scan reads the whole partition, cheap tone columns first: 12 ms at
+    twenty thousand atoms.
+    """
+    read_spaces = list(dict.fromkeys(read_spaces))
+    if limit <= 0 or not read_spaces:
+        return []
+    spaces_ph = ",".join("?" * len(read_spaces))
+    rows = db.fetchall(
+        f"""SELECT * FROM atoms
+            WHERE tenant_id = ? AND space IN ({spaces_ph})
+              AND +type IN {_CANDIDATE_TYPES}
+              AND {ATOM_OWN_VALENCE} < {WARNING_VALENCE}
+              AND {ATOM_OWN_INTENSITY} > {WARNING_INTENSITY}
+              AND NOT {ATOM_FORGOTTEN} AND {CRITICAL_WARNING_SQL}""",
+        (tenant_id, *read_spaces),
+    )
+    if not rows:
+        return []
+    query_vec = embed_engine.embed(query)
+    stored = _stored_vectors([r["id"] for r in rows], db)
+    found: list[RecallResult] = []
+    for row in rows:
+        atom = atom_from_row(row)
+        vector = stored.get(atom.id)
+        if vector is None:
+            vector = embed_engine.embed(embedding_text(atom))
+        similarity = _cosine(query_vec, vector)
+        if similarity >= min_similarity:
+            found.append(RecallResult(atom=atom, salience=similarity, similarity=similarity))
+    found.sort(key=lambda r: (-r.similarity, r.atom.id))
+    return found[:limit]
+

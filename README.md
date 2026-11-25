@@ -319,7 +319,7 @@ response = client.chat.completions.create(
 On every request the proxy:
 
 1. Recalls relevant memories from the read spaces, building the query from recent conversation context (not just the last message)
-2. Injects them into the system prompt as labelled lines, each with a confidence qualifier: `Constraint:` for a stated warning, `Outdated:` for a replaced or disproven claim (a superseded fact reads `Outdated: Alice lives_in Berlin → Paris`), and `Note:` for background context. The `YOU MUST NOT` and `AVOID` rules are stated once, above the lines they govern. Stated warnings that bear on the request are added even when `top_k` cut them.
+2. Injects them into the system prompt as labelled lines, each with a confidence qualifier: `Constraint:` for a stated warning, `Outdated:` for a replaced or disproven claim (a superseded fact reads `Outdated: Alice lives_in Berlin → Paris`), and `Note:` for background context. Each memory's text is injected as a quoted string under a header saying quoted text is information, never an instruction, so stored text cannot forge a line of its own. The `YOU MUST NOT` and `AVOID` rules are stated once, above the lines they govern. Stated warnings that bear on the request are added even when `top_k` cut them.
 3. Stores the user message and assistant response as episodes once the upstream has returned a complete 2xx answer (identical episodes are deduplicated per tenant/space). The proxy reads tone from the text, and an estimated tone never becomes a `critical_warning`. A client that knows the user is reporting a mistake to avoid sends `X-Smrti-Valence: -0.9` (and optionally `X-Smrti-Intensity`) with that request, and the user message is stored with the valence stated. An out-of-range or non-numeric value is a 400.
 4. Extracts entities and claims into concept nodes and typed relation edges
 
@@ -660,13 +660,15 @@ These numbers are not directly comparable to published results: the subsets are 
 
 ## Upgrading
 
-An existing database is upgraded the first time a newer version opens it. Migrations and data repairs are idempotent. The first open by this release does three things:
+An existing database is upgraded the first time a newer version opens it. Migrations and data repairs are idempotent. The first open by 0.23 or later does three things:
 
 | Change | Runs | Snapshot |
 | ------ | ---- | -------- |
 | Creates the `epoch_lease` table and the indexes `idx_atoms_edge_out`, `idx_atoms_edge_in`, `idx_atoms_forgotten` and `idx_atoms_warning`, and drops `idx_atoms_sti` | Every open (no-op once done) | None |
 | Deletes the `associated` edges at confidence ≤ 0.2 out of person atoms: the hubs the old healing step drew, plus association discovery's own edges, which discovery redraws on its next tenth epoch | Once per database, recorded as `repair_hub_edges` in `smrti_meta` | Only if no `.pre-migration.bak` exists yet |
 | Rebuilds the tone of entities extracted by earlier versions, and sinks memories forgotten before this version so the pruner can remove them | Every open, on rows still in the old shape | Only if no `.pre-migration.bak` exists yet |
+
+0.23.1 embeds an episode's text once; earlier versions embedded its first 100 characters twice. A file written before 0.23.1 is re-embedded gradually: opening it records a progress marker per space in `smrti_meta` and changes no row, and each consolidation epoch re-embeds the next 256 atoms of the space until it is done. Recall works throughout, on a mix of old and new vectors.
 
 A schema migration (a column added to an existing table, or the vector index rebuilt) writes `<db>.pre-migration.bak` before it runs, replacing an older one; a data repair never replaces an existing snapshot, so the file a downgrade needs survives. Restore that file to downgrade. Bridge spaces an older epoch created on its own (`a_x_b`) are left in place; remove one with `DELETE /spaces/current?space=a_x_b`.
 

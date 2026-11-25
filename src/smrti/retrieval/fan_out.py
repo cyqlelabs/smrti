@@ -60,10 +60,10 @@ _KNN_POOL_MAX = 256
 # "please", a "che,", a dropped question mark) and short answers that share
 # their question's words at 0.79 and below, in English, Spanish, Hindi,
 # German and French. So a suspect must clear both lines. It is embedded
-# again on its own words for the verdict: the stored vector embeds label and
-# content together, for an episode its text twice, which pulls a verbatim
-# copy of the query down to 0.86 and leaves the answer level with the
-# echoes. Suspects are rare — no LongMemEval-S candidate is one — so the
+# again on its own words for the verdict: a database written before 0.23.1
+# stores episode vectors built on the text twice, which pull a verbatim copy
+# of the query down to 0.86, and they are replaced only gradually, a batch
+# an epoch. Suspects are rare — no LongMemEval-S candidate is one — so the
 # encoder runs only where a verdict is due.
 #
 # A pair too short for the overlap bar to mean anything ("deploy friday"

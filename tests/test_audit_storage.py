@@ -80,23 +80,51 @@ def test_readers_plan_with_the_statistics_optimize_gathers(tmp_path):
     instead of probing the primary key; and statistics gathered on the write
     connection never reached the pooled readers, which loaded the schema
     before them."""
-    db = get_database(str(tmp_path / "stats.db"))
+    path = str(tmp_path / "stats.db")
+    db = get_database(path)
     _episodes(db, "t", "s", 300)
     _episodes(db, "t", "other", 300)
+    db.execute("DROP TABLE IF EXISTS sqlite_stat1")
     ids = [r["id"] for r in db.fetchall("SELECT id FROM atoms WHERE space = 's' LIMIT 5")]
     sql = f"SELECT * FROM atoms WHERE id IN ({','.join('?' * 5)}) AND tenant_id = ? AND space = ?"
-    for _ in range(4):
-        db.fetchall(sql, (*ids, "t", "s"))  # every reader has loaded the schema
 
+    close_database(path)
+    db = get_database(path)
+    assert db.fetchone("SELECT 1 FROM sqlite_stat1 WHERE tbl = 'atoms'") is not None
+    with db._read_conn() as conn:
+        assert "sqlite_autoindex_atoms_1 (id=?)" in _plan(conn, sql, (*ids, "t", "s"))
+
+    # Statistics a later ANALYZE writes must reach readers that already loaded the schema.
+    _episodes(db, "t", "s", 300)
+    for _ in range(4):
+        db.fetchall(sql, (*ids, "t", "s"))
     db.execute("ANALYZE")
     db.optimize()
 
     for _ in range(4):
         with db._read_conn() as conn:
             assert "sqlite_autoindex_atoms_1 (id=?)" in _plan(conn, sql, (*ids, "t", "s"))
-    close_database(str(tmp_path / "stats.db"))
-    db = get_database(str(tmp_path / "stats.db"))
-    assert db.fetchone("SELECT 1 FROM sqlite_stat1 WHERE tbl = 'atoms'") is not None
+
+
+def test_a_database_another_process_is_writing_still_opens(tmp_path, caplog):
+    """Statistics need the write lock, and an open that had to gather them
+    while another process held it failed instead of opening."""
+    path = str(tmp_path / "busy.db")
+    db = get_database(path)
+    _episodes(db, "t", "s", 50)
+    db.execute("DROP TABLE sqlite_stat1")
+    db._write_conn.execute("PRAGMA busy_timeout=50")
+    other = sqlite3.connect(path)
+    other.execute("BEGIN IMMEDIATE")
+    try:
+        with caplog.at_level(logging.WARNING, logger="smrti.core.db"):
+            db.optimize()
+    finally:
+        other.rollback()
+        other.close()
+
+    assert any("not refreshed" in r.message for r in caplog.records)
+    assert db.fetchone("SELECT COUNT(*) AS n FROM atoms")["n"] == 50
 
 
 def _person_with_discovery_edge(path):

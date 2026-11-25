@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import queue
 import sqlite3
@@ -13,6 +14,8 @@ import sqlite_vec
 from smrti.core.models import STRUCTURAL_RELATIONS
 from smrti.core.provenance import ATOM_FORGOTTEN
 from smrti.retrieval.text import lexical_text
+
+logger = logging.getLogger(__name__)
 
 _registry: dict[str, "Database"] = {}
 _registry_lock = threading.Lock()
@@ -372,7 +375,14 @@ class Database:
         only the tables whose size has moved enough to matter, so it is cheap
         enough to run on every open and every few epochs. The 0x10000 bit
         makes it consider every table, not only those this connection has
-        already queried, which on a connection just opened may be none.
+        already queried, which on a connection just opened may be none. The
+        analysis limit samples each index instead of reading all of it, so
+        the cost stops growing with the graph and the plans come out the same.
+
+        ANALYZE needs the write lock. When another process holds it past the
+        busy timeout the statistics are left as they are, with a warning,
+        rather than failing the open: they are an optimization, and the next
+        call gathers them.
 
         A connection reads the statistics when it loads the schema, and an
         ANALYZE does not make the others reload theirs, so the pooled readers
@@ -382,7 +392,13 @@ class Database:
         callers cannot each drain half the pool and wait on the other.
         """
         with self._write_lock:
-            self._write_conn.execute("PRAGMA optimize=0x10002")
+            try:
+                self._write_conn.execute("PRAGMA analysis_limit=1000")
+                self._write_conn.execute("PRAGMA optimize=0x10002")
+            except sqlite3.OperationalError as exc:
+                self._write_conn.rollback()
+                logger.warning("planner statistics for %s not refreshed: %s", self._db_path, exc)
+                return
             if self._in_memory:
                 return
             stale = [self._read_pool.get() for _ in range(_READ_POOL_SIZE)]

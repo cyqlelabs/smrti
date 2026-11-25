@@ -131,3 +131,41 @@ def test_the_speaker_is_not_folded_into_the_only_person_a_text_names(mem):
     assert all(not ent.get("aliases") for ent in merge_pronoun_entities_in_batch(
         [{**ent, "aliases": []} for ent in entities]
     ))
+
+
+# ── writes two processes cannot interleave ──────────────────────────────────
+
+class _FixedEmbed:
+    def embed(self, text):
+        return [0.1] * 384
+
+
+def test_two_writers_creating_one_entity_make_one_atom(db_path, monkeypatch):
+    """Resolution looked for the entity, then inserted it, as two writes: a
+    second process that created the same name in between left two atoms for
+    one entity. The second writer here runs on its own connection, as another
+    process would, at the moment the first is building its insert."""
+    first, second = Database(db_path), Database(db_path)
+    first.initialize()
+    second.initialize()
+    rival = threading.Thread(
+        target=lambda: EntityResolver(second, _FixedEmbed()).resolve("Zarnow", "person", T, S, [S])
+    )
+    real_fts_write = atomspace_module.fts_write
+    started = threading.Event()
+
+    def interleaved(*args, **kwargs):
+        if not started.is_set():
+            started.set()
+            rival.start()
+            rival.join(timeout=1.0)
+        return real_fts_write(*args, **kwargs)
+
+    monkeypatch.setattr(atomspace_module, "fts_write", interleaved)
+    EntityResolver(first, _FixedEmbed()).resolve("Zarnow", "person", T, S, [S])
+    rival.join()
+
+    rows = first.fetchall("SELECT id FROM atoms WHERE label = 'Zarnow'")
+    assert len(rows) == 1
+    first.close()
+    second.close()

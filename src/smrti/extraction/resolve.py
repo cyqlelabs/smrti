@@ -244,10 +244,12 @@ class EntityResolver:
         # Tier 4: create new atom in write_space (reusing the probe vector)
         return self._create_atom(name, entity_type, tenant_id, write_space, vec=query_vec)
 
+    _EXACT_MATCH_SQL = f"""SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND entity_type = ?
+        AND tenant_id = ? AND space IN ({{spaces}}) AND NOT {ATOM_FORGOTTEN}"""
+
     def _exact_match(self, name: str, entity_type: str, tenant_id: str, spaces: list[str]) -> str | None:
         row = self.db.fetchone(
-            f"""SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND entity_type = ?
-                AND tenant_id = ? AND space IN ({",".join("?" * len(spaces))}) AND NOT {ATOM_FORGOTTEN}""",
+            self._EXACT_MATCH_SQL.format(spaces=",".join("?" * len(spaces))),
             (name, entity_type, tenant_id, *spaces),
         )
         return row["id"] if row else None
@@ -491,15 +493,21 @@ class EntityResolver:
             except Exception:
                 logger.warning("could not embed %r; created without a vector", name, exc_info=True)
                 vec = None
-        # Another writer may have created the same entity while the vector was
-        # computed, the slow part of creating one. Looking again narrows the
-        # window to the insert itself; closing it takes a constraint the
-        # schema does not have.
-        existing = self._exact_match(name, typed.value, tenant_id, [space])
-        if existing:
-            self._boost_sti(existing, tenant_id, space)
-            return existing
-        return AtomSpace(self.db, self.embed_engine).add_atom(
-            atom, embedding=None if vec is None else list(vec),
-            require_vector=vec is not None,
-        )
+        # Another writer, in this process or another, may have created the
+        # same entity since the tiers above looked, most likely while the
+        # vector was computed. The second look and the insert are one write
+        # transaction, so of two writers creating one name the second finds
+        # the first's atom. A unique index would do it with less, but a
+        # graph may already hold duplicates, and a forgotten atom shares its
+        # label with the one that replaced it.
+        with self.db.transaction() as conn:
+            existing = conn.execute(
+                self._EXACT_MATCH_SQL.format(spaces="?"), (name, typed.value, tenant_id, space)
+            ).fetchone()
+            if existing is None:
+                return AtomSpace(self.db, self.embed_engine).add_atom_in(
+                    conn, atom, embedding=None if vec is None else list(vec),
+                    require_vector=vec is not None,
+                )
+        self._boost_sti(existing["id"], tenant_id, space)
+        return existing["id"]

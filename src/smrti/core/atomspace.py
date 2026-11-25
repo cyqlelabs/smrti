@@ -67,7 +67,35 @@ class AtomSpace:
         without one rather than lose the atom; the lexical index still
         carries it, and a later text change re-embeds it.
         """
-        prior = self._db.fetchone(
+        self._db.execute_batch(
+            self._add_statements(atom, embedding, require_vector, self._db.fetchone)
+        )
+        return atom.id
+
+    def add_atom_in(
+        self,
+        conn,
+        atom: Atom,
+        embedding: list[float] | None = None,
+        *,
+        require_vector: bool = True,
+    ) -> str:
+        """:meth:`add_atom` inside a :meth:`Database.transaction` the caller
+        holds, so the atom commits or rolls back with the caller's other reads
+        and writes, which see each other and nothing another writer commits
+        in between. Hand the vector in: encoded here, it would hold every
+        other writer off for as long as the encoder runs.
+        """
+        for sql, params in self._add_statements(
+            atom, embedding, require_vector, lambda sql, params: conn.execute(sql, params).fetchone()
+        ):
+            conn.execute(sql, params)
+        return atom.id
+
+    def _add_statements(self, atom: Atom, embedding, require_vector: bool, fetchone) -> list[tuple]:
+        """The statements that write *atom* and its index rows, built against
+        what *fetchone* reads."""
+        prior = fetchone(
             "SELECT label, content, tenant_id, space FROM atoms WHERE id = ?",
             (atom.id,),
         )
@@ -152,7 +180,7 @@ class AtomSpace:
             # By rowid, never by atom_id: a vec0 table answers a non-rowid
             # predicate with a full scan of every vector in the database, so
             # this one query used to make each write cost O(graph size).
-            existing_vec = self._db.fetchone(
+            existing_vec = fetchone(
                 "SELECT 1 FROM vec_atoms WHERE rowid = ?",
                 (stable_rowid(atom.id),),
             )
@@ -180,8 +208,7 @@ class AtomSpace:
                     )
                 )
 
-        self._db.execute_batch(statements)
-        return atom.id
+        return statements
 
     def file_vectors(self, vectors: list[tuple[Atom, list[float]]]) -> None:
         """File each atom's vector as its index row, and clear its missing mark.

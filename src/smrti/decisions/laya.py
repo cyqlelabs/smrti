@@ -31,23 +31,31 @@ from .provider import DecisionUnavailable
 logger = logging.getLogger("smrti.decisions.laya")
 
 
-def _threads() -> int | None:
+def _default_threads() -> int:
+    # The runtime's own default was slower than four threads on the real
+    # checkpoint (85 against 53 ms per noul): it spreads one small inference
+    # across every core and pays the synchronisation. Past four the graph
+    # has no parallelism left to give.
+    return min(4, os.cpu_count() or 1)
+
+
+def _threads() -> int:
     """How many cores inference may hold.
 
-    ``SMRTI_DECISIONS_THREADS`` decides; unset leaves the runtime's own
-    default. The cap exists because the machines this matters on have two
-    slow cores, and a decision that takes the whole box for 200 ms is worse
-    than one that takes half of it for 400.
+    ``SMRTI_DECISIONS_THREADS`` decides; unset, or unreadable, means
+    ``min(4, cores)``. The cap exists because the machines this matters on
+    have two slow cores, and a decision that takes the whole box for 200 ms
+    is worse than one that takes half of it for 400.
     """
     raw = os.environ.get("SMRTI_DECISIONS_THREADS", "").strip()
     if not raw:
-        return None
+        return _default_threads()
     try:
         threads = int(raw)
     except ValueError:
         logger.warning("SMRTI_DECISIONS_THREADS=%r is not a number; ignoring it", raw)
-        return None
-    return threads if threads > 0 else None
+        return _default_threads()
+    return threads if threads > 0 else _default_threads()
 
 # Empty means "resolve it": an explicit directory, the one Factor already
 # has, or Smrti's own — see :func:`smrti.decisions.model.resolve`.

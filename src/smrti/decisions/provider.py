@@ -35,7 +35,10 @@ class DecisionUnavailable(Exception):
 
     Every caller treats it the same way — the deterministic path the engine
     took before decisions existed. A decision that cannot be made is not a
-    decision that was made badly.
+    decision that was made badly. Raised as itself, it means the provider is
+    down — a load that failed, a server that cannot be reached — and the
+    engine stops asking it for every task; the subclasses below each say
+    something narrower, and the engine scopes its cooldown to match.
     """
 
 
@@ -45,6 +48,29 @@ class DecisionTimeout(DecisionUnavailable):
     is a caller that handed the provider a slice of a larger budget and
     wants to know that the slice ran out rather than that the server did.
     See ``DecisionEngine.decide(partial=...)``."""
+
+
+class DecisionBusy(DecisionTimeout):
+    """The deadline ran out, or could not be met, because another caller
+    held the one inference worker. That is this caller's budget spent on a
+    queue, not a provider that stopped answering: six recalls asking at once
+    each judged one candidate and then silenced every task for a minute when
+    queue wait was read as an outage."""
+
+
+class DecisionNotReady(DecisionUnavailable):
+    """The model is still loading. It will answer in a moment, so the caller
+    falls back this once and nothing stops the next caller from asking: a
+    cooldown opened here kept decisions off for a minute after a model that
+    was ready a second later."""
+
+
+class DecisionInvalid(DecisionUnavailable):
+    """The provider was reached, but its answer to this question cannot be
+    used: a reply of the wrong shape, a value off the unit interval, an
+    option that was not offered, an inference that failed on this input.
+    It says nothing about the other tasks' questions, so only this task
+    stops asking for a while."""
 
 
 class DecisionUnsupported(DecisionUnavailable):
@@ -204,9 +230,9 @@ def _unit(value: Any, what: str) -> float:
     try:
         number = float(value)
     except (TypeError, ValueError) as exc:
-        raise DecisionUnavailable(f"{what} is not a number: {value!r}") from exc
+        raise DecisionInvalid(f"{what} is not a number: {value!r}") from exc
     if not 0.0 <= number <= 1.0 or number != number:
-        raise DecisionUnavailable(f"{what} is outside [0, 1]: {number!r}")
+        raise DecisionInvalid(f"{what} is outside [0, 1]: {number!r}")
     return number
 
 
@@ -220,19 +246,19 @@ def parse_answer(key: str, raw: Any, question: Question) -> Answer:
     be factually wrong, but it is at least a label the code was ready for.
     """
     if not isinstance(raw, Mapping):
-        raise DecisionUnavailable(f"answer {key!r} is not an object")
+        raise DecisionInvalid(f"answer {key!r} is not an object")
     kind = raw.get("type")
     try:
         if isinstance(question, Noul):
             if kind not in (None, "noul"):
-                raise DecisionUnavailable(f"answer {key!r} is {kind!r}, expected noul")
+                raise DecisionInvalid(f"answer {key!r} is {kind!r}, expected noul")
             return NoulAnswer(probability=_unit(raw["noul"], f"answer {key!r}"))
         if isinstance(question, Choice):
             if kind not in (None, "choice"):
-                raise DecisionUnavailable(f"answer {key!r} is {kind!r}, expected choice")
+                raise DecisionInvalid(f"answer {key!r} is {kind!r}, expected choice")
             choice = str(raw["choice"])
             if choice not in question.criteria:
-                raise DecisionUnavailable(f"answer {key!r} chose {choice!r}, not an offered option")
+                raise DecisionInvalid(f"answer {key!r} chose {choice!r}, not an offered option")
             probabilities = {
                 str(k): _unit(v, f"answer {key!r} probability {k!r}")
                 for k, v in (raw.get("probabilities") or {}).items()
@@ -244,10 +270,10 @@ def parse_answer(key: str, raw: Any, question: Question) -> Answer:
                 confidence=_unit(raw.get("confidence", 0.0), f"answer {key!r} confidence"),
             )
         if kind not in (None, "score"):
-            raise DecisionUnavailable(f"answer {key!r} is {kind!r}, expected score")
+            raise DecisionInvalid(f"answer {key!r} is {kind!r}, expected score")
         score = float(raw["score"])
         if score != score or score < 0.0 or score > len(question.criteria) - 1:
-            raise DecisionUnavailable(f"answer {key!r} scored {score!r}, outside the rubric")
+            raise DecisionInvalid(f"answer {key!r} scored {score!r}, outside the rubric")
         legend = {str(k): str(v) for k, v in (raw.get("legend") or {}).items()}
         if not legend:
             legend = {str(i): str(level) for i, level in enumerate(question.criteria)}
@@ -263,20 +289,20 @@ def parse_answer(key: str, raw: Any, question: Question) -> Answer:
     except DecisionUnavailable:
         raise
     except (KeyError, TypeError, ValueError) as exc:
-        raise DecisionUnavailable(f"answer {key!r} is not readable: {exc}") from exc
+        raise DecisionInvalid(f"answer {key!r} is not readable: {exc}") from exc
 
 
 def parse_response(data: Any, questions: Mapping[str, Question], latency_ms: float = 0.0) -> Decisions:
     """Read a whole reply. Every question asked must be answered."""
     if not isinstance(data, Mapping):
-        raise DecisionUnavailable("reply is not an object")
+        raise DecisionInvalid("reply is not an object")
     raw_answers = data.get("answers")
     if not isinstance(raw_answers, Mapping):
-        raise DecisionUnavailable("reply carries no answers object")
+        raise DecisionInvalid("reply carries no answers object")
     answers: dict[str, Answer] = {}
     for key, question in questions.items():
         if key not in raw_answers:
-            raise DecisionUnavailable(f"reply has no answer for {key!r}")
+            raise DecisionInvalid(f"reply has no answer for {key!r}")
         answers[key] = parse_answer(key, raw_answers[key], question)
     usage = data.get("usage") or {}
     if not isinstance(usage, Mapping):

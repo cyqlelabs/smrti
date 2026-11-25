@@ -46,6 +46,14 @@ REQUEST_PATH = "/v1/systemone"
 # actually loaded, which is what the audit record keeps.
 MODEL_NAME = "laya"
 
+# How long a ``/health`` probe that failed is remembered. Until it expires a
+# call takes Laya's shape, one question per call, without probing again: a
+# probe against a server that does not answer costs the caller's deadline,
+# and paying it before every decision doubles the wait on a hung server. It
+# is retried after the window rather than never, so a student that was
+# still loading is found to be one.
+HEALTH_RETRY_SECONDS = 60.0
+
 
 class RemoteProvider:
     """Decisions over HTTP, from a server that holds the model."""
@@ -63,6 +71,8 @@ class RemoteProvider:
         # What the server said it is, once it has said: "student" has heads
         # for a fixed list of tasks and a 400 for everything else.
         self._backend: str | None = None
+        # When ``/health`` may be probed again after a probe that failed.
+        self._health_retry_at = 0.0
 
     @staticmethod
     def _deadline(timeout: float | None) -> float:
@@ -73,34 +83,57 @@ class RemoteProvider:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"decision timeout must be a number, got {timeout!r}") from exc
         if deadline <= 0:
-            raise DecisionUnavailable("decision deadline has already expired")
+            raise DecisionTimeout("decision deadline has already expired")
         return deadline
 
     @staticmethod
     def _body(state: State, chunk: Mapping[str, Question]) -> dict[str, Any]:
         return {"model": MODEL_NAME, "state": state, "questions": questions_payload(chunk)}
 
-    def _per_call(self) -> int:
-        """How many questions ride one call: one for Laya (see ``laya``),
-        every one for a student, which answers a whole head in one pass and
-        would otherwise pay that pass per question. Asked of ``/health``
-        once; a server that does not say is taken for Laya."""
-        if self._questions_per_call is None:
-            try:
-                health = self._client.get("/health", timeout=5.0).json()
-            except (httpx.HTTPError, ValueError):
-                # Not an answer, so not remembered: a student that was still
-                # loading on the first call would otherwise be asked one
-                # question per call for the life of the provider.
-                return MAX_QUESTIONS_PER_CALL
-            per = MAX_QUESTIONS_PER_CALL
-            if isinstance(health, Mapping):
-                backend = health.get("backend")
-                self._backend = str(backend) if backend else None
-                if backend == "student":
-                    per = 256
-            self._questions_per_call = per
-        return self._questions_per_call
+    # How many questions ride one call: one for Laya (see ``laya``), every
+    # one for a student, which answers a whole head in one pass and would
+    # otherwise pay that pass per question. Asked of ``/health`` until the
+    # server says; one that does not say is taken for Laya. The probe is
+    # bounded by the decision's own deadline and, on the async path, awaited:
+    # a blocking GET with its own five seconds stalled the event loop of the
+    # extraction pipeline for all five on a server that did not answer.
+
+    def _probe_due(self) -> bool:
+        return self._questions_per_call is None and time.monotonic() >= self._health_retry_at
+
+    def _learn(self, health: Any) -> int:
+        per = MAX_QUESTIONS_PER_CALL
+        if isinstance(health, Mapping):
+            backend = health.get("backend")
+            self._backend = str(backend) if backend else None
+            if backend == "student":
+                per = 256
+        self._questions_per_call = per
+        return per
+
+    def _probe_failed(self) -> int:
+        # Not an answer, so nothing is learned from it; the shape is asked
+        # again once the window is over.
+        self._health_retry_at = time.monotonic() + HEALTH_RETRY_SECONDS
+        return MAX_QUESTIONS_PER_CALL
+
+    def _per_call(self, stop_at: float) -> int:
+        if not self._probe_due():
+            return self._questions_per_call or MAX_QUESTIONS_PER_CALL
+        try:
+            health = self._client.get("/health", timeout=self._remaining(stop_at)).json()
+        except (httpx.HTTPError, ValueError):
+            return self._probe_failed()
+        return self._learn(health)
+
+    async def _per_call_async(self, stop_at: float) -> int:
+        if not self._probe_due():
+            return self._questions_per_call or MAX_QUESTIONS_PER_CALL
+        try:
+            health = (await self._async.get("/health", timeout=self._remaining(stop_at))).json()
+        except (httpx.HTTPError, ValueError):
+            return self._probe_failed()
+        return self._learn(health)
 
     def answers(self, task: str) -> bool:
         """Whether the server has a head for *task* at all. A student is
@@ -119,11 +152,9 @@ class RemoteProvider:
 
         return task in tasks()
 
-    def _chunks(self, questions: Mapping[str, Question]) -> list[dict[str, Question]]:
-        if not questions:
-            raise ValueError("a decision needs at least one question")
+    @staticmethod
+    def _chunks(questions: Mapping[str, Question], per: int) -> list[dict[str, Question]]:
         items = list(questions.items())
-        per = self._per_call()
         return [dict(items[i : i + per]) for i in range(0, len(items), per)]
 
     @staticmethod
@@ -170,11 +201,13 @@ class RemoteProvider:
         return left
 
     def ask(self, state: State, questions: Mapping[str, Question], *, timeout: float | None = None) -> Decisions:
+        if not questions:
+            raise ValueError("a decision needs at least one question")
         deadline = self._deadline(timeout)
         started = time.monotonic()
         stop_at = started + deadline
         pieces = []
-        for chunk in self._chunks(questions):
+        for chunk in self._chunks(questions, self._per_call(stop_at)):
             try:
                 response = self._client.post(
                     REQUEST_PATH, json=self._body(state, chunk), timeout=self._remaining(stop_at)
@@ -195,11 +228,13 @@ class RemoteProvider:
     async def ask_async(
         self, state: State, questions: Mapping[str, Question], *, timeout: float | None = None
     ) -> Decisions:
+        if not questions:
+            raise ValueError("a decision needs at least one question")
         deadline = self._deadline(timeout)
         started = time.monotonic()
         stop_at = started + deadline
         pieces = []
-        for chunk in self._chunks(questions):
+        for chunk in self._chunks(questions, await self._per_call_async(stop_at)):
             try:
                 response = await self._async.post(
                     REQUEST_PATH, json=self._body(state, chunk), timeout=self._remaining(stop_at)

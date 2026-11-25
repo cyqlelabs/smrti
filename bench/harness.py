@@ -105,7 +105,7 @@ def build_parser(prog: str, config_path: str, baseline_path: str) -> argparse.Ar
     parser.add_argument("--epochs", type=int, default=0, help="reflect() passes to run over each history before querying it")
     parser.add_argument("--top-k", dest="top_k", type=int, default=None, help="override the locked top_k (the proxy injects 5, the MCP tool 10)")
     # The decision layer (smrti.decisions) reranks the shortlist and judges
-    # tone at ingest. It is active by default in the engine, but the gate
+    # tone at ingest. The engine turns some of it on by default, but the gate
     # measures the deterministic retrieval half: the recorded baselines were
     # taken before decisions existed, a run with them on needs a 250MB model
     # fetched first, and a gate whose number moves with a model download is
@@ -117,6 +117,21 @@ def build_parser(prog: str, config_path: str, baseline_path: str) -> argparse.Ar
         help="run every local decision task in this mode (default: off, which is what the baselines measure)",
     )
     return parser
+
+
+def measured_config(config: dict, extraction: dict | None) -> dict:
+    """The config a run's fingerprint is taken over: *config*, plus the
+    extraction model and mode when extraction is on.
+
+    ``extraction`` alone said only that a graph was built, so runs whose
+    graphs came from different models, or from the LLM against the local
+    tagger, shared a fingerprint and gated against each other. The two join
+    only when extraction is on, so the default run keeps the fingerprint
+    its baseline was recorded under.
+    """
+    if not extraction:
+        return config
+    return {**config, "extract_model": extraction.get("model", ""), "extract_mode": extraction.get("mode", "")}
 
 
 def apply_run_modes(args, config: dict) -> None:
@@ -157,6 +172,56 @@ def apply_decisions_mode(mode: str) -> None:
     for task in TASKS:
         os.environ.pop(f"SMRTI_DECISIONS_{task.upper()}", None)
     reset_decisions(None)
+
+
+# How long a run with decisions on waits for the model before refusing to
+# start: a first load may fetch 250 MB of weights. And how long the one
+# question that proves the model answers may take, first inference included.
+DECISIONS_LOAD_SECONDS = 600.0
+DECISIONS_PROBE_SECONDS = 60.0
+
+
+def decisions_unavailable(engine) -> str | None:
+    """Why *engine*'s provider cannot answer a decision, or None when it can.
+
+    Every decision site falls back to the deterministic path when the
+    provider cannot load, which is right in production and wrong in a
+    measurement: a ``--decisions active`` run on a machine without the
+    runtime measured the fallback under the active run's fingerprint and
+    said nothing. So the load is waited out and one real question asked.
+    """
+    from smrti.decisions import DecisionUnavailable
+    from smrti.decisions.extraction import TONE_QUESTION
+
+    if engine.provider is None:
+        return "no decision provider is configured"
+    preload = getattr(engine.provider, "preload", None)
+    if callable(preload):
+        preload(DECISIONS_LOAD_SECONDS)
+    try:
+        # A question every engine has a head for: the student refuses any
+        # it was not trained on.
+        engine.provider.ask(
+            {"text": "ready", "author": "user", "kind": "episode"},
+            {"tone": TONE_QUESTION}, timeout=DECISIONS_PROBE_SECONDS,
+        )
+    except DecisionUnavailable as exc:
+        return str(exc)
+    return None
+
+
+def require_decisions(mode: str) -> None:
+    """Refuse a run with decisions on that would measure the fallback."""
+    if mode == "off":
+        return
+    from smrti.decisions import get_decisions
+
+    reason = decisions_unavailable(get_decisions())
+    if reason is not None:
+        raise SystemExit(
+            f"--decisions {mode}: the decision provider cannot answer ({reason}); "
+            "refusing to measure the deterministic fallback under this mode's fingerprint"
+        )
 
 
 def consolidate(mem, epochs: int) -> None:

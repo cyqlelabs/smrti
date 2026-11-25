@@ -10,7 +10,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 _CALL_LOG: deque[dict[str, Any]] = deque(maxlen=200)
-_subscribers: list[asyncio.Queue[dict[str, Any]]] = []
+# A subscriber reads entries until it reads None, which close_streams() sends.
+_subscribers: list[asyncio.Queue[dict[str, Any] | None]] = []
 
 _MAX_ENTRY_BYTES = 50_000
 _TRUNCATION_MARKER = "…[truncated]"
@@ -44,27 +45,39 @@ def _entry_bytes(entry: dict[str, Any]) -> int:
         return 0
 
 
-def _truncate_value(value: Any, max_len: int) -> Any:
+def _truncate_value(value: Any, max_len: int, max_items: int) -> Any:
     if isinstance(value, str) and len(value) > max_len:
         return value[:max_len] + _TRUNCATION_MARKER
     if isinstance(value, list):
-        return [_truncate_value(v, max_len) for v in value]
+        # A long conversation is mostly old turns, so the newest are kept.
+        dropped = len(value) - max_items
+        items = [_truncate_value(v, max_len, max_items) for v in value[max(dropped, 0):]]
+        return [f"…[{dropped} earlier items truncated]", *items] if dropped > 0 else items
     if isinstance(value, dict):
-        return {k: _truncate_value(v, max_len) for k, v in value.items()}
+        return {k: _truncate_value(v, max_len, max_items) for k, v in value.items()}
     return value
 
 
 def _cap_entry(entry: dict[str, Any]) -> None:
     """Bound the serialized entry size (~50KB), mutating the dict in place.
 
-    Structure (message lists, dict keys) is preserved — individual strings are
-    shortened and marked with a truncation marker.
+    Strings are shortened and long lists cut to their newest items, each cut
+    marked. Shortening strings alone left a conversation of a thousand short
+    turns at any size, and every pass over it ran on the event loop. An
+    entry still over the bound after the tightest pass gives up its largest
+    lists and dicts whole — emptied, not retyped, so the visualizer still
+    reads them — while the short fields that identify it are kept.
     """
     if _entry_bytes(entry) <= _MAX_ENTRY_BYTES:
         return
-    for max_len in (4000, 1000, 200):
+    for max_len, max_items in ((4000, 100), (1000, 20), (200, 5)):
         for key in list(entry):
-            entry[key] = _truncate_value(entry[key], max_len)
+            entry[key] = _truncate_value(entry[key], max_len, max_items)
+        if _entry_bytes(entry) <= _MAX_ENTRY_BYTES:
+            return
+    bulky = [k for k, v in entry.items() if isinstance(v, (list, dict))]
+    for key in sorted(bulky, key=lambda k: _entry_bytes({k: entry[k]}), reverse=True):
+        entry[key] = [_TRUNCATION_MARKER] if isinstance(entry[key], list) else {}
         if _entry_bytes(entry) <= _MAX_ENTRY_BYTES:
             return
 
@@ -102,10 +115,26 @@ def clear() -> None:
     _notify({"__clear__": True})
 
 
-def subscribe() -> asyncio.Queue[dict[str, Any]]:
-    q: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=200)
+def subscribe() -> asyncio.Queue[dict[str, Any] | None]:
+    q: asyncio.Queue[dict[str, Any] | None] = asyncio.Queue(maxsize=200)
     _subscribers.append(q)
     return q
+
+
+def close_streams() -> None:
+    """End every live subscription: each reader stops at the None it is sent.
+
+    Called as the server shuts down, since a subscriber left open is a
+    connection uvicorn waits on. A full queue gives up its oldest entry to
+    make room, as a reader that far behind has lost entries already.
+    """
+    for q in list(_subscribers):
+        while True:
+            try:
+                q.put_nowait(None)
+                break
+            except asyncio.QueueFull:
+                q.get_nowait()
 
 
 def unsubscribe(q: asyncio.Queue[dict[str, Any]]) -> None:

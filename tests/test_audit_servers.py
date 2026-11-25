@@ -473,3 +473,174 @@ def test_a_negated_warning_is_not_injected_under_a_second_negation():
     assert injection.count("YOU MUST NOT") == 1
     assert "Outdated" not in injection  # only the rule for a severity present is stated
     assert proxy._scrub_injected_memory(injection + "\nThe real answer.") == "The real answer."
+
+
+# ── T23: the event loop stays free, and shutdown finishes ────────────────────
+
+def test_a_slow_graph_read_does_not_stall_other_requests_and_its_limit_is_capped(keyed, monkeypatch):
+    """/graph ran SQLite on the event loop, and limit=0 read the whole space."""
+    import asyncio
+    import time
+
+    import httpx
+
+    from smrti.servers import rest as rest_mod
+    from smrti.servers import viz_routes
+
+    monkeypatch.setattr(viz_routes, "_GRAPH_LIMIT_MAX", 1)
+    Smrti(db_path=keyed.db, tenant_id="default").remember("a second default note")
+    assert len(keyed.get("/graph", params={"limit": 0}, headers=ADMIN).json()["nodes"]) == 1
+
+    real_graph = viz_routes._Reader.graph
+
+    def _slow_graph(self, *args):
+        time.sleep(0.5)
+        return real_graph(self, *args)
+
+    monkeypatch.setattr(viz_routes._Reader, "graph", _slow_graph)
+
+    async def _run():
+        transport = httpx.ASGITransport(app=rest_mod.app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://t", headers=ADMIN) as c:
+            graph = asyncio.create_task(c.get("/graph"))
+            await asyncio.sleep(0.05)
+            started = time.monotonic()
+            await c.get("/llm-calls")
+            ping = time.monotonic() - started
+            await graph
+            return ping
+
+    assert asyncio.run(_run()) < 0.3
+
+
+def test_a_call_log_entry_is_bounded_by_bytes_however_many_turns_it_holds():
+    """The cap shortened strings only: a thousand short turns stayed at 133 KB."""
+    entry = {"kind": "proxy", "tenant_id": "t", "original_messages": [
+        {"role": "user", "content": f"turn {i} " + "x" * 100} for i in range(1000)
+    ]}
+    call_log.append(entry)
+    stored = call_log.get_all()[0]
+    assert call_log._entry_bytes(stored) <= call_log._MAX_ENTRY_BYTES
+    assert stored["original_messages"][-1]["content"].startswith("turn 999")
+    assert stored["tenant_id"] == "t"
+    call_log._CALL_LOG.clear()
+
+
+def test_the_live_log_stream_ends_when_the_server_shuts_down():
+    """An open /llm-calls/stream never ended, so uvicorn waited on it forever."""
+    import asyncio
+
+    from starlette.requests import Request
+
+    from smrti.servers import viz_routes
+
+    router = viz_routes.create_viz_router(lambda tenant, space: None)
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/llm-calls/stream")
+
+    async def _run():
+        response = await endpoint(Request({"type": "http", "method": "GET", "headers": [], "query_string": b""}))
+        reading = asyncio.create_task(response.body_iterator.__anext__())
+        while not call_log._subscribers:
+            await asyncio.sleep(0)
+        call_log.close_streams()
+        with pytest.raises(StopAsyncIteration):
+            await asyncio.wait_for(reading, timeout=1)
+        assert call_log._subscribers == []
+
+    asyncio.run(_run())
+
+
+def test_rest_shutdown_drains_extractions_but_not_forever(monkeypatch):
+    """REST dropped in-flight extractions at shutdown; the wait is now bounded."""
+    import asyncio
+
+    from smrti.servers import common
+    from smrti.servers import rest as rest_mod
+
+    monkeypatch.setattr(common, "DRAIN_SECONDS", 0.2)
+    done = []
+
+    async def _extraction():
+        await asyncio.sleep(0.05)
+        done.append(True)
+
+    async def _run():
+        with patch("smrti.servers.rest.run_reflect_loop", new=_noop_reflect):
+            async with rest_mod.lifespan(rest_mod.app):
+                for coro in (_extraction(), asyncio.sleep(3600)):
+                    task = asyncio.create_task(coro)
+                    rest_mod._background_tasks.add(task)
+                    task.add_done_callback(rest_mod._background_tasks.discard)
+                started = asyncio.get_running_loop().time()
+            elapsed = asyncio.get_running_loop().time() - started
+        for task in list(rest_mod._background_tasks):
+            task.cancel()
+        return elapsed
+
+    assert asyncio.run(_run()) < 1
+    assert done == [True]
+
+
+def test_an_oversized_request_body_is_refused_with_413(keyed, monkeypatch):
+    """REST and the proxy read a request body of any size into memory."""
+    from smrti.servers import config as cfg
+
+    monkeypatch.setattr(cfg, "MAX_BODY_BYTES", 1000)
+    big = {"content": "x" * 2000}
+    assert keyed.post("/remember", json=big, headers=ADMIN).status_code == 413
+
+    def _chunks():
+        yield b'{"content": "'
+        yield b"x" * 2000
+        yield b'"}'
+
+    chunked = keyed.post("/remember", content=_chunks(), headers={**ADMIN, "content-type": "application/json"})
+    assert chunked.status_code == 413
+    assert keyed.post("/remember", json={"content": "small"}, headers=ADMIN).status_code == 200
+
+
+def test_the_visualizer_takes_the_key_once_and_then_rides_a_cookie(keyed):
+    """With a key set, browser navigation and EventSource sent none, so /viz was unusable."""
+    assert keyed.get("/viz", params={"key": "wrong"}, follow_redirects=False).status_code == 401
+    login = keyed.get("/viz", params={"key": "admin-key"}, follow_redirects=False)
+    assert login.status_code == 303
+    assert login.headers["location"] == "viz"
+    cookie = login.headers["set-cookie"].lower()
+    assert "httponly" in cookie and "samesite=strict" in cookie
+    assert keyed.get("/viz").status_code == 200
+    assert keyed.get("/llm-calls").status_code == 200
+    keyed.cookies.clear()
+    assert keyed.get("/llm-calls").status_code == 401
+
+
+def test_a_non_ascii_api_key_is_a_401_not_a_500(keyed):
+    """compare_digest raised TypeError on a non-ASCII header value."""
+    response = keyed.get("/status", headers=[(b"x-api-key", "k\xe9y".encode("latin-1"))])
+    assert response.status_code == 401
+
+
+def test_an_evicted_instance_with_pending_activity_gets_its_epoch(tmp_path, monkeypatch):
+    """Eviction dropped the activity count, so past 64 active spaces none ever aged."""
+    import asyncio
+
+    from smrti.servers import proxy, reflect_loop
+
+    monkeypatch.setattr(reflect_loop, "REFLECT_INTERVAL", 60)
+    monkeypatch.setattr(proxy, "_INSTANCES_MAX", 2)
+    monkeypatch.setattr(proxy, "_instances", type(proxy._instances)())
+    db = str(tmp_path / "evict.db")
+    monkeypatch.setattr(proxy, "_bootstrap", lambda: ("default", "default", db))
+
+    def epochs(space):
+        return Smrti(db_path=db, write_space=space).db.fetchone(
+            "SELECT epoch_count FROM personality WHERE tenant_id = 'default' AND space = ?", (space,)
+        )["epoch_count"]
+
+    async def _run():
+        proxy.get_mem("default", "busy").remember("a memory in a busy space")
+        proxy.get_mem("default", "idle")
+        proxy.get_mem("default", "newcomer")  # evicts "busy", which has an epoch owed
+        await asyncio.gather(*list(proxy._background_tasks))
+
+    asyncio.run(_run())
+    assert epochs("busy") == 1

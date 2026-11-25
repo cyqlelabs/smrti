@@ -11,7 +11,16 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from smrti import Smrti
 from smrti.servers import config as cfg
-from smrti.servers.common import api_key_middleware, api_root, tenant_for, upstream_authorization
+from smrti.servers.common import (
+    BodyLimit,
+    api_key_middleware,
+    api_root,
+    consolidate_evicted,
+    drain,
+    serve,
+    tenant_for,
+    upstream_authorization,
+)
 from smrti.servers.mcp import create_smrti, handle_tool
 from smrti.servers.reflect_loop import run_reflect_loop
 from smrti.servers.viz_routes import create_viz_router
@@ -22,6 +31,9 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(run_reflect_loop(_all_mems))
     yield
     task.cancel()
+    # The extractions still running are graphs for memories the client was
+    # already told it stored; they used to be dropped at shutdown.
+    await drain(_background_tasks)
 
 
 app = FastAPI(
@@ -30,6 +42,10 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+# Inside the auth middleware, which a request passes first: its receive
+# wrapper runs the route in a task group, and a 413 raised from beneath it
+# reached FastAPI's body parser as some other error and became a 400.
+app.add_middleware(BodyLimit)
 app.middleware("http")(api_key_middleware)
 
 _mem: Optional[Smrti] = None
@@ -72,7 +88,7 @@ def get_mem(space: Optional[str] = None, tenant: Optional[str] = None) -> Smrti:
         return _mem
     if space not in _space_mems:
         while len(_space_mems) >= _SPACE_MEMS_MAX:
-            _space_mems.popitem(last=False)
+            consolidate_evicted(_space_mems.popitem(last=False)[1], _background_tasks)
         _space_mems[space] = Smrti(
             db_path=cfg.DB,
             personality=cfg.PERSONALITY,
@@ -91,7 +107,7 @@ def _tenant_mem(tenant: str, space: str) -> Smrti:
     key = (tenant, space)
     if key not in _tenant_mems:
         while len(_tenant_mems) >= _SPACE_MEMS_MAX:
-            _tenant_mems.popitem(last=False)
+            consolidate_evicted(_tenant_mems.popitem(last=False)[1], _background_tasks)
         _tenant_mems[key] = Smrti(
             db_path=cfg.DB,
             personality=cfg.PERSONALITY,
@@ -382,5 +398,4 @@ async def clear_current_space(request: Request, space: Optional[SpaceName] = Que
 
 
 def run_rest_server(host: str = "0.0.0.0", port: int = 8420) -> None:
-    import uvicorn
-    uvicorn.run(app, host=host, port=port)
+    serve(app, host, port)

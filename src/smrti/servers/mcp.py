@@ -13,7 +13,7 @@ from smrti import Smrti, _write_metadata
 from smrti.personality.params import PersonalityProfile, load_preset
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
-from smrti.servers.common import api_root
+from smrti.servers.common import api_root, drain
 from smrti.servers.tools import TOOLS
 from smrti.servers.reflect_loop import run_reflect_loop
 
@@ -368,5 +368,8 @@ def run_mcp_server() -> None:
                 )
         finally:
             task.cancel()
+            # Extractions still running are graphs for memories the client
+            # was already told it stored; they used to be dropped here.
+            await drain(_background_tasks)
 
     asyncio.run(_main())

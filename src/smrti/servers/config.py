@@ -46,6 +46,10 @@ def _parse_api_keys(raw: str) -> dict[str, tuple[str, ...]]:
 # key for every tenant. Either one being set turns authentication on.
 API_KEYS: dict[str, tuple[str, ...]] = _parse_api_keys(os.environ.get("SMRTI_API_KEYS", ""))
 
+# Largest request body REST and the proxy accept, in bytes; a larger one gets
+# a 413 before it is read into memory. 0 turns the limit off.
+MAX_BODY_BYTES: int = int(os.environ.get("SMRTI_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
+
 # Extra SQLite paths the visualizer's ?db= param may open — os.pathsep-separated.
 # Empty by default, so the only browsable DB is the one the server was started
 # with; the endpoints are unauthenticated unless SMRTI_API_KEY is set, so an

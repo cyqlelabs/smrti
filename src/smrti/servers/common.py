@@ -1,13 +1,27 @@
 """HTTP plumbing shared by the REST and proxy servers."""
 from __future__ import annotations
 
+import asyncio
+import logging
 import secrets
 from typing import Optional
 
-from fastapi import Request
-from fastapi.responses import JSONResponse
+from fastapi import HTTPException, Request
+from fastapi.responses import JSONResponse, RedirectResponse
+from starlette.datastructures import Headers
 
 from smrti.servers import config as cfg
+
+logger = logging.getLogger("smrti.servers")
+
+# How long uvicorn waits for open connections at shutdown, and how long the
+# lifespan then waits for in-flight stores. Together they stay inside the 10
+# seconds `smrti stop` gives a server before it kills it.
+GRACEFUL_SHUTDOWN_SECONDS = 3
+DRAIN_SECONDS = 5
+
+# The cookie the visualizer authenticates with (see _viz_login).
+KEY_COOKIE = "smrti_key"
 
 # What a presented key may act on: None is every tenant (SMRTI_API_KEY), a
 # tuple is the tenants a SMRTI_API_KEYS entry lists, and _NO_KEY is a key
@@ -88,7 +102,14 @@ async def api_key_middleware(request: Request, call_next):
     """
     if not (cfg.API_KEY or cfg.API_KEYS):
         return await call_next(request)
-    for supplied in (request.headers.get("x-api-key") or "", _bearer(request)):
+    if request.url.path == "/viz" and "key" in request.query_params:
+        return _viz_login(request)
+    presented = (
+        request.headers.get("x-api-key") or "",
+        _bearer(request),
+        request.cookies.get(KEY_COOKIE, ""),
+    )
+    for supplied in presented:
         tenants = _tenants_of(supplied)
         if tenants is not _NO_KEY:
             break
@@ -102,6 +123,26 @@ async def api_key_middleware(request: Request, call_next):
         request.state.tenant = named[0] if named else tenants[0]
     request.state.tenants = tenants
     return await call_next(request)
+
+
+def _viz_login(request: Request):
+    """Trade ``/viz?key=…`` for a cookie, then send the browser on to /viz.
+
+    A browser navigating to the visualizer, and the EventSource it opens for
+    the live log, send no header, so with a key configured the page could
+    not load at all. The key is accepted once in the query and kept in an
+    HttpOnly, SameSite=Strict cookie the auth check reads like a header; the
+    redirect takes it back out of the address bar and the history.
+    """
+    supplied = request.query_params["key"]
+    if _tenants_of(supplied) is _NO_KEY:
+        return _error(401, "Invalid or missing API key", "authentication_error", "invalid_api_key")
+    response = RedirectResponse("viz", status_code=303)
+    response.set_cookie(
+        KEY_COOKIE, supplied, httponly=True, samesite="strict",
+        secure=request.url.scheme == "https",
+    )
+    return response
 
 
 def upstream_authorization(request: Request) -> str:
@@ -144,3 +185,107 @@ def visible(request: Request, tenant_id: Optional[str]) -> bool:
     """Whether this request's key may see a record filed under *tenant_id*."""
     tenants = getattr(request.state, "tenants", None)
     return tenants is None or tenant_id in tenants
+
+
+class BodyLimit:
+    """Refuse a request body over SMRTI_MAX_BODY_BYTES with a 413.
+
+    A declared Content-Length over the limit is refused before anything is
+    read; a chunked body is counted as it arrives and refused once it passes
+    the limit. Without it a single request could hold any amount of memory.
+    """
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        limit = cfg.MAX_BODY_BYTES
+        if scope["type"] != "http" or limit <= 0:
+            await self.app(scope, receive, send)
+            return
+        declared = Headers(scope=scope).get("content-length", "")
+        if declared.isdigit() and int(declared) > limit:
+            await _too_large(limit)(scope, receive, send)
+            return
+        received = 0
+
+        async def counting_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise HTTPException(413, f"Request body is larger than {limit} bytes")
+            return message
+
+        await self.app(scope, counting_receive, send)
+
+
+def _too_large(limit: int) -> JSONResponse:
+    return JSONResponse(status_code=413, content={"detail": f"Request body is larger than {limit} bytes"})
+
+
+async def drain(tasks: set) -> None:
+    """Wait, for at most DRAIN_SECONDS, for in-flight background work.
+
+    Each task is a memory a client was already answered as though it were
+    stored, so shutdown waits for them, and the wait is bounded because one
+    hung model call must not hold the process up.
+    """
+    if tasks:
+        await asyncio.wait(list(tasks), timeout=DRAIN_SECONDS)
+
+
+def consolidate_evicted(mem, tasks: set) -> None:
+    """Run the epoch an instance evicted from a cache is owed.
+
+    The reflect loop consolidates the instances it can see, and an evicted
+    instance takes its activity count with it: with more active spaces than
+    a cache holds, spaces left before their epoch came round, and none of
+    them ever aged. One with activity since its last epoch is consolidated
+    as it leaves, in the executor, and tracked in *tasks* so shutdown waits
+    for it. Nothing runs when the reflect loop is off.
+    """
+    from smrti.servers import reflect_loop
+
+    ops = getattr(mem, "ops_since_reflect", None)
+    if not isinstance(ops, int) or ops <= 0 or reflect_loop.REFLECT_INTERVAL <= 0:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        mem.reflect()  # no event loop to keep free
+        return
+    future = loop.run_in_executor(None, mem.reflect)
+    tasks.add(future)
+    future.add_done_callback(tasks.discard)
+    future.add_done_callback(_log_failure)
+
+
+def _log_failure(future) -> None:
+    if not future.cancelled() and future.exception() is not None:
+        logger.error("reflect of an evicted instance failed", exc_info=future.exception())
+
+
+def serve(app, host: str, port: int) -> None:
+    """Run *app* under uvicorn, ending the live log streams as shutdown begins.
+
+    uvicorn waits for open connections to close before it runs the lifespan
+    shutdown, and an SSE subscriber to /llm-calls/stream never closes its
+    own: one open visualizer held the server, and the drain of in-flight
+    stores behind it, until the process was killed. The streams are ended
+    first, and the wait for the rest is bounded.
+    """
+    import uvicorn
+
+    from smrti import call_log
+
+    class _Server(uvicorn.Server):
+        async def shutdown(self, sockets=None):
+            call_log.close_streams()
+            await super().shutdown(sockets=sockets)
+
+    config = uvicorn.Config(
+        app, host=host, port=port, timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_SECONDS
+    )
+    _Server(config).run()

@@ -23,6 +23,19 @@ GetMemFn = Callable[[str, str], Smrti]
 _db_cache: dict[str, "_Reader"] = {}
 _DB_CACHE_MAX = 20
 
+# The most atoms one /graph request returns.
+_GRAPH_LIMIT_MAX = 5000
+
+
+async def _off_loop(fn, *args):
+    """Run a blocking read in the executor.
+
+    These handlers ran their SQLite queries on the event loop, and one
+    /graph of a large space stalled every other request the server held,
+    the proxy's chat completions included, for as long as it took.
+    """
+    return await asyncio.get_running_loop().run_in_executor(None, fn, *args)
+
 
 class _Reader:
     """The reads the visualizer routes make over one database, and nothing else.
@@ -63,6 +76,43 @@ class _Reader:
             "by_type": {row["type"]: row["n"] for row in by_type},
             "personality": dict(personality) if personality else {},
         }
+
+    def graph(
+        self, tenant_id: str, space: str, type_list: list[str], limit: int, min_confidence: float
+    ) -> dict:
+        """The *limit* most salient atoms of a space and the edges among them."""
+        ph = ",".join("?" * len(type_list))
+        node_sql = f"""SELECT * FROM atoms
+                        WHERE tenant_id=? AND space=? AND type IN ({ph})
+                          AND confidence >= ?
+                        ORDER BY (sti + lti) DESC
+                        LIMIT ?"""
+        node_params = (tenant_id, space, *type_list, min_confidence, limit)
+        rows = self.db.fetchall(node_sql, node_params)
+        nodes = [dict(r) for r in rows]
+        node_ids = {n["id"] for n in nodes}
+        node_labels = {n["id"]: n["label"] for n in nodes}
+
+        edges = []
+        if node_ids:
+            # Anchor the edge query to the node window instead of reading a
+            # capped slice of every relation in the space: that cap silently
+            # dropped edges once a space held more relations than it allowed.
+            edge_rows = self.db.fetchall(
+                f"""WITH sel AS ({node_sql})
+                    SELECT * FROM atoms
+                    WHERE tenant_id=? AND space=? AND type='relation'
+                      AND source_id IN (SELECT id FROM sel)""",
+                (*node_params, tenant_id, space),
+            )
+            for r in edge_rows:
+                if r["target_id"] in node_ids:
+                    e = dict(r)
+                    e["source_label"] = node_labels.get(r["source_id"])
+                    e["target_label"] = node_labels.get(r["target_id"])
+                    edges.append(e)
+
+        return {"nodes": nodes, "edges": edges}
 
 
 def _db_mem(db_path: str) -> _Reader:
@@ -138,14 +188,16 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
 
     @router.get("/tenants")
     async def list_tenants(request: Request, db: str | None = Query(None)):
-        rows = _reader(db).db.fetchall("SELECT DISTINCT tenant_id FROM atoms ORDER BY tenant_id")
+        rows = await _off_loop(
+            _reader(db).db.fetchall, "SELECT DISTINCT tenant_id FROM atoms ORDER BY tenant_id"
+        )
         return [r["tenant_id"] for r in rows if visible(request, r["tenant_id"])]
 
     @router.get("/spaces")
     async def list_spaces(
         request: Request, tenant_id: str | None = Query(None), db: str | None = Query(None)
     ):
-        return _reader(db).list_spaces(tenant_for(request, tenant_id, cfg.TENANT_ID))
+        return await _off_loop(_reader(db).list_spaces, tenant_for(request, tenant_id, cfg.TENANT_ID))
 
     @router.get("/graph")
     async def get_graph(
@@ -165,41 +217,11 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         type_list = [t.strip() for t in types.split(",") if t.strip()] or [
             "concept", "belief", "episode", "goal"
         ]
-        ph = ",".join("?" * len(type_list))
-        mem = _reader(db)
-        node_sql = f"""SELECT * FROM atoms
-                        WHERE tenant_id=? AND space=? AND type IN ({ph})
-                          AND confidence >= ?
-                        ORDER BY (sti + lti) DESC
-                        LIMIT ?"""
-        # limit=0 asks for the whole space; SQLite reads a negative LIMIT as
-        # unbounded.
-        node_params = (tenant_id, space, *type_list, min_confidence, limit or -1)
-        rows = mem.db.fetchall(node_sql, node_params)
-        nodes = [dict(r) for r in rows]
-        node_ids = {n["id"] for n in nodes}
-        node_labels = {n["id"]: n["label"] for n in nodes}
-
-        edges = []
-        if node_ids:
-            # Anchor the edge query to the node window instead of reading a
-            # capped slice of every relation in the space: that cap silently
-            # dropped edges once a space held more relations than it allowed.
-            edge_rows = mem.db.fetchall(
-                f"""WITH sel AS ({node_sql})
-                    SELECT * FROM atoms
-                    WHERE tenant_id=? AND space=? AND type='relation'
-                      AND source_id IN (SELECT id FROM sel)""",
-                (*node_params, tenant_id, space),
-            )
-            for r in edge_rows:
-                if r["target_id"] in node_ids:
-                    e = dict(r)
-                    e["source_label"] = node_labels.get(r["source_id"])
-                    e["target_label"] = node_labels.get(r["target_id"])
-                    edges.append(e)
-
-        return {"nodes": nodes, "edges": edges}
+        # 0 is the visualizer's "All": as many as the cap allows, since an
+        # unbounded read of a large space held a worker for seconds and
+        # shipped the whole graph to a browser that cannot draw it.
+        limit = min(limit or _GRAPH_LIMIT_MAX, _GRAPH_LIMIT_MAX)
+        return await _off_loop(_reader(db).graph, tenant_id, space, type_list, limit, min_confidence)
 
     @router.get("/status")
     async def status(request: Request, db: str | None = Query(None)):
@@ -211,8 +233,8 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         home = _configured_mem()
         tenant = tenant_for(request, None, home.tenant_id)
         mem = _reader(db)
-        result = mem.status(tenant, home.write_space)
-        result["spaces"] = mem.list_spaces(tenant)
+        result = await _off_loop(mem.status, tenant, home.write_space)
+        result["spaces"] = await _off_loop(mem.list_spaces, tenant)
         result["space"] = home.write_space
         result["version"] = __version__
         return result
@@ -227,7 +249,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         tenant = tenant_for(request, tenant_id, cfg.TENANT_ID)
         spc = space or cfg.SPACE
         mem = _configured_mem()
-        atom = mem.atomspace.get_atom(atom_id, tenant, spc)
+        atom = await _off_loop(mem.atomspace.get_atom, atom_id, tenant, spc)
         if not atom:
             raise HTTPException(status_code=404, detail="Atom not found")
         return atom.model_dump()
@@ -247,6 +269,8 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
                 while True:
                     try:
                         entry = await asyncio.wait_for(q.get(), timeout=15.0)
+                        if entry is None:  # the server is shutting down
+                            return
                         # A clear carries no tenant and only the all-tenants
                         # key can send one; every other message is a record.
                         if entry.get("__clear__") or visible(request, entry.get("tenant_id")):
@@ -300,7 +324,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
 
         home = _configured_mem()
         tenant_id = tenant_for(request, None, home.tenant_id)
-        s = _reader(db).status(tenant_id, home.write_space)
+        s = await _off_loop(_reader(db).status, tenant_id, home.write_space)
         labels = f'tenant="{_esc(tenant_id)}",space="{_esc(home.write_space)}"'
 
         lines: list[str] = []

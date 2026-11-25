@@ -25,7 +25,16 @@ from smrti.core.models import RecallResult
 from smrti.core.provenance import SOURCE_AGENT, claim_current_sql, forgotten_sql
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
-from smrti.servers.common import api_key_middleware, api_root, tenant_for, upstream_authorization
+from smrti.servers.common import (
+    BodyLimit,
+    api_key_middleware,
+    api_root,
+    consolidate_evicted,
+    drain,
+    serve,
+    tenant_for,
+    upstream_authorization,
+)
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
 from smrti.servers.viz_routes import create_viz_router
@@ -42,11 +51,11 @@ async def lifespan(app: FastAPI):
     task.cancel()
     # An exchange is stored after its answer has gone out, so at shutdown the
     # ones still in flight are memories the user was already told they have.
-    if _background_tasks:
-        await asyncio.gather(*list(_background_tasks), return_exceptions=True)
+    await drain(_background_tasks)
 
 
 app = FastAPI(title="Smrti Proxy", version="0.1.0", lifespan=lifespan)
+app.add_middleware(BodyLimit)  # inside the auth middleware, as on REST
 app.middleware("http")(api_key_middleware)
 if cfg.CORS_ORIGINS:
     app.add_middleware(
@@ -119,7 +128,7 @@ def get_mem(tenant_id: str, write_space: str) -> Smrti:
         _, _, db_path = _bootstrap()
         if key not in _instances:  # _bootstrap may have registered the default key
             while len(_instances) >= _INSTANCES_MAX:
-                _instances.popitem(last=False)
+                consolidate_evicted(_instances.popitem(last=False)[1], _background_tasks)
             _instances[key] = Smrti(
                 db_path=db_path,
                 personality=cfg.PERSONALITY,
@@ -921,5 +930,4 @@ async def _stream_proxy(
 
 
 def run_proxy_server(host: str = "0.0.0.0", port: int = 8421) -> None:
-    import uvicorn
-    uvicorn.run(app, host=host, port=port)
+    serve(app, host, port)

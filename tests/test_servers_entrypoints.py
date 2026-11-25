@@ -47,16 +47,31 @@ def mem(db_path):
 
 # ── run_*_server ──────────────────────────────────────────────────────────────
 
+def _served_config(run, **kwargs):
+    """The uvicorn config a server runner built, with the server's run() stubbed."""
+    import uvicorn
+
+    configs = []
+    with patch.object(uvicorn.Server, "run", lambda self: configs.append(self.config)):
+        run(**kwargs)
+    assert len(configs) == 1
+    return configs[0]
+
+
 def test_run_rest_server_hands_the_app_to_uvicorn():
-    with patch("uvicorn.run") as uvicorn_run:
-        rest_mod.run_rest_server(host="127.0.0.1", port=9001)
-    uvicorn_run.assert_called_once_with(rest_mod.app, host="127.0.0.1", port=9001)
+    from smrti.servers.common import GRACEFUL_SHUTDOWN_SECONDS
+
+    config = _served_config(rest_mod.run_rest_server, host="127.0.0.1", port=9001)
+    assert (config.app, config.host, config.port) == (rest_mod.app, "127.0.0.1", 9001)
+    assert config.timeout_graceful_shutdown == GRACEFUL_SHUTDOWN_SECONDS
 
 
 def test_run_proxy_server_hands_the_app_to_uvicorn():
-    with patch("uvicorn.run") as uvicorn_run:
-        proxy_mod.run_proxy_server(host="127.0.0.1", port=9002)
-    uvicorn_run.assert_called_once_with(proxy_mod.app, host="127.0.0.1", port=9002)
+    from smrti.servers.common import GRACEFUL_SHUTDOWN_SECONDS
+
+    config = _served_config(proxy_mod.run_proxy_server, host="127.0.0.1", port=9002)
+    assert (config.app, config.host, config.port) == (proxy_mod.app, "127.0.0.1", 9002)
+    assert config.timeout_graceful_shutdown == GRACEFUL_SHUTDOWN_SECONDS
 
 
 def test_rest_get_mem_creates_the_instance_once(mem):

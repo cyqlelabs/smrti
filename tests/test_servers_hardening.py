@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import os
 import tempfile
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -183,7 +184,7 @@ def test_format_memory_flattens_newlines_and_caps():
     assert "\n" not in line
     assert "line one line two" in line
     assert line.endswith("(confidence: high)")
-    text_part = line[len("- Note: "):line.rindex(" (confidence")]
+    text_part = json.loads(line[len("- Note: "):line.rindex(" (confidence")])
     assert len(text_part) <= 100
 
 

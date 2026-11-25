@@ -520,7 +520,7 @@ def test_format_critical_warning():
     r = _mem_recall_result("Never use eval()", valence=-0.9, intensity=0.9, confidence=0.85)
     line, severity = _format_memory(r)
     assert severity == "critical_warning"
-    assert line.startswith("- Constraint: Never use eval()")
+    assert line.startswith('- Constraint: "Never use eval()')
 
 
 def test_format_known_antipattern():
@@ -528,7 +528,7 @@ def test_format_known_antipattern():
                            atom_type=AtomType.BELIEF)
     line, severity = _format_memory(r)
     assert severity == "known_antipattern"
-    assert line.startswith("- Outdated: This API is reliable")
+    assert line.startswith('- Outdated: "This API is reliable')
 
 
 def test_format_context():

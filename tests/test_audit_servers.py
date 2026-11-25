@@ -525,7 +525,7 @@ def test_a_negated_warning_is_not_injected_under_a_second_negation():
         _, injection, _ = asyncio.run(proxy._inject_context(body, "t", "s", ["s"]))
 
     assert "YOU MUST NOT:" not in injection
-    assert "- Constraint: Never deploy on Friday without a backup (confidence: high)" in injection
+    assert '- Constraint: "Never deploy on Friday without a backup" (confidence: high)' in injection
     assert injection.count("YOU MUST NOT") == 1
     assert "Outdated" not in injection  # only the rule for a severity present is stated
     assert proxy._scrub_injected_memory(injection + "\nThe real answer.") == "The real answer."
@@ -811,8 +811,8 @@ def test_the_proxy_injects_a_replaced_claim_once_as_outdated():
     claim = SupersededClaim(edge_id="e1", subject="Nico", predicate="prefers",
                             old_object="tea", new_object="coffee")
     lines = proxy._format_superseded({"nico": [claim], "tea": [claim]})
-    assert lines == [("- Outdated: Nico prefers tea → coffee", "known_antipattern")]
-    assert "Outdated: Nico prefers tea → coffee" in proxy._render_injection(lines)
+    assert lines == [('- Outdated: "Nico prefers tea → coffee"', "known_antipattern")]
+    assert 'Outdated: "Nico prefers tea → coffee"' in proxy._render_injection(lines)
 
 
 def test_a_warning_reaches_the_prompt_when_recall_finds_nothing():
@@ -836,7 +836,7 @@ def test_a_warning_reaches_the_prompt_when_recall_finds_nothing():
     with patch.object(proxy, "_recall", AsyncMock(return_value=[])), \
             patch.object(proxy, "get_mem", return_value=mem):
         _, injection, _ = asyncio.run(proxy._inject_context(body, "t", "s", ["s"]))
-    assert "Constraint: Never run the migration twice" in injection
+    assert 'Constraint: "Never run the migration twice"' in injection
 
 
 def test_forget_takes_cascade_over_mcp_and_rest(tmp_path):

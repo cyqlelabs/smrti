@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from smrti.core.atomspace import AtomSpace
 from smrti.core.models import TruthValue
+from smrti.core.provenance import forgotten_sql
 
 
 def heal_orphaned_episodes(tenant_id: str, space: str, db) -> int:
@@ -27,14 +28,17 @@ def heal_orphaned_episodes(tenant_id: str, space: str, db) -> int:
     when none or more than one does, it is left alone rather than guessed.
     (An earlier rule compared the episode's embedding against the person's
     *name* embedding at cosine 0.3, which on a paraphrase model is close to
-    chance.)
+    chance.) A forgotten person is never a candidate and a forgotten episode
+    is never healed: an edge drawn to either leads back to what the caller
+    asked to be rid of.
 
     Returns the number of healed episodes.
     """
     person_rows = db.fetchall(
-        """SELECT id, label FROM atoms
+        f"""SELECT id, label FROM atoms
            WHERE tenant_id = ? AND space = ? AND entity_type = 'person'
              AND source_id IS NULL AND type IN ('concept', 'belief', 'goal')
+             AND NOT {forgotten_sql()}
            ORDER BY (sti + lti) DESC""",
         (tenant_id, space),
     )
@@ -44,12 +48,12 @@ def heal_orphaned_episodes(tenant_id: str, space: str, db) -> int:
     # Find episodes that have at least one mentions edge to a non-person atom
     # but NO mentions edge to any person atom
     orphaned = db.fetchall(
-        """SELECT DISTINCT r.source_id AS episode_id, ep.content AS content, ep.label AS label
+        f"""SELECT DISTINCT r.source_id AS episode_id, ep.content AS content, ep.label AS label
            FROM atoms r
            JOIN atoms ep ON ep.id = r.source_id
            WHERE r.type = 'relation' AND r.relation = 'mentions'
              AND r.tenant_id = ? AND r.space = ?
-             AND ep.type = 'episode'
+             AND ep.type = 'episode' AND NOT {forgotten_sql('ep')}
              AND NOT EXISTS (
                  SELECT 1 FROM atoms r2
                  JOIN atoms target ON target.id = r2.target_id

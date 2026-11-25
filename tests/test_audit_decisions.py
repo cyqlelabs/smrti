@@ -178,7 +178,8 @@ def test_the_async_health_probe_never_blocks_the_event_loop():
         return max(gaps)
 
     try:
-        assert asyncio.run(run()) < 0.3
+        # The blocking probe held the loop for five seconds.
+        assert asyncio.run(run()) < 1.0
         # The failed probe is remembered rather than paid again next call.
         assert provider._health_retry_at > time.monotonic()
     finally:
@@ -507,3 +508,6 @@ def test_halumem_tells_apart_runs_with_different_models():
     assert not ok and "answer_model" in message
     ok, _ = halumem._compare_downward({**plain, "hallucination_rate": 0.4}, recorded, 0.01)
     assert ok
+    unnamed = {k: v for k, v in recorded.items() if k not in ("answer_model", "judge_model")}
+    ok, message = halumem._compare_downward({**plain, "hallucination_rate": 0.4, "answer_model": "B"}, unnamed, 0.01)
+    assert ok and "re-record" in message

@@ -148,7 +148,13 @@ def _compare_downward(result: dict, baseline: dict, tolerance: float) -> tuple[b
             f"({recorded:.3f} → {result[GATED_METRIC]:.3f}), "
             f"past the {tolerance:.3f} tolerance"
         )
-    return True, f"{GATED_METRIC} {recorded:.3f} → {result[GATED_METRIC]:.3f} ({delta:+.3f})"
+    message = f"{GATED_METRIC} {recorded:.3f} → {result[GATED_METRIC]:.3f} ({delta:+.3f})"
+    if not any(baseline.get(key) for key in ANSWERING_KEYS):
+        message += (
+            "; the baseline names no answering or judge model, so this gate cannot tell "
+            "whether the run used the same ones — re-record it to pin them"
+        )
+    return True, message
 
 
 def main(argv: list[str] | None = None) -> int:

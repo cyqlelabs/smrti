@@ -650,6 +650,14 @@ def _link_claims(
     min_valence = 0.0
     for claim in claims:
         try:
+            predicate = claim.get("predicate", "related_to").strip()
+            # A claim states a fact. A blank predicate states none, and the
+            # structural relations are the engine's own bookkeeping: a
+            # "contradicts" edge drawn from the model's output is one the
+            # epoch acts on, weakening whichever endpoint is less confident.
+            if not predicate or predicate.lower() in _STRUCTURAL_RELATIONS:
+                logger.warning("skipping claim with predicate %r", predicate)
+                continue
             subj_raw = claim.get("subject", "")
             obj_raw = claim.get("object", "")
             subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
@@ -661,7 +669,6 @@ def _link_claims(
                 obj_id = claim_resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
                 _register_entity(entity_ids, obj_raw, obj_id)
             if subj_id and obj_id and subj_id != obj_id:
-                predicate = claim.get("predicate", "related_to")
                 claim_valence = max(-1.0, min(1.0, float(claim.get("valence") or 0.0)))
                 # A claim edge read from an agent turn carries the agent's
                 # provenance, as the atoms it joins do: it is what lets the
@@ -737,22 +744,18 @@ def _supersede(
     old_obj_id = _db_resolve_label(old_label, entity_ids, mem)
     if not old_obj_id or old_obj_id == new_obj_id:
         return
-    edge_columns = f"id, relation, created_at, updated_at, {ATOM_SOURCE} AS author"
+    # Only a claim under the same predicate is replaced. Falling back to any
+    # factual edge to the old object, in case the earlier claim was worded
+    # differently, cannot tell a rewording from a different fact: "works_in
+    # Paris, supersedes Madrid" found "born_in Madrid" and cut it. The model
+    # is shown the recorded facts with their predicates, so it can name the
+    # one it means.
     old_edge = mem.db.fetchone(
-        f"""SELECT {edge_columns} FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
-           AND relation = ? AND tenant_id = ? AND space = ? AND id != ?""",
+        f"""SELECT id, relation, created_at, updated_at, {ATOM_SOURCE} AS author
+            FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
+            AND relation = ? AND tenant_id = ? AND space = ? AND id != ?""",
         (subj_id, old_obj_id, predicate, mem.tenant_id, mem.write_space, new_edge_id),
     )
-    if old_edge is None:
-        # The earlier claim may have been extracted under a different wording
-        # of the same predicate; any factual edge to the old object will do.
-        rel_ph = ",".join("?" * len(_STRUCTURAL_RELATIONS))
-        old_edge = mem.db.fetchone(
-            f"""SELECT {edge_columns} FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
-                AND relation NOT IN ({rel_ph}) AND tenant_id = ? AND space = ? AND id != ?
-                ORDER BY created_at DESC LIMIT 1""",
-            (subj_id, old_obj_id, *_STRUCTURAL_RELATIONS, mem.tenant_id, mem.write_space, new_edge_id),
-        )
     if old_edge is None:
         return
     old_edge_id = old_edge["id"]
@@ -897,6 +900,17 @@ def _is_superseded(mem: "Smrti", edge_id: str) -> bool:
     return row is not None
 
 
+def _superseder_author(mem: "Smrti", edge_id: str) -> str | None:
+    """Who stated the claim that replaced *edge_id*, or None if it is gone."""
+    row = mem.db.fetchone(
+        f"""SELECT {ATOM_SOURCE} AS author FROM atoms WHERE id = (
+                SELECT json_extract({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}')
+                FROM atoms WHERE id = ?)""",
+        (edge_id,),
+    )
+    return row["author"] if row else None
+
+
 # What a revived claim, and the belief it points at, are held at once more.
 # The supersession cut them to SUPERSEDED_PROBABILITY by policy; this is the
 # same policy run backwards, to the probability a claim edge is born with.
@@ -917,9 +931,17 @@ def _revive(
     deleted, since an unresolved one would cut the claim again at the next
     epoch and a resolved one has nothing left to say; the probability is
     lifted back by the policy write that lowered it, so a preference the
-    user returned to stops reading as a known antipattern; and evidence of
-    the revival is filed, so the log says why.
+    user returned to stops reading as a known antipattern; the supersession's
+    negative evidence not yet applied is retired, since the next epoch would
+    otherwise pull the revived claim back down; and evidence of the revival
+    is filed, so the log says why.
+
+    The rule :func:`_supersede` applies holds here too: a model restating a
+    claim the user replaced is not the user taking the replacement back.
     """
+    if source == SOURCE_AGENT and _superseder_author(mem, edge_id) != SOURCE_AGENT:
+        logger.info("agent restatement does not revive claim %s the user replaced", edge_id)
+        return
     losers = mem.db.fetchall(
         """SELECT id, CASE WHEN json_valid(metadata)
                            THEN json_extract(metadata, '$.loser') END AS loser
@@ -939,6 +961,13 @@ def _revive(
                     metadata = json_remove({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}')
                 WHERE id = ? AND tenant_id = ? AND space = ?""",
             (_REVIVED_PROBABILITY, atom_id, mem.tenant_id, mem.write_space),
+        )
+        # Marked processed rather than deleted: the evidence log is append-only.
+        mem.db.execute(
+            """UPDATE evidence SET processed = 1
+               WHERE atom_id = ? AND processed = 0 AND observed_probability = ?
+                 AND tenant_id = ? AND space = ?""",
+            (atom_id, SUPERSEDED_PROBABILITY, mem.tenant_id, mem.write_space),
         )
         mem.atomspace.add_evidence(Evidence(
             atom_id=atom_id,

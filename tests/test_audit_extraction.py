@@ -4,6 +4,7 @@ resolution."""
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -167,12 +168,8 @@ def test_a_failed_extraction_call_is_logged_as_a_warning(caplog):
 
 
 def _concept(mem, label, entity_type="concept"):
-    from smrti.core.models import Atom, AtomType, EntityType
-
-    return mem.atomspace.add_atom(Atom(
-        type=AtomType.CONCEPT, label=label, entity_type=EntityType(entity_type),
-        tenant_id=mem.tenant_id, space=mem.write_space,
-    ))
+    """An entity atom, created the way extraction creates one."""
+    return extract._resolver(mem, "user", "", context="").resolve(label, entity_type, "t", "s", ["s"])
 
 
 def test_a_claim_never_lowers_a_tone_the_caller_stated(mem):
@@ -193,3 +190,69 @@ def test_a_claim_never_lowers_a_tone_the_caller_stated(mem):
     assert classify_memory(RecallResult(atom=atom, salience=1, similarity=1)) == "context"
     # An estimated tone is still lowered, as before.
     assert mem.atomspace.get_atom(ids["Rome"], "t", "s").valence.own == pytest.approx(-0.9)
+
+
+# ── supersession and revival ─────────────────────────────────────────────────
+
+
+def _places(mem, *names):
+    ids = {"Alice": _concept(mem, "Alice", "person")}
+    ids.update({name: _concept(mem, name, "location") for name in names})
+    return ids
+
+
+def _edge(mem, ids, place, predicate="lives_in"):
+    return mem.db.fetchone(
+        "SELECT * FROM atoms WHERE type = 'relation' AND relation = ? AND source_id = ? AND target_id = ?",
+        (predicate, ids["Alice"], ids[place]),
+    )
+
+
+def _lives_in(place, **extra):
+    return {"subject": "Alice", "predicate": "lives_in", "object": place, **extra}
+
+
+def test_an_agent_restating_a_replaced_claim_does_not_revive_it(mem):
+    """_supersede refused agent claims over the user's, but _revive did not:
+    the assistant repeating the old city undid the user's correction."""
+    ids = _places(mem, "Berlin", "Paris")
+    extract._link_claims([_lives_in("Berlin")], ids, mem)
+    extract._link_claims([_lives_in("Paris", supersedes="Berlin")], ids, mem)
+
+    extract._link_claims([_lives_in("Berlin")], ids, mem, source="agent")
+
+    assert "superseded_by" in json.loads(_edge(mem, ids, "Berlin")["metadata"])
+
+
+def test_a_claim_under_another_predicate_is_never_superseded(mem):
+    """"works_in Paris, supersedes Madrid" cut "born_in Madrid"."""
+    ids = _places(mem, "Madrid", "Paris")
+    extract._link_claims([{"subject": "Alice", "predicate": "born_in", "object": "Madrid"}], ids, mem)
+    extract._link_claims(
+        [{"subject": "Alice", "predicate": "works_in", "object": "Paris", "supersedes": "Madrid"}], ids, mem,
+    )
+
+    assert "superseded_by" not in json.loads(_edge(mem, ids, "Madrid", "born_in")["metadata"] or "{}")
+
+
+def test_a_claim_with_a_structural_or_blank_predicate_draws_no_edge(mem):
+    """A model-emitted "contradicts" edge is one the epoch acts on."""
+    ids = _places(mem, "Berlin")
+    extract._link_claims(
+        [_lives_in("Berlin", predicate="contradicts"), _lives_in("Berlin", predicate="  ")], ids, mem,
+    )
+
+    assert mem.db.fetchall("SELECT relation FROM atoms WHERE type = 'relation'") == []
+
+
+def test_a_revived_claim_is_not_pulled_back_down_by_the_supersession_it_undid(mem):
+    """The 0.1 evidence the supersession filed was still pending at revival,
+    and the next epoch settled the revived claim at 0.67 instead of 0.8."""
+    ids = _places(mem, "Berlin", "Paris")
+    extract._link_claims([_lives_in("Berlin")], ids, mem)
+    extract._link_claims([_lives_in("Paris", supersedes="Berlin")], ids, mem)
+    extract._link_claims([_lives_in("Berlin", supersedes="Paris")], ids, mem)
+
+    mem.reflect()
+
+    assert _edge(mem, ids, "Berlin")["probability"] >= 0.8 - 1e-9

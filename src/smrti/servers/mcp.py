@@ -92,6 +92,7 @@ def _superseded_json(replaced: dict) -> list[dict]:
             })
     return out
 
+
 def _pairs_json(pairs) -> list[dict]:
     """The matched atom pairs of a space overlap."""
     return [

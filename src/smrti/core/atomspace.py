@@ -38,6 +38,75 @@ def embedding_text(atom: Atom) -> str:
     return f"{atom.label} {atom.content}"
 
 
+
+def _refuse_relocation(atom: Atom, prior) -> None:
+    # ``INSERT OR REPLACE`` keys on the primary key alone, so re-adding an
+    # atom under a different partition silently moves it — carrying its
+    # vector row with it — and one tenant's memory lands in another's graph.
+    # IDs are UUIDs, so this only happens when a caller reuses one, and when
+    # it does the write is a mistake, not a relocation request.
+    if prior is not None and (
+        prior["tenant_id"] != atom.tenant_id or prior["space"] != atom.space
+    ):
+        raise ValueError(
+            f"atom {atom.id} already exists in "
+            f"tenant={prior['tenant_id']!r} space={prior['space']!r}; "
+            f"refusing to move it to tenant={atom.tenant_id!r} space={atom.space!r}"
+        )
+
+
+def _insert_statement(atom: Atom) -> tuple:
+    """The statement that writes *atom*'s row, keeping its first ``created_at``."""
+    return (
+        """
+        INSERT OR REPLACE INTO atoms (
+            id, type, label, content, probability, confidence,
+            sti, lti, valence, intensity,
+            intrinsic_valence, intrinsic_intensity,
+            source_id, target_id, relation,
+            tenant_id, space, metadata, entity_type, content_hash,
+            created_at, updated_at
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            COALESCE(
+                (SELECT created_at FROM atoms WHERE id = ?),
+                datetime('now')
+            ),
+            datetime('now')
+        )
+        """,
+        (
+            atom.id,
+            atom.type.value,
+            atom.label,
+            atom.content,
+            atom.truth.probability,
+            atom.truth.confidence,
+            atom.attention.sti,
+            atom.attention.lti,
+            atom.valence.valence,
+            atom.valence.intensity,
+            # What the atom itself says, kept out of propagation's reach.
+            atom.valence.own,
+            atom.valence.own_intensity,
+            atom.source_id,
+            atom.target_id,
+            atom.relation,
+            atom.tenant_id,
+            atom.space,
+            json.dumps(atom.metadata),
+            atom.entity_type.value if atom.entity_type else None,
+            hashlib.sha256(atom.content.encode()).hexdigest()
+            if atom.content
+            else None,
+            atom.id,
+        ),
+    )
+
 class AtomSpace:
     def __init__(self, db: Database, embed: EmbeddingProvider) -> None:
         self._db = db
@@ -99,70 +168,8 @@ class AtomSpace:
             "SELECT label, content, tenant_id, space FROM atoms WHERE id = ?",
             (atom.id,),
         )
-        # ``INSERT OR REPLACE`` keys on the primary key alone, so re-adding an
-        # atom under a different partition silently moves it — carrying its
-        # vector row with it — and one tenant's memory lands in another's graph.
-        # IDs are UUIDs, so this only happens when a caller reuses one, and when
-        # it does the write is a mistake, not a relocation request.
-        if prior is not None and (
-            prior["tenant_id"] != atom.tenant_id or prior["space"] != atom.space
-        ):
-            raise ValueError(
-                f"atom {atom.id} already exists in "
-                f"tenant={prior['tenant_id']!r} space={prior['space']!r}; "
-                f"refusing to move it to tenant={atom.tenant_id!r} space={atom.space!r}"
-            )
-        statements: list[tuple] = [
-            (
-                """
-                INSERT OR REPLACE INTO atoms (
-                    id, type, label, content, probability, confidence,
-                    sti, lti, valence, intensity,
-                    intrinsic_valence, intrinsic_intensity,
-                    source_id, target_id, relation,
-                    tenant_id, space, metadata, entity_type, content_hash,
-                    created_at, updated_at
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?,
-                    ?, ?, ?,
-                    ?, ?, ?, ?, ?,
-                    COALESCE(
-                        (SELECT created_at FROM atoms WHERE id = ?),
-                        datetime('now')
-                    ),
-                    datetime('now')
-                )
-                """,
-                (
-                    atom.id,
-                    atom.type.value,
-                    atom.label,
-                    atom.content,
-                    atom.truth.probability,
-                    atom.truth.confidence,
-                    atom.attention.sti,
-                    atom.attention.lti,
-                    atom.valence.valence,
-                    atom.valence.intensity,
-                    # What the atom itself says, kept out of propagation's reach.
-                    atom.valence.own,
-                    atom.valence.own_intensity,
-                    atom.source_id,
-                    atom.target_id,
-                    atom.relation,
-                    atom.tenant_id,
-                    atom.space,
-                    json.dumps(atom.metadata),
-                    atom.entity_type.value if atom.entity_type else None,
-                    hashlib.sha256(atom.content.encode()).hexdigest()
-                    if atom.content
-                    else None,
-                    atom.id,
-                ),
-            )
-        ]
+        _refuse_relocation(atom, prior)
+        statements: list[tuple] = [_insert_statement(atom)]
 
         # Protect stated warnings and severe failures from epoch pruning
         if is_severe_retained(atom):
@@ -171,43 +178,53 @@ class AtomSpace:
             )
 
         # Relation atoms carry synthetic labels — keep them out of the KNN and
-        # lexical indexes. The lexical write is unconditional where the vector
-        # write is not: it is two integer-keyed statements, and skipping it
-        # when the vector already exists would leave an atom permanently
-        # unsearchable by word if its index row was ever lost.
+        # lexical indexes.
         if atom.type != AtomType.RELATION:
-            statements.extend(fts_write(self._db, atom.id, atom.label, atom.content))
-            # By rowid, never by atom_id: a vec0 table answers a non-rowid
-            # predicate with a full scan of every vector in the database, so
-            # this one query used to make each write cost O(graph size).
-            existing_vec = fetchone(
-                "SELECT 1 FROM vec_atoms WHERE rowid = ?",
-                (stable_rowid(atom.id),),
+            statements.extend(
+                self._index_statements(atom, prior, embedding, require_vector, fetchone)
             )
-            content_changed = prior is not None and (
-                prior["label"] != atom.label or prior["content"] != atom.content
-            )
-            if (not existing_vec or content_changed) and (
-                embedding is not None or require_vector
-            ):
-                if embedding is None:
-                    embedding = self._embed.embed(embedding_text(atom))
-                vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
-                if existing_vec:
-                    statements.extend(vec_delete([atom.id]))
-                statements.append(
-                    vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label)
-                )
-            elif not existing_vec:
-                # Stored without a vector: mark it, so the epoch's repair pass
-                # can find it and recall can score it in the meantime.
-                statements.append(
-                    (
-                        f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}', 1) WHERE id = ?",
-                        (atom.id,),
-                    )
-                )
 
+        return statements
+
+    def _index_statements(self, atom: Atom, prior, embedding, require_vector: bool, fetchone) -> list[tuple]:
+        """The lexical and vector index rows of a non-relation *atom*.
+
+        The lexical write is unconditional where the vector write is not:
+        it is two integer-keyed statements, and skipping it when the vector
+        already exists would leave an atom permanently unsearchable by word
+        if its index row was ever lost.
+        """
+        statements = list(fts_write(self._db, atom.id, atom.label, atom.content))
+        # By rowid, never by atom_id: a vec0 table answers a non-rowid
+        # predicate with a full scan of every vector in the database, so
+        # this one query used to make each write cost O(graph size).
+        existing_vec = fetchone(
+            "SELECT 1 FROM vec_atoms WHERE rowid = ?",
+            (stable_rowid(atom.id),),
+        )
+        content_changed = prior is not None and (
+            prior["label"] != atom.label or prior["content"] != atom.content
+        )
+        if (not existing_vec or content_changed) and (
+            embedding is not None or require_vector
+        ):
+            if embedding is None:
+                embedding = self._embed.embed(embedding_text(atom))
+            vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+            if existing_vec:
+                statements.extend(vec_delete([atom.id]))
+            statements.append(
+                vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label)
+            )
+        elif not existing_vec:
+            # Stored without a vector: mark it, so the epoch's repair pass
+            # can find it and recall can score it in the meantime.
+            statements.append(
+                (
+                    f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}', 1) WHERE id = ?",
+                    (atom.id,),
+                )
+            )
         return statements
 
     def file_vectors(self, vectors: list[tuple[Atom, list[float]]]) -> None:

@@ -305,3 +305,22 @@ def test_a_stale_lease_holder_cannot_prune(mem):
     assert _row(mem, doomed) is not None
     assert _prune(T, S, mem.db, p) == 1
     assert _row(mem, doomed) is None
+
+
+def test_a_contradiction_removed_after_the_list_was_read_cuts_nothing(mem):
+    """The edges were listed outside the per-edge transaction and acted on
+    from that list, so an edge a revival deleted in between still cut its
+    loser, superseding a claim that had just been stated again."""
+    from smrti.evolution.epoch import _resolve_contradictions
+
+    old = mem.believe("Alice lives in Berlin", probability=0.8)
+    new = mem.believe("Alice lives in Paris", probability=0.8)
+    edge = mem.atomspace.link_atoms(new, old, "contradicts", T, S, metadata={"loser": old})
+    before = dict(_row(mem, old))
+
+    def revive_in_between(conn):
+        mem.db.delete_atoms_in(conn, [edge], T)
+
+    assert _resolve_contradictions(T, S, mem.db, fence=revive_in_between) == 0
+    assert _row(mem, old)["confidence"] == before["confidence"]
+    assert _row(mem, old)["probability"] == before["probability"]

@@ -619,10 +619,10 @@ def _resolve_ner_entities(
         _register_entity(entity_ids, name, atom_id)
         # The other names this text uses for the entity, the model's
         # aliases, resolve the claims read from the same text and are never
-        # stored. A stored alias is an identity for
-        # the whole space, and which of them is a pronoun or a description
-        # only this speaker can use ("my boss") cannot be told without a
-        # word list: "she", once stored as Bob's, made Bob of every "she".
+        # stored. A stored alias is an identity for the whole space, and
+        # which of them is a pronoun or a description only this speaker can
+        # use ("my boss") cannot be told without a word list: "she", once
+        # stored as Bob's, made Bob of every "she".
         for alias in ent["aliases"]:
             if alias.lower() != name.lower():
                 entity_ids.setdefault(alias, atom_id)
@@ -702,60 +702,17 @@ def _link_claims(
     against — see :func:`_supersede`.
     """
     claim_resolver = None
-    min_valence = 0.0
+
+    def resolver():
+        nonlocal claim_resolver
+        if claim_resolver is None:
+            claim_resolver = _resolver(mem, source, episode_id)
+        return claim_resolver
+
+    grave: list[float] = []
     for claim in claims:
         try:
-            predicate = _claim_predicate(claim)
-            if predicate is None:
-                logger.warning("skipping claim with predicate %r", claim.get("predicate"))
-                continue
-            subj_raw = claim.get("subject", "")
-            obj_raw = claim.get("object", "")
-            subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
-            obj_id = _db_resolve_label(obj_raw, entity_ids, mem)
-            # Auto-create missing object atoms as concepts rather than silently dropping
-            if not obj_id and obj_raw:
-                if claim_resolver is None:
-                    claim_resolver = _resolver(mem, source, episode_id)
-                obj_id = claim_resolver.resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
-                _register_entity(entity_ids, obj_raw, obj_id)
-            if subj_id and obj_id and subj_id != obj_id:
-                claim_valence = max(-1.0, min(1.0, float(claim.get("valence") or 0.0)))
-                # A claim edge read from an agent turn carries the agent's
-                # provenance, as the atoms it joins do: it is what lets the
-                # supersession writer tell a user's statement from a
-                # model's guess about the same subject. Looked up and drawn
-                # in one write transaction, so two processes stating the same
-                # fact at once share one edge.
-                with mem.db.transaction() as conn:
-                    new_edge = mem.atomspace.link_atoms_in(
-                        conn, subj_id, obj_id, predicate,
-                        mem.tenant_id, mem.write_space,
-                        valence=claim_valence,
-                        metadata={
-                            **({"source": SOURCE_AGENT} if source == SOURCE_AGENT else {}),
-                            **({CLAIM_EPISODES: [episode_id]} if episode_id else {}),
-                        },
-                    )
-                _record_assertion(mem, new_edge, episode_id)
-                if _is_superseded(mem, new_edge):
-                    _revive(mem, new_edge, obj_id, episode_id, source)
-                # Lower the target's tone to the claim's straight away. Epoch
-                # propagation cannot: relation atoms have no neighbours of
-                # their own, so propagate_valence finds nothing to move.
-                if claim_valence < -0.3:
-                    _lower_tone(mem, obj_id, claim_valence)
-                    if claim_valence < min_valence:
-                        min_valence = claim_valence
-                # Safety net: promote target atom to goal type on has_goal claims
-                if predicate == "has_goal":
-                    _promote_to_goal(obj_id, mem)
-                old_label = claim.get("supersedes")
-                if isinstance(old_label, str) and old_label.strip():
-                    _supersede(
-                        mem, subj_id, predicate, old_label.strip(), obj_id,
-                        new_edge, entity_ids, episode_id, source,
-                    )
+            _link_claim(claim, entity_ids, mem, episode_id, source, resolver, grave)
         except Exception as exc:
             logger.warning("skipping malformed claim %r: %s", claim, exc)
             continue
@@ -764,8 +721,93 @@ def _link_claims(
     # still an estimate — it never sets VALENCE_STATED, so the episode cannot
     # become a behavioural constraint on the model's reading alone — but it is
     # the better estimate, and it ranks and protects the memory accordingly.
+    min_valence = min(grave, default=0.0)
     if episode_id and min_valence < -0.3:
         _lower_tone(mem, episode_id, min_valence)
+
+
+def _claim_object(obj_raw: str, entity_ids: dict[str, str], mem: "Smrti", resolver) -> str | None:
+    """The atom a claim's object names, created as a concept when the text
+    named none, rather than silently dropping the claim."""
+    obj_id = _db_resolve_label(obj_raw, entity_ids, mem)
+    if not obj_id and obj_raw:
+        obj_id = resolver().resolve(obj_raw, "concept", mem.tenant_id, mem.write_space, [mem.write_space])
+        _register_entity(entity_ids, obj_raw, obj_id)
+    return obj_id
+
+
+def _claim_edge_metadata(source: str, episode_id: str) -> dict:
+    """What a newly drawn claim edge records: who stated it, and the episode
+    that did."""
+    metadata: dict = {}
+    if source == SOURCE_AGENT:
+        metadata["source"] = SOURCE_AGENT
+    if episode_id:
+        metadata[CLAIM_EPISODES] = [episode_id]
+    return metadata
+
+
+def _link_claim(
+    claim: dict,
+    entity_ids: dict[str, str],
+    mem: "Smrti",
+    episode_id: str,
+    source: str,
+    resolver,
+    grave: list[float],
+) -> None:
+    """Draw one claim's edge and apply what it implies: revival, tone, goal
+    promotion, supersession. A negative valence it lowered a tone with is
+    appended to *grave* as soon as it is applied."""
+    predicate = _claim_predicate(claim)
+    if predicate is None:
+        logger.warning("skipping claim with predicate %r", claim.get("predicate"))
+        return
+    subj_raw = claim.get("subject", "")
+    obj_raw = claim.get("object", "")
+    subj_id = _db_resolve_label(subj_raw, entity_ids, mem)
+    obj_id = _claim_object(obj_raw, entity_ids, mem, resolver)
+    if not (subj_id and obj_id and subj_id != obj_id):
+        return
+    claim_valence = max(-1.0, min(1.0, float(claim.get("valence") or 0.0)))
+    # A claim edge read from an agent turn carries the agent's provenance, as
+    # the atoms it joins do: it is what lets the supersession writer tell a
+    # user's statement from a model's guess about the same subject. Looked up
+    # and drawn in one write transaction, so two processes stating the same
+    # fact at once share one edge.
+    with mem.db.transaction() as conn:
+        new_edge = mem.atomspace.link_atoms_in(
+            conn, subj_id, obj_id, predicate,
+            mem.tenant_id, mem.write_space,
+            valence=claim_valence,
+            metadata=_claim_edge_metadata(source, episode_id),
+        )
+    _record_assertion(mem, new_edge, episode_id)
+    if _is_superseded(mem, new_edge):
+        _revive(mem, new_edge, obj_id, episode_id, source)
+    # Lower the target's tone to the claim's straight away. Epoch propagation
+    # cannot: relation atoms have no neighbours of their own, so
+    # propagate_valence finds nothing to move.
+    if claim_valence < -0.3:
+        _lower_tone(mem, obj_id, claim_valence)
+        grave.append(claim_valence)
+    # Safety net: promote target atom to goal type on has_goal claims
+    if predicate == "has_goal":
+        _promote_to_goal(obj_id, mem)
+    old_label = _superseded_label(claim)
+    if old_label:
+        _supersede(
+            mem, subj_id, predicate, old_label, obj_id,
+            new_edge, entity_ids, episode_id, source,
+        )
+
+
+def _superseded_label(claim: dict) -> str | None:
+    """The object a claim says it replaces, when it names one."""
+    old_label = claim.get("supersedes")
+    if isinstance(old_label, str) and old_label.strip():
+        return old_label.strip()
+    return None
 
 
 # What the supersession check filed on a claim edge it declined to let

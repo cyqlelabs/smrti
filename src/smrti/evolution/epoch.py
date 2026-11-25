@@ -589,6 +589,41 @@ def _user_claim_names(endpoint: str) -> str:
 _USER_CLAIM_ENDPOINT = f"({_user_claim_names('source_id')} OR {_user_claim_names('target_id')})"
 
 
+_UNRESOLVED_CONTRADICTION = """type = 'relation' AND relation = 'contradicts'
+    AND tenant_id = ? AND space = ?
+    AND (CASE WHEN json_valid(metadata)
+              THEN json_extract(metadata, '$.resolved') END) IS NULL"""
+
+
+def _cut_loser(conn, c, src, tgt, tenant_id: str, space: str) -> None:
+    """Weaken the losing endpoint of contradiction *c*, whose endpoints read
+    *src* and *tgt*."""
+    # A named loser is a supersession: the fact stopped being true,
+    # so its probability is cut to the superseded line as well as
+    # its confidence. An unnamed contradiction only says the two
+    # disagree, and there confidence alone gives way.
+    named = c["loser"] in (c["source_id"], c["target_id"])
+    if named:
+        loser_id = c["loser"]
+        conn.execute(
+            "UPDATE atoms SET confidence = confidence * 0.8, "
+            "probability = MIN(probability, ?) "
+            "WHERE id = ? AND tenant_id = ? AND space = ?",
+            (SUPERSEDED_PROBABILITY, loser_id, tenant_id, space),
+        )
+    else:
+        loser_id = (
+            c["source_id"]
+            if src["confidence"] < tgt["confidence"]
+            else c["target_id"]
+        )
+        conn.execute(
+            "UPDATE atoms SET confidence = confidence * 0.8 "
+            "WHERE id = ? AND tenant_id = ? AND space = ?",
+            (loser_id, tenant_id, space),
+        )
+
+
 def _resolve_contradictions(tenant_id: str, space: str, db, fence=None) -> int:
     """Weaken the loser of each unresolved contradiction in the space, once.
 
@@ -598,23 +633,29 @@ def _resolve_contradictions(tenant_id: str, space: str, db, fence=None) -> int:
     and resolved the same edge. Returns the count resolved.
     """
     resolved = 0
-    contradictions = db.fetchall(
-        """SELECT id, source_id, target_id,
-                  CASE WHEN json_valid(metadata)
-                       THEN json_extract(metadata, '$.loser') END AS loser
-           FROM atoms
-           WHERE type = 'relation' AND relation = 'contradicts'
-             AND tenant_id = ? AND space = ?
-             AND (CASE WHEN json_valid(metadata)
-                       THEN json_extract(metadata, '$.resolved') END) IS NULL""",
-        (tenant_id, space),
-    )
-    for c in contradictions:
-        if not c["source_id"] or not c["target_id"]:
-            continue
+    edge_ids = [
+        row["id"]
+        for row in db.fetchall(
+            f"SELECT id FROM atoms WHERE {_UNRESOLVED_CONTRADICTION}", (tenant_id, space)
+        )
+    ]
+    for edge_id in edge_ids:
         with db.transaction() as conn:
             if fence:
                 fence(conn)
+            # The edge is read again under the write lock: a revival, a
+            # cascading forget or another holder can delete or resolve it
+            # after the list was read, and cutting its loser then would
+            # supersede a claim that had just been stated again.
+            c = conn.execute(
+                f"""SELECT source_id, target_id,
+                           CASE WHEN json_valid(metadata)
+                                THEN json_extract(metadata, '$.loser') END AS loser
+                    FROM atoms WHERE id = ? AND {_UNRESOLVED_CONTRADICTION}""",
+                (edge_id, tenant_id, space),
+            ).fetchone()
+            if c is None or not c["source_id"] or not c["target_id"]:
+                continue
             # Both endpoints must be in this space. A contradiction edge can
             # point at an atom in another space (bridge edges do exactly
             # that), and weakening it here would let one space adjudicate
@@ -629,33 +670,10 @@ def _resolve_contradictions(tenant_id: str, space: str, db, fence=None) -> int:
             ).fetchone()
             if not (src and tgt):
                 continue
-            # A named loser is a supersession: the fact stopped being true,
-            # so its probability is cut to the superseded line as well as
-            # its confidence. An unnamed contradiction only says the two
-            # disagree, and there confidence alone gives way.
-            named = c["loser"] in (c["source_id"], c["target_id"])
-            if named:
-                loser_id = c["loser"]
-                conn.execute(
-                    "UPDATE atoms SET confidence = confidence * 0.8, "
-                    "probability = MIN(probability, ?) "
-                    "WHERE id = ? AND tenant_id = ? AND space = ?",
-                    (SUPERSEDED_PROBABILITY, loser_id, tenant_id, space),
-                )
-            else:
-                loser_id = (
-                    c["source_id"]
-                    if src["confidence"] < tgt["confidence"]
-                    else c["target_id"]
-                )
-                conn.execute(
-                    "UPDATE atoms SET confidence = confidence * 0.8 "
-                    "WHERE id = ? AND tenant_id = ? AND space = ?",
-                    (loser_id, tenant_id, space),
-                )
+            _cut_loser(conn, c, src, tgt, tenant_id, space)
             conn.execute(
                 f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.resolved', 1) WHERE id = ?",
-                (c["id"],),
+                (edge_id,),
             )
         resolved += 1
     return resolved
@@ -757,10 +775,8 @@ def _consolidate(
     nobody had set — a quadratic scan on a timer that wrote atoms into spaces
     nobody had asked for. Bridging is an explicit call now: ``space_merge``.
     """
-    atoms_pruned = 0
     lti_promoted = 0
     new_connections = 0
-    contradictions_resolved = 0
 
     personality = db.fetchone(
         "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",

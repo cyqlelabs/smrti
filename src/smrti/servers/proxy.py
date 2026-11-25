@@ -628,6 +628,16 @@ def _memory_record(r: RecallResult, content: str, severity: str) -> dict:
     }
 
 
+def _constraint_section(warnings: list[tuple[str, str]], warning_lines: list[str]) -> str:
+    """The constraint preamble, with the rule of each kind of line kept, and
+    the kept lines under it."""
+    # The budget keeps a prefix of the warnings, so their severities are the
+    # first len(warning_lines) of the list it was given.
+    kept = {sev for _, sev in warnings[: len(warning_lines)]}
+    rules = [rule for sev, rule in _SEVERITY_RULES.items() if sev in kept]
+    return " ".join([_CONSTRAINT_PREAMBLE, *rules]) + "\n" + "\n".join(warning_lines)
+
+
 def _render_injection(formatted: list[tuple[str, str]]) -> str:
     """The memory block for the system prompt: constraints first, then context."""
     warnings = [(line, sev) for line, sev in formatted if sev in _SEVERITY_RULES]
@@ -635,14 +645,9 @@ def _render_injection(formatted: list[tuple[str, str]]) -> str:
     warning_lines, context_lines = _within_budget(
         [line for line, _ in warnings], context_lines, cfg.INJECT_BUDGET_CHARS
     )
-    # The budget keeps a prefix of the warnings, so their severities are the
-    # first len(warning_lines) of the list it was given.
-    kept = {sev for _, sev in warnings[: len(warning_lines)]}
-
     parts: list[str] = []
     if warning_lines:
-        rules = [rule for sev, rule in _SEVERITY_RULES.items() if sev in kept]
-        parts.append(" ".join([_CONSTRAINT_PREAMBLE, *rules]) + "\n" + "\n".join(warning_lines))
+        parts.append(_constraint_section(warnings, warning_lines))
     if context_lines:
         parts.append(
             "Background context from past interactions (do not mention these directly):\n"

@@ -332,7 +332,7 @@ def test_recall_surfaces_the_atom_the_dense_pool_ranked_out(mem, monkeypatch):
         "what do you know about my family",
         "share everything you know about my family",
         "tell me what you know about my relatives",
-        "tell me about my relatives please",
+        "what can you tell me about my family members",
     ):
         mem.remember(filler)
 

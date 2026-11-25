@@ -14,7 +14,7 @@ from smrti.core.models import (
     TruthValue,
     atom_from_row,
 )
-from smrti.core.provenance import ATOM_METADATA_JSON, is_severe_retained
+from smrti.core.provenance import ATOM_FORGOTTEN, ATOM_METADATA_JSON, is_severe_retained
 
 # Stamped on an atom stored without a vector, so the epoch can find what
 # needs re-embedding without checking every atom against the index.
@@ -22,9 +22,90 @@ VECTOR_MISSING = "vector_missing"
 
 
 def embedding_text(atom: Atom) -> str:
-    """The text an atom is embedded on: its label, plus its content when it has one."""
-    return f"{atom.label} {atom.content}" if atom.content else atom.label
+    """The text an atom is embedded on, with no part of it twice.
 
+    An episode's or belief's label is the first hundred characters of its
+    content, and embedding the two together encoded those characters twice:
+    a verbatim copy of a short stored sentence reached a median 0.93 cosine
+    against its own vector. A label that is a prefix of the content adds
+    nothing to it; a label that is not (a bridge, a concept with a
+    description) is embedded with the content.
+    """
+    if not atom.content:
+        return atom.label
+    if atom.content.startswith(atom.label):
+        return atom.content
+    return f"{atom.label} {atom.content}"
+
+
+
+def _refuse_relocation(atom: Atom, prior) -> None:
+    # ``INSERT OR REPLACE`` keys on the primary key alone, so re-adding an
+    # atom under a different partition silently moves it — carrying its
+    # vector row with it — and one tenant's memory lands in another's graph.
+    # IDs are UUIDs, so this only happens when a caller reuses one, and when
+    # it does the write is a mistake, not a relocation request.
+    if prior is not None and (
+        prior["tenant_id"] != atom.tenant_id or prior["space"] != atom.space
+    ):
+        raise ValueError(
+            f"atom {atom.id} already exists in "
+            f"tenant={prior['tenant_id']!r} space={prior['space']!r}; "
+            f"refusing to move it to tenant={atom.tenant_id!r} space={atom.space!r}"
+        )
+
+
+def _insert_statement(atom: Atom) -> tuple:
+    """The statement that writes *atom*'s row, keeping its first ``created_at``."""
+    return (
+        """
+        INSERT OR REPLACE INTO atoms (
+            id, type, label, content, probability, confidence,
+            sti, lti, valence, intensity,
+            intrinsic_valence, intrinsic_intensity,
+            source_id, target_id, relation,
+            tenant_id, space, metadata, entity_type, content_hash,
+            created_at, updated_at
+        ) VALUES (
+            ?, ?, ?, ?, ?, ?,
+            ?, ?, ?, ?,
+            ?, ?,
+            ?, ?, ?,
+            ?, ?, ?, ?, ?,
+            COALESCE(
+                (SELECT created_at FROM atoms WHERE id = ?),
+                datetime('now')
+            ),
+            datetime('now')
+        )
+        """,
+        (
+            atom.id,
+            atom.type.value,
+            atom.label,
+            atom.content,
+            atom.truth.probability,
+            atom.truth.confidence,
+            atom.attention.sti,
+            atom.attention.lti,
+            atom.valence.valence,
+            atom.valence.intensity,
+            # What the atom itself says, kept out of propagation's reach.
+            atom.valence.own,
+            atom.valence.own_intensity,
+            atom.source_id,
+            atom.target_id,
+            atom.relation,
+            atom.tenant_id,
+            atom.space,
+            json.dumps(atom.metadata),
+            atom.entity_type.value if atom.entity_type else None,
+            hashlib.sha256(atom.content.encode()).hexdigest()
+            if atom.content
+            else None,
+            atom.id,
+        ),
+    )
 
 class AtomSpace:
     def __init__(self, db: Database, embed: EmbeddingProvider) -> None:
@@ -55,74 +136,40 @@ class AtomSpace:
         without one rather than lose the atom; the lexical index still
         carries it, and a later text change re-embeds it.
         """
-        prior = self._db.fetchone(
+        self._db.execute_batch(
+            self._add_statements(atom, embedding, require_vector, self._db.fetchone)
+        )
+        return atom.id
+
+    def add_atom_in(
+        self,
+        conn,
+        atom: Atom,
+        embedding: list[float] | None = None,
+        *,
+        require_vector: bool = True,
+    ) -> str:
+        """:meth:`add_atom` inside a :meth:`Database.transaction` the caller
+        holds, so the atom commits or rolls back with the caller's other reads
+        and writes, which see each other and nothing another writer commits
+        in between. Hand the vector in: encoded here, it would hold every
+        other writer off for as long as the encoder runs.
+        """
+        for sql, params in self._add_statements(
+            atom, embedding, require_vector, lambda sql, params: conn.execute(sql, params).fetchone()
+        ):
+            conn.execute(sql, params)
+        return atom.id
+
+    def _add_statements(self, atom: Atom, embedding, require_vector: bool, fetchone) -> list[tuple]:
+        """The statements that write *atom* and its index rows, built against
+        what *fetchone* reads."""
+        prior = fetchone(
             "SELECT label, content, tenant_id, space FROM atoms WHERE id = ?",
             (atom.id,),
         )
-        # ``INSERT OR REPLACE`` keys on the primary key alone, so re-adding an
-        # atom under a different partition silently moves it — carrying its
-        # vector row with it — and one tenant's memory lands in another's graph.
-        # IDs are UUIDs, so this only happens when a caller reuses one, and when
-        # it does the write is a mistake, not a relocation request.
-        if prior is not None and (
-            prior["tenant_id"] != atom.tenant_id or prior["space"] != atom.space
-        ):
-            raise ValueError(
-                f"atom {atom.id} already exists in "
-                f"tenant={prior['tenant_id']!r} space={prior['space']!r}; "
-                f"refusing to move it to tenant={atom.tenant_id!r} space={atom.space!r}"
-            )
-        statements: list[tuple] = [
-            (
-                """
-                INSERT OR REPLACE INTO atoms (
-                    id, type, label, content, probability, confidence,
-                    sti, lti, valence, intensity,
-                    intrinsic_valence, intrinsic_intensity,
-                    source_id, target_id, relation,
-                    tenant_id, space, metadata, entity_type, content_hash,
-                    created_at, updated_at
-                ) VALUES (
-                    ?, ?, ?, ?, ?, ?,
-                    ?, ?, ?, ?,
-                    ?, ?,
-                    ?, ?, ?,
-                    ?, ?, ?, ?, ?,
-                    COALESCE(
-                        (SELECT created_at FROM atoms WHERE id = ?),
-                        datetime('now')
-                    ),
-                    datetime('now')
-                )
-                """,
-                (
-                    atom.id,
-                    atom.type.value,
-                    atom.label,
-                    atom.content,
-                    atom.truth.probability,
-                    atom.truth.confidence,
-                    atom.attention.sti,
-                    atom.attention.lti,
-                    atom.valence.valence,
-                    atom.valence.intensity,
-                    # What the atom itself says, kept out of propagation's reach.
-                    atom.valence.own,
-                    atom.valence.own_intensity,
-                    atom.source_id,
-                    atom.target_id,
-                    atom.relation,
-                    atom.tenant_id,
-                    atom.space,
-                    json.dumps(atom.metadata),
-                    atom.entity_type.value if atom.entity_type else None,
-                    hashlib.sha256(atom.content.encode()).hexdigest()
-                    if atom.content
-                    else None,
-                    atom.id,
-                ),
-            )
-        ]
+        _refuse_relocation(atom, prior)
+        statements: list[tuple] = [_insert_statement(atom)]
 
         # Protect stated warnings and severe failures from epoch pruning
         if is_severe_retained(atom):
@@ -131,57 +178,79 @@ class AtomSpace:
             )
 
         # Relation atoms carry synthetic labels — keep them out of the KNN and
-        # lexical indexes. The lexical write is unconditional where the vector
-        # write is not: it is two integer-keyed statements, and skipping it
-        # when the vector already exists would leave an atom permanently
-        # unsearchable by word if its index row was ever lost.
+        # lexical indexes.
         if atom.type != AtomType.RELATION:
-            statements.extend(fts_write(self._db, atom.id, atom.label, atom.content))
-            # By rowid, never by atom_id: a vec0 table answers a non-rowid
-            # predicate with a full scan of every vector in the database, so
-            # this one query used to make each write cost O(graph size).
-            existing_vec = self._db.fetchone(
-                "SELECT 1 FROM vec_atoms WHERE rowid = ?",
-                (stable_rowid(atom.id),),
+            statements.extend(
+                self._index_statements(atom, prior, embedding, require_vector, fetchone)
             )
-            content_changed = prior is not None and (
-                prior["label"] != atom.label or prior["content"] != atom.content
+
+        return statements
+
+    def _index_statements(self, atom: Atom, prior, embedding, require_vector: bool, fetchone) -> list[tuple]:
+        """The lexical and vector index rows of a non-relation *atom*.
+
+        The lexical write is unconditional where the vector write is not:
+        it is two integer-keyed statements, and skipping it when the vector
+        already exists would leave an atom permanently unsearchable by word
+        if its index row was ever lost.
+        """
+        statements = list(fts_write(self._db, atom.id, atom.label, atom.content))
+        # By rowid, never by atom_id: a vec0 table answers a non-rowid
+        # predicate with a full scan of every vector in the database, so
+        # this one query used to make each write cost O(graph size).
+        existing_vec = fetchone(
+            "SELECT 1 FROM vec_atoms WHERE rowid = ?",
+            (stable_rowid(atom.id),),
+        )
+        content_changed = prior is not None and (
+            prior["label"] != atom.label or prior["content"] != atom.content
+        )
+        if (not existing_vec or content_changed) and (
+            embedding is not None or require_vector
+        ):
+            if embedding is None:
+                embedding = self._embed.embed(embedding_text(atom))
+            vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
+            if existing_vec:
+                statements.extend(vec_delete([atom.id]))
+            statements.append(
+                vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label)
             )
-            if (not existing_vec or content_changed) and (
-                embedding is not None or require_vector
-            ):
-                if embedding is None:
-                    embedding = self._embed.embed(embedding_text(atom))
+        elif not existing_vec:
+            # Stored without a vector: mark it, so the epoch's repair pass
+            # can find it and recall can score it in the meantime.
+            statements.append(
+                (
+                    f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}', 1) WHERE id = ?",
+                    (atom.id,),
+                )
+            )
+        return statements
+
+    def file_vectors(self, vectors: list[tuple[Atom, list[float]]]) -> None:
+        """File each atom's vector as its index row, and clear its missing mark.
+
+        The vectors were computed from the atoms as the caller read them,
+        outside any transaction, so each is filed only if the atom still
+        holds that text and has not been forgotten since: a vector of text
+        the atom no longer holds would stand for it in every search, and a
+        forgotten atom's vector was removed on purpose.
+        """
+        with self._db.transaction() as conn:
+            for atom, embedding in vectors:
+                current = conn.execute(
+                    f"""UPDATE atoms SET metadata = json_remove({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}')
+                        WHERE id = ? AND label = ? AND content IS ? AND NOT {ATOM_FORGOTTEN}""",
+                    (atom.id, atom.label, atom.content),
+                ).rowcount
+                if not current:
+                    continue
                 vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
-                if existing_vec:
-                    statements.extend(vec_delete([atom.id]))
-                statements.append(
-                    vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label)
-                )
-            elif not existing_vec:
-                # Stored without a vector: mark it, so the epoch's repair pass
-                # can find it and recall can score it in the meantime.
-                statements.append(
-                    (
-                        f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}', 1) WHERE id = ?",
-                        (atom.id,),
-                    )
-                )
-
-        self._db.execute_batch(statements)
-        return atom.id
-
-    def file_vector(self, atom: Atom, embedding: list[float]) -> None:
-        """Give an atom stored without a vector its index row, and clear the mark."""
-        vec_bytes = struct.pack(f"{len(embedding)}f", *embedding)
-        self._db.execute_batch([
-            *vec_delete([atom.id]),
-            vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
-            (
-                f"UPDATE atoms SET metadata = json_remove({ATOM_METADATA_JSON}, '$.{VECTOR_MISSING}') WHERE id = ?",
-                (atom.id,),
-            ),
-        ])
+                for sql, params in (
+                    *vec_delete([atom.id]),
+                    vec_insert(atom.id, vec_bytes, atom.tenant_id, atom.space, atom.label),
+                ):
+                    conn.execute(sql, params)
 
     def delete_atoms(self, atom_ids: list[str], tenant_id: str) -> int:
         """Hard-delete the tenant's atoms among *atom_ids* and every row that
@@ -279,17 +348,50 @@ class AtomSpace:
         valence: float = 0.0,
         metadata: Optional[dict] = None,
     ) -> str:
+        return self._link(
+            None, source_id, target_id, relation, tenant_id, space, truth, valence, metadata
+        )
+
+    def link_atoms_in(
+        self,
+        conn,
+        source_id: str,
+        target_id: str,
+        relation: str,
+        tenant_id: str,
+        space: str,
+        truth: Optional[TruthValue] = None,
+        valence: float = 0.0,
+        metadata: Optional[dict] = None,
+    ) -> str:
+        """:meth:`link_atoms` inside a :meth:`Database.transaction` the caller
+        holds. Looked up and drawn as two writes, an edge two processes drew
+        at once was drawn twice: each found none and each inserted one."""
+        return self._link(
+            conn, source_id, target_id, relation, tenant_id, space, truth, valence, metadata
+        )
+
+    def _link(
+        self, conn, source_id, target_id, relation, tenant_id, space, truth, valence, metadata
+    ) -> str:
+        """Draw the edge, or reuse the one already drawn, through the database
+        or, when *conn* is given, on the caller's transaction."""
         # Idempotent: boost STI and return existing relation if already present
-        existing = self._db.fetchone(
+        lookup = (
             """SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
                AND relation = ? AND tenant_id = ? AND space = ?""",
             (source_id, target_id, relation, tenant_id, space),
         )
+        existing = self._db.fetchone(*lookup) if conn is None else conn.execute(*lookup).fetchone()
         if existing:
-            self._db.execute(
+            reuse = (
                 "UPDATE atoms SET sti = MIN(sti + 0.2, 3.0), updated_at = datetime('now') WHERE id = ?",
                 (existing["id"],),
             )
+            if conn is None:
+                self._db.execute(*reuse)
+            else:
+                conn.execute(*reuse)
             return existing["id"]
 
         if truth is None:
@@ -308,7 +410,7 @@ class AtomSpace:
             valence=ValenceModel(valence=max(-1.0, min(1.0, valence)), intensity=abs(valence)),
             metadata=dict(metadata or {}),
         )
-        return self.add_atom(link_atom)
+        return self.add_atom(link_atom) if conn is None else self.add_atom_in(conn, link_atom)
 
     def get_neighbors(
         self,

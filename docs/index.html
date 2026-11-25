@@ -1197,7 +1197,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           </div>
           <div class="usecase-card">
             <div class="usecase-title">rerank &middot; off</div>
-            <div class="usecase-desc">Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise, blended with salience. On LongMemEval-S at top_k 5 it retrieved 0.650 against 0.675 without it, and added about 4.5 s to an uncached recall.</div>
+            <div class="usecase-desc">Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise, blended with salience. On LongMemEval-S at top_k 5, with 0.23.0's vectors, it retrieved 0.650 against 0.675 without it, and added about 4.5 s to an uncached recall.</div>
           </div>
           <div class="usecase-card">
             <div class="usecase-title">supersession &middot; off</div>
@@ -1412,7 +1412,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
         <div class="usecase-grid" style="margin-top:2rem">
           <div class="usecase-card">
             <div class="usecase-title">LongMemEval-S</div>
-            <div class="usecase-desc">40 questions, one per ability in turn. Retrieval hit 0.675 at top_k 5, 0.775 at 10 (the proxy default), 0.975 at 50; evidence recall 0.533, 0.653, 0.952. With every decision task on, top_k 5 retrieves 0.650. Answers scored 0.900 at top_k 50 in the August run.</div>
+            <div class="usecase-desc">40 questions, one per ability in turn. Retrieval hit 0.775 at top_k 5, 0.825 at 10 (the proxy default), 0.950 at 50; evidence recall 0.634, 0.737, 0.928. Answers scored 0.900 at top_k 50 in the August run.</div>
           </div>
           <div class="usecase-card">
             <div class="usecase-title">HaluMem</div>

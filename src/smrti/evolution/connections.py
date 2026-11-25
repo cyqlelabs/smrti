@@ -16,9 +16,9 @@ from __future__ import annotations
 
 import struct
 
-from smrti.core.atomspace import AtomSpace
+from smrti.core.atomspace import AtomSpace, embedding_text
 from smrti.core.db import stable_rowid
-from smrti.core.models import TruthValue
+from smrti.core.models import TruthValue, atom_from_row
 from smrti.core.provenance import ATOM_FORGOTTEN
 
 # Cosine distance ceiling for a pair to be linked (similarity >= 0.6).
@@ -59,7 +59,7 @@ def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
     Returns the count of new relation atoms created.
     """
     high_lti = db.fetchall(
-        f"""SELECT id, label, content FROM atoms
+        f"""SELECT * FROM atoms
            WHERE tenant_id = ? AND space = ? AND lti > 0.3 AND type != 'relation'
              AND NOT {ATOM_FORGOTTEN}
            ORDER BY lti DESC LIMIT 50""",
@@ -76,8 +76,7 @@ def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
         if vec_row is not None:
             vec_bytes = vec_row["embedding"]
         else:
-            text = atom["content"] or atom["label"]
-            vec = embed_engine.embed(text)
+            vec = embed_engine.embed(embedding_text(atom_from_row(atom)))
             vec_bytes = struct.pack(f"{len(vec)}f", *vec)
 
         knn = db.fetchall(

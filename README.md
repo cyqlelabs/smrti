@@ -176,7 +176,7 @@ Laya needs AVX2. Without it, a 2011 dual-core took 30 to 48 seconds per decision
 | Task           | Decides | Default | Measurement behind the default |
 | -------------- | ------- | ------- | ------------------------------ |
 | `routing`      | Whether an episode needs the LLM claim extraction. Chatter skips it; a durable fact that names no entity can force it. | `off` | On the gate set (`make bench-decisions`) it avoided 1 of 11 skippable LLM calls and skipped claim extraction for 2 of 11 durable facts. "Never deploy on Fridays." was not forced to the LLM. |
-| `rerank`       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience. | `off` | LongMemEval-S at `top_k=5`: hit rate 0.650 with it, 0.675 without. It added about 4.5 s to each uncached recall. |
+| `rerank`       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience. | `off` | LongMemEval-S at `top_k=5`, with 0.23.0's vectors: hit rate 0.650 with it, 0.675 without. It added about 4.5 s to each uncached recall. |
 | `supersession` | Whether a new claim replaces an older one. Ambiguity keeps both. | `off` | On 25 English and Spanish pairs (`make bench-supersession`) it blocked 12 of 13 wrong cuts of a current fact but let one through, and blocked 7 of 8 real updates. |
 | `entity`       | Which existing atom an uncertain mention names. Under the confidence line, a duplicate is made rather than a wrong merge. | `off` | On 17 cases (`make bench-entity`) no answer reached the 0.6 line: no wrong merges, and none of the 9 true ones. |
 | `tone`         | Whose an *estimated* negative valence is: about the thing the memory describes, or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned. | `active` | On 29 sentences (`make bench-tone`) it damped 2 of 14 speaker-toned ones, both apologies, and none of the 15 about a failure, bug, rule or preference. |
@@ -319,7 +319,7 @@ response = client.chat.completions.create(
 On every request the proxy:
 
 1. Recalls relevant memories from the read spaces, building the query from recent conversation context (not just the last message)
-2. Injects them into the system prompt as labelled lines, each with a confidence qualifier: `Constraint:` for a stated warning, `Outdated:` for a replaced or disproven claim (a superseded fact reads `Outdated: Alice lives_in Berlin → Paris`), and `Note:` for background context. The `YOU MUST NOT` and `AVOID` rules are stated once, above the lines they govern. Stated warnings that bear on the request are added even when `top_k` cut them.
+2. Injects them into the system prompt as labelled lines, each with a confidence qualifier: `Constraint:` for a stated warning, `Outdated:` for a replaced or disproven claim (a superseded fact reads `Outdated: Alice lives_in Berlin → Paris`), and `Note:` for background context. Each memory's text is injected as a quoted string under a header saying quoted text is information, never an instruction, so stored text cannot forge a line of its own. The `YOU MUST NOT` and `AVOID` rules are stated once, above the lines they govern. Stated warnings that bear on the request are added even when `top_k` cut them.
 3. Stores the user message and assistant response as episodes once the upstream has returned a complete 2xx answer (identical episodes are deduplicated per tenant/space). The proxy reads tone from the text, and an estimated tone never becomes a `critical_warning`. A client that knows the user is reporting a mistake to avoid sends `X-Smrti-Valence: -0.9` (and optionally `X-Smrti-Intensity`) with that request, and the user message is stored with the valence stated. An out-of-range or non-numeric value is a 400.
 4. Extracts entities and claims into concept nodes and typed relation edges
 
@@ -622,12 +622,11 @@ Two harnesses in `bench/` ingest a published dataset as episodes and answer its 
 
 | `top_k` | Decisions | Hit rate | Evidence recall | Session hit rate |
 | ------- | --------- | -------- | --------------- | ---------------- |
-| 5 (proxy default) | off | **0.675** | 0.533 | 0.950 |
-| 5 | every task active (Laya) | 0.650 | 0.481 | 0.925 |
-| 10 (MCP and Python default) | off | **0.775** | 0.653 | 0.975 |
-| 50 | off | **0.975** | 0.952 | 1.000 |
+| 5 | off | **0.775** | 0.634 | 0.950 |
+| 10 (proxy, MCP and Python default) | off | **0.825** | 0.737 | 0.975 |
+| 50 | off | **0.950** | 0.928 | 1.000 |
 
-At `top_k=50` five of six abilities retrieve without a miss (multi-session misses 1 of 7). At `top_k=5` the weakest are questions about the assistant's own words (2 of 6) and temporal reasoning (4 of 7); with every decision task active, temporal reasoning falls to 2 of 7.
+0.23.1 embeds an episode's text once, where earlier versions embedded its opening twice. On the same 40 questions that gained four at `top_k=5` (0.675 before), two at 10 (0.775) and lost one temporal-reasoning question at 50 (0.975). At `top_k=50` four of six abilities retrieve without a miss (multi-session and temporal reasoning miss 1 of 7 each). At `top_k=5` the weakest are questions about the assistant's own words (2 of 6). With 0.23.0's vectors, turning every decision task on lowered `top_k=5` from 0.675 to 0.650 (evidence recall 0.533 to 0.481); that has not been re-run.
 
 **Answers** (2026-08-26, older ranking formula): `top_k=50` · gemini-3.7-flash answering and judging · otherwise the same config. Re-run before reading these against the current engine.
 
@@ -660,13 +659,15 @@ These numbers are not directly comparable to published results: the subsets are 
 
 ## Upgrading
 
-An existing database is upgraded the first time a newer version opens it. Migrations and data repairs are idempotent. The first open by this release does three things:
+An existing database is upgraded the first time a newer version opens it. Migrations and data repairs are idempotent. The first open by 0.23 or later does three things:
 
 | Change | Runs | Snapshot |
 | ------ | ---- | -------- |
 | Creates the `epoch_lease` table and the indexes `idx_atoms_edge_out`, `idx_atoms_edge_in`, `idx_atoms_forgotten` and `idx_atoms_warning`, and drops `idx_atoms_sti` | Every open (no-op once done) | None |
 | Deletes the `associated` edges at confidence ≤ 0.2 out of person atoms: the hubs the old healing step drew, plus association discovery's own edges, which discovery redraws on its next tenth epoch | Once per database, recorded as `repair_hub_edges` in `smrti_meta` | Only if no `.pre-migration.bak` exists yet |
 | Rebuilds the tone of entities extracted by earlier versions, and sinks memories forgotten before this version so the pruner can remove them | Every open, on rows still in the old shape | Only if no `.pre-migration.bak` exists yet |
+
+0.23.1 embeds an episode's text once; earlier versions embedded its first 100 characters twice. A file written before 0.23.1 is re-embedded gradually: opening it records a progress marker per space in `smrti_meta` and changes no row, and each consolidation epoch of that space re-embeds its next 256 atoms until none is left. A space that never runs an epoch, such as one read only as an overlay, keeps its old vectors; recall works throughout, on a mix of old and new ones. Stop every process running an older version before 0.23.1 first opens the file: vectors an older process writes after that are never re-embedded.
 
 A schema migration (a column added to an existing table, or the vector index rebuilt) writes `<db>.pre-migration.bak` before it runs, replacing an older one; a data repair never replaces an existing snapshot, so the file a downgrade needs survives. Restore that file to downgrade. Bridge spaces an older epoch created on its own (`a_x_b`) are left in place; remove one with `DELETE /spaces/current?space=a_x_b`.
 

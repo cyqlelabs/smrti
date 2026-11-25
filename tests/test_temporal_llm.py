@@ -293,4 +293,4 @@ def test_the_proxy_leaves_a_memory_without_resolutions_alone(mem):
 
     line, _ = _format_memory(RecallResult(atom=atom, salience=0.5, similarity=0.5))
 
-    assert line == "- Note: no dates here (confidence: medium)"
+    assert line == '- Note: "no dates here" (confidence: medium)'

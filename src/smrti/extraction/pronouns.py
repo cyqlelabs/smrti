@@ -1,43 +1,35 @@
-"""Folding the pronouns one text uses into the person it names."""
+"""Keeping the pronouns one text uses out of the entities read from it."""
 from __future__ import annotations
 
 
 def merge_pronoun_entities_in_batch(entities: list[dict]) -> list[dict]:
-    """Fold the pronouns NER found in one text into the person it names.
+    """Drop the pronouns NER found in one text.
 
     A pronoun is an entity the tagger typed ``pronoun`` (see
-    ``NERProvider.extract``); no word list decides it.
+    ``NERProvider.extract``); no word list decides it. It is never folded
+    into a person the text names, because who it stands for cannot be told
+    from the tagger's output. Folding every pronoun into the one named
+    person made the speaker of "I met Bob yesterday. I live in Paris." into
+    Bob, and Bob the one who lives in Paris; the same held for "Ich", "Je"
+    and "Yo". Telling the speaker's pronouns from a third person's takes
+    either a word list, which this project does not keep, or the tagger,
+    and its span head does not separate them: asked to type each pronoun
+    as the speaker or another person, it called two in ten of the speaker's
+    another person, and it scored "he" in "He told Tom that he would come
+    back" the speaker at 0.96. An unresolved pronoun costs the claim it
+    carries, which is dropped for want of a subject; a wrongly resolved one
+    gives a fact to someone it is not about.
 
-    - one named person: the pronouns become other names for that person in
-      this text, so the claims read from it resolve to them
-    - none, or several: the pronouns are dropped, since who they stand for
-      cannot be told from the text, and an atom called "she" is nobody
-
-    The alias table is never consulted. It used to be, for a text with no
-    named person, and another text's "she" was stored there as Bob's: "She
-    moved to Berlin." was then Bob's move. Other entities are never touched.
+    The alias table is never consulted either. It used to be, for a text
+    with no named person, and another text's "she" was stored there as
+    Bob's: "She moved to Berlin." was then Bob's move. Other entities are
+    never touched.
     """
     # A name the list also carries typed as a pronoun is one wherever else
     # it appears.
     pronoun_names = {
         (ent.get("name") or "").strip().lower() for ent in entities if ent.get("type") == "pronoun"
     }
-    pronouns = [ent for ent in entities if (ent.get("name") or "").strip().lower() in pronoun_names]
-    if not pronouns:
+    if not pronoun_names:
         return entities
-    kept = [ent for ent in entities if (ent.get("name") or "").strip().lower() not in pronoun_names]
-    named = [ent for ent in kept if ent.get("type") == "person"]
-    if len(named) == 1:
-        _fold_into(named[0], pronouns)
-    return kept
-
-
-def _fold_into(target: dict, pronouns: list[dict]) -> None:
-    aliases = list(target.get("aliases", []))
-    seen = {alias.lower() for alias in aliases} | {(target.get("name") or "").lower()}
-    for pronoun in pronouns:
-        for name in [pronoun.get("name") or "", *pronoun.get("aliases", [])]:
-            if name and name.lower() not in seen:
-                aliases.append(name)
-                seen.add(name.lower())
-    target["aliases"] = aliases
+    return [ent for ent in entities if (ent.get("name") or "").strip().lower() not in pronoun_names]

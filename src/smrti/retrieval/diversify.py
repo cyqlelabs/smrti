@@ -99,6 +99,21 @@ def diversify(
     if len(results) <= top_k:
         return list(results)
 
+    selected, deferred = _walk(results, _reserved_beliefs(results, top_k, min_confidence), top_k)
+    _backfill(selected, deferred, top_k)
+
+    # Back into the order the results arrived in. Re-sorting on salience
+    # undid a judge's order whenever there were more candidates than slots,
+    # which is every recall the reranker can change.
+    position = {r.atom.id: i for i, r in enumerate(results)}
+    selected.sort(key=lambda r: position[r.atom.id])
+    return selected[:top_k]
+
+
+def _reserved_beliefs(
+    results: list[RecallResult], top_k: int, min_confidence: float
+) -> list[RecallResult]:
+    """The beliefs that take the reserved slots, in arrival order."""
     relevant = _RESERVE_RELEVANCE * max(r.similarity for r in results)
     beliefs = [
         r
@@ -110,47 +125,66 @@ def diversify(
     # Reserving half the response for beliefs would be its own distortion, so
     # the floor is bounded by the answer's size as well as by what exists.
     reserve = min(_BELIEF_RESERVE, len(beliefs), top_k // 2)
+    return beliefs[:reserve]
 
-    selected: list[RecallResult] = list(beliefs[:reserve])
+
+def _walk(
+    results: list[RecallResult], reserved: list[RecallResult], top_k: int
+) -> tuple[list[RecallResult], list[RecallResult]]:
+    """Fill *top_k* slots from *results* in order after the *reserved* ones.
+
+    Returns what was selected and, in order, the episodes the repeat cap
+    deferred.
+    """
+    selected: list[RecallResult] = list(reserved)
     selected_ids = {r.atom.id for r in selected}
     deferred: list[RecallResult] = []
     # Word sets of the episodes already selected, per time bucket. Only
     # episodes from the same moment are ever compared, so this stays small
     # however wide the candidate pool is.
     kept_by_cluster: dict[str, list[set[str]]] = {}
+    allowance = _repeat_allowance(top_k)
 
-    # The reserve needs no second guard here. Those slots are already filled
-    # above, so an episode can only be considered while fewer than top_k
-    # atoms are held, and the walk stops at top_k either way.
+    # The reserve needs no second guard here. Those slots are filled before
+    # the walk starts, so an episode can only be considered while fewer than
+    # top_k atoms are held, and the walk stops at top_k either way.
     for result in results:
         if len(selected) >= top_k:
             break
         if result.atom.id in selected_ids:
             continue
-        if result.atom.type == AtomType.EPISODE:
-            cluster = _cluster_key(result)
-            words = word_set(result.atom.content or result.atom.label)
-            kept = kept_by_cluster.setdefault(cluster, [])
-            repeats = sum(
-                1 for other in kept if containment(words, other) >= _DUPLICATE_OVERLAP
-            )
-            if repeats >= _repeat_allowance(top_k):
-                deferred.append(result)
-                continue
-            kept.append(words)
+        if not _admit(result, kept_by_cluster, allowance):
+            deferred.append(result)
+            continue
         selected.append(result)
         selected_ids.add(result.atom.id)
+    return selected, deferred
 
-    # Whatever the caps skipped fills the slots nothing else claimed: a graph
-    # holding a single topic must still answer with a full top_k.
+
+def _admit(
+    result: RecallResult, kept_by_cluster: dict[str, list[set[str]]], allowance: int
+) -> bool:
+    """Whether *result* may take a slot now, recording an admitted episode's
+    words against its moment.
+
+    Only episodes are capped. One is refused once its moment already holds
+    *allowance* episodes that say the same thing.
+    """
+    if result.atom.type != AtomType.EPISODE:
+        return True
+    words = word_set(result.atom.content or result.atom.label)
+    kept = kept_by_cluster.setdefault(_cluster_key(result), [])
+    repeats = sum(1 for other in kept if containment(words, other) >= _DUPLICATE_OVERLAP)
+    if repeats >= allowance:
+        return False
+    kept.append(words)
+    return True
+
+
+def _backfill(selected: list[RecallResult], deferred: list[RecallResult], top_k: int) -> None:
+    """Whatever the caps skipped fills the slots nothing else claimed: a graph
+    holding a single topic must still answer with a full top_k."""
     for result in deferred:
         if len(selected) >= top_k:
             break
         selected.append(result)
-
-    # Back into the order the results arrived in. Re-sorting on salience
-    # undid a judge's order whenever there were more candidates than slots,
-    # which is every recall the reranker can change.
-    position = {r.atom.id: i for i, r in enumerate(results)}
-    selected.sort(key=lambda r: position[r.atom.id])
-    return selected[:top_k]

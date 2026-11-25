@@ -590,6 +590,113 @@ def _user_claim_names(endpoint: str) -> str:
 _USER_CLAIM_ENDPOINT = f"({_user_claim_names('source_id')} OR {_user_claim_names('target_id')})"
 
 
+def _resolve_contradictions(tenant_id: str, space: str, db, fence=None) -> int:
+    """Weaken the loser of each unresolved contradiction in the space, once.
+
+    Each edge is resolved in a transaction of its own that holds the lease,
+    as decay does: a holder that stalled past its lease would otherwise cut
+    a confidence a second time after another process took the space over
+    and resolved the same edge. Returns the count resolved.
+    """
+    resolved = 0
+    contradictions = db.fetchall(
+        """SELECT id, source_id, target_id,
+                  CASE WHEN json_valid(metadata)
+                       THEN json_extract(metadata, '$.loser') END AS loser
+           FROM atoms
+           WHERE type = 'relation' AND relation = 'contradicts'
+             AND tenant_id = ? AND space = ?
+             AND (CASE WHEN json_valid(metadata)
+                       THEN json_extract(metadata, '$.resolved') END) IS NULL""",
+        (tenant_id, space),
+    )
+    for c in contradictions:
+        if not c["source_id"] or not c["target_id"]:
+            continue
+        with db.transaction() as conn:
+            if fence:
+                fence(conn)
+            # Both endpoints must be in this space. A contradiction edge can
+            # point at an atom in another space (bridge edges do exactly
+            # that), and weakening it here would let one space adjudicate
+            # another's beliefs.
+            src = conn.execute(
+                "SELECT probability, confidence FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+                (c["source_id"], tenant_id, space),
+            ).fetchone()
+            tgt = conn.execute(
+                "SELECT probability, confidence FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+                (c["target_id"], tenant_id, space),
+            ).fetchone()
+            if not (src and tgt):
+                continue
+            # A named loser is a supersession: the fact stopped being true,
+            # so its probability is cut to the superseded line as well as
+            # its confidence. An unnamed contradiction only says the two
+            # disagree, and there confidence alone gives way.
+            named = c["loser"] in (c["source_id"], c["target_id"])
+            if named:
+                loser_id = c["loser"]
+                conn.execute(
+                    "UPDATE atoms SET confidence = confidence * 0.8, "
+                    "probability = MIN(probability, ?) "
+                    "WHERE id = ? AND tenant_id = ? AND space = ?",
+                    (SUPERSEDED_PROBABILITY, loser_id, tenant_id, space),
+                )
+            else:
+                loser_id = (
+                    c["source_id"]
+                    if src["confidence"] < tgt["confidence"]
+                    else c["target_id"]
+                )
+                conn.execute(
+                    "UPDATE atoms SET confidence = confidence * 0.8 "
+                    "WHERE id = ? AND tenant_id = ? AND space = ?",
+                    (loser_id, tenant_id, space),
+                )
+            conn.execute(
+                f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.resolved', 1) WHERE id = ?",
+                (c["id"],),
+            )
+        resolved += 1
+    return resolved
+
+
+def _prune(tenant_id: str, space: str, db, p: dict, fence=None) -> int:
+    """Delete the space's atoms under both the confidence and the LTI floor,
+    with everything that references them. Returns the count chosen.
+
+    The dead are chosen and deleted in one transaction that holds the
+    lease. A delete cannot be undone, and a list read before it goes stale:
+    a holder that stalled past its lease would delete, after another
+    process took the space over, atoms that process had since revived.
+    """
+    min_conf = _param(p, "min_confidence_to_surface", 0.1)
+    with db.transaction() as conn:
+        if fence:
+            fence(conn)
+        # A forgotten bridge atom is the tombstone that keeps its pair from
+        # being bridged again; it is never recalled, and pruning it let the
+        # next merge recreate exactly what the caller forgot.
+        dead_rows = conn.execute(
+            f"""SELECT id FROM atoms
+               WHERE tenant_id = ? AND space = ?
+                 AND confidence < ? AND lti < 0.05
+                 AND type != 'relation'
+                 AND NOT {_FORGOTTEN_BRIDGE}
+                 AND ({ATOM_FORGOTTEN}
+                      OR ((type NOT IN ('episode', 'belief', 'goal')
+                           OR {ATOM_SOURCE} = 'agent')
+                          AND NOT {_USER_CLAIM_ENDPOINT}))""",
+            (tenant_id, space, min_conf),
+        ).fetchall()
+        if dead_rows:
+            # The cascade is tenant-scoped but cross-space so bridge edges
+            # referencing pruned atoms are cleaned too.
+            db.delete_atoms_in(conn, [row["id"] for row in dead_rows], tenant_id)
+    return len(dead_rows)
+
+
 def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     """One consolidation pass for a (tenant_id, space) pair.
 
@@ -719,64 +826,7 @@ def _consolidate(
     # usually the *more* confident of the two, having had time to be mentioned
     # again; the confidence rule alone would weaken the update instead.
     hold()
-    contradictions = db.fetchall(
-        """SELECT id, source_id, target_id,
-                  CASE WHEN json_valid(metadata)
-                       THEN json_extract(metadata, '$.loser') END AS loser
-           FROM atoms
-           WHERE type = 'relation' AND relation = 'contradicts'
-             AND tenant_id = ? AND space = ?
-             AND (CASE WHEN json_valid(metadata)
-                       THEN json_extract(metadata, '$.resolved') END) IS NULL""",
-        (tenant_id, space),
-    )
-    for c in contradictions:
-        if not c["source_id"] or not c["target_id"]:
-            continue
-        # Both endpoints must be in this space. A contradiction edge can point
-        # at an atom in another space (bridge edges do exactly that), and
-        # weakening it here would let one space adjudicate another's beliefs.
-        src = db.fetchone(
-            "SELECT probability, confidence FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
-            (c["source_id"], tenant_id, space),
-        )
-        tgt = db.fetchone(
-            "SELECT probability, confidence FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
-            (c["target_id"], tenant_id, space),
-        )
-        if src and tgt:
-            # A named loser is a supersession: the fact stopped being true,
-            # so its probability is cut to the superseded line as well as
-            # its confidence. An unnamed contradiction only says the two
-            # disagree, and there confidence alone gives way.
-            named = c["loser"] in (c["source_id"], c["target_id"])
-            if named:
-                loser_id = c["loser"]
-                weaken = (
-                    "UPDATE atoms SET confidence = confidence * 0.8, "
-                    "probability = MIN(probability, ?) "
-                    "WHERE id = ? AND tenant_id = ? AND space = ?",
-                    (SUPERSEDED_PROBABILITY, loser_id, tenant_id, space),
-                )
-            else:
-                loser_id = (
-                    c["source_id"]
-                    if src["confidence"] < tgt["confidence"]
-                    else c["target_id"]
-                )
-                weaken = (
-                    "UPDATE atoms SET confidence = confidence * 0.8 "
-                    "WHERE id = ? AND tenant_id = ? AND space = ?",
-                    (loser_id, tenant_id, space),
-                )
-            db.execute_batch([
-                weaken,
-                (
-                    f"UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.resolved', 1) WHERE id = ?",
-                    (c["id"],),
-                ),
-            ])
-            contradictions_resolved += 1
+    contradictions_resolved = _resolve_contradictions(tenant_id, space, db, fence)
 
     # 5. Association discovery between similar high-LTI atoms (every 10th
     # epoch), and on the same cadence a refresh of the statistics the query
@@ -802,31 +852,7 @@ def _consolidate(
     # a claim read from an agent turn: model output the user never adopted
     # must still be able to leave the graph.
     hold()
-    min_conf = _param(p, "min_confidence_to_surface", 0.1)
-    # A forgotten bridge atom is the tombstone that keeps its pair from being
-    # bridged again; it is never recalled, and pruning it let the next merge
-    # recreate exactly what the caller forgot.
-    dead_rows = db.fetchall(
-        f"""SELECT id FROM atoms
-           WHERE tenant_id = ? AND space = ?
-             AND confidence < ? AND lti < 0.05
-             AND type != 'relation'
-             AND NOT {_FORGOTTEN_BRIDGE}
-             AND ({ATOM_FORGOTTEN}
-                  OR ((type NOT IN ('episode', 'belief', 'goal')
-                       OR {ATOM_SOURCE} = 'agent')
-                      AND NOT {_USER_CLAIM_ENDPOINT}))""",
-        (tenant_id, space, min_conf),
-    )
-    atoms_pruned = len(dead_rows)
-
-    if dead_rows:
-        # The cascade is tenant-scoped but cross-space so bridge edges
-        # referencing pruned atoms are cleaned too, and it commits as one so
-        # a crash cannot leave atoms invisible to KNN.
-        AtomSpace(db, embed_engine).delete_atoms(
-            [row["id"] for row in dead_rows], tenant_id
-        )
+    atoms_pruned = _prune(tenant_id, space, db, p, fence)
 
     # 7. File the vectors of atoms stored without one. A write whose encoder
     # failed keeps the atom and marks it; until the mark is cleared the atom

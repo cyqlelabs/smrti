@@ -202,3 +202,55 @@ def test_two_writers_recording_one_claim_keep_both_episodes(mem, db_path, monkey
     episodes = json.loads(_row(mem, edge)["metadata"])["episodes"]
     assert sorted(episodes) == ["e1", "e2", "e3"]
     other.close()
+
+
+# ── the epoch's lease fences every write that cannot be repeated ────────────
+
+def _lose_the_lease(mem):
+    """Run one epoch, so the space has a lease, and give it to another process."""
+    mem.reflect()
+    mem.db.execute(
+        "UPDATE epoch_lease SET owner = 'someone-else', expires_at = ? WHERE tenant_id = ? AND space = ?",
+        (time.time() + 300, T, S),
+    )
+    return lambda conn: epoch_module._fence(conn, T, S, "me")
+
+
+def test_a_stale_lease_holder_cannot_resolve_a_contradiction(mem):
+    """Evidence, decay and propagation were fenced and contradiction
+    resolution was not, so a holder that had lost the space still cut the
+    loser's confidence after the new holder had cut it once."""
+    from smrti.evolution.epoch import _resolve_contradictions
+
+    fence = _lose_the_lease(mem)
+    old = mem.believe("Alice lives in Berlin", probability=0.8)
+    new = mem.believe("Alice lives in Paris", probability=0.8)
+    edge = mem.atomspace.link_atoms(new, old, "contradicts", T, S, metadata={"loser": old})
+    before = dict(_row(mem, old))
+
+    with pytest.raises(LeaseLost):
+        _resolve_contradictions(T, S, mem.db, fence=fence)
+
+    assert _row(mem, old)["confidence"] == before["confidence"]
+    assert _row(mem, old)["probability"] == before["probability"]
+    assert "resolved" not in json.loads(_row(mem, edge)["metadata"] or "{}")
+
+
+def test_a_stale_lease_holder_cannot_prune(mem):
+    """The prune read its list of dead atoms and deleted them outside the
+    lease, so a holder that had lost the space deleted from a list the new
+    holder's writes had made stale; a delete cannot be undone."""
+    from smrti.evolution.epoch import _prune
+    from smrti.personality.params import personality_params
+
+    fence = _lose_the_lease(mem)
+    doomed = mem.remember("Zorblat", type="concept", metadata={"source": "agent"})
+    mem.db.execute("UPDATE atoms SET confidence = 0.0, sti = 0.0, lti = 0.0 WHERE id = ?", (doomed,))
+    p = personality_params(mem.db.fetchone("SELECT * FROM personality WHERE tenant_id = ? AND space = ?", (T, S)))
+
+    with pytest.raises(LeaseLost):
+        _prune(T, S, mem.db, p, fence=fence)
+
+    assert _row(mem, doomed) is not None
+    assert _prune(T, S, mem.db, p) == 1
+    assert _row(mem, doomed) is None

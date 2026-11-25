@@ -292,6 +292,16 @@ CREATE INDEX IF NOT EXISTS idx_atoms_label_norm ON atoms(tenant_id, u_lower(labe
 CREATE INDEX IF NOT EXISTS idx_aliases_alias_norm ON aliases(tenant_id, u_lower(alias));
 
 CREATE TABLE IF NOT EXISTS smrti_meta (key TEXT PRIMARY KEY, value TEXT);
+
+CREATE TABLE IF NOT EXISTS epoch_lease (
+    tenant_id       TEXT NOT NULL,
+    space           TEXT NOT NULL,
+    owner           TEXT,
+    expires_at      REAL NOT NULL DEFAULT 0,
+    completed_epoch INTEGER NOT NULL DEFAULT 0,
+    completed_at    TEXT,
+    PRIMARY KEY (tenant_id, space)
+);
 """
 
 _READ_POOL_SIZE = 4
@@ -1005,6 +1015,29 @@ class Database:
         self.execute(
             "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES (?, ?)", (key, value)
         )
+
+    @contextmanager
+    def transaction(self):
+        """One ``BEGIN IMMEDIATE`` transaction on the write connection.
+
+        Reads inside it see the rows its writes change, and no other
+        connection, in this process or another, can write until it commits.
+        ``execute`` commits per call and ``fetchall`` reads on a pooled
+        connection, so a read there and a write there are two transactions
+        with a gap between them — two processes reading the same pending
+        evidence in that gap each applied it. Inside, use only the connection
+        yielded: ``execute`` would wait on the lock held here.
+        """
+        with self._write_lock:
+            conn = self._write_conn
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
 
     @contextmanager
     def _read_conn(self):

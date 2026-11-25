@@ -4,7 +4,6 @@ from __future__ import annotations
 import logging
 import time
 import uuid
-from contextlib import contextmanager
 
 from smrti.core.atomspace import VECTOR_MISSING, AtomSpace, embedding_text
 from smrti.core.models import (
@@ -65,16 +64,6 @@ _NEGLIGIBLE = 1e-6
 # phases, so this bounds one phase, not the whole epoch.
 _LEASE_SECONDS = 300.0
 
-_LEASE_SCHEMA = """CREATE TABLE IF NOT EXISTS epoch_lease (
-    tenant_id       TEXT NOT NULL,
-    space           TEXT NOT NULL,
-    owner           TEXT,
-    expires_at      REAL NOT NULL DEFAULT 0,
-    completed_epoch INTEGER NOT NULL DEFAULT 0,
-    completed_at    TEXT,
-    PRIMARY KEY (tenant_id, space)
-)"""
-
 # The relations that record how the graph is built rather than a fact about
 # the world, as an SQL list.
 _STRUCTURAL = ", ".join(f"'{relation}'" for relation in STRUCTURAL_RELATIONS)
@@ -91,30 +80,6 @@ def _chunks(ids: list[str]):
         yield ids[start : start + _ID_CHUNK]
 
 
-@contextmanager
-def _write_transaction(db):
-    """One ``BEGIN IMMEDIATE`` transaction on the database's write connection.
-
-    Reads inside it see the rows its writes change, and no other connection,
-    in this process or another, can write until it commits. ``Database`` has
-    no public way to do this: ``execute`` commits per call and ``fetchall``
-    reads on a pooled connection, so a read there and a write here are two
-    transactions with a gap between them, and two processes reading the
-    same pending evidence in that gap each applied it. Inside, use only the
-    connection yielded: ``db.execute`` would wait on the lock held here.
-    """
-    with db._write_lock:
-        conn = db._write_conn
-        conn.commit()
-        conn.execute("BEGIN IMMEDIATE")
-        try:
-            yield conn
-            conn.commit()
-        except BaseException:
-            conn.rollback()
-            raise
-
-
 def _take_lease(tenant_id: str, space: str, db) -> tuple[str, int] | None:
     """Claim the space for one epoch and count it, or None when another holds it.
 
@@ -126,8 +91,7 @@ def _take_lease(tenant_id: str, space: str, db) -> tuple[str, int] | None:
     """
     owner = uuid.uuid4().hex
     now = time.time()
-    with _write_transaction(db) as conn:
-        conn.execute(_LEASE_SCHEMA)
+    with db.transaction() as conn:
         held = conn.execute(
             "SELECT owner, expires_at FROM epoch_lease WHERE tenant_id = ? AND space = ?",
             (tenant_id, space),
@@ -266,7 +230,7 @@ def _apply_evidence(tenant_id: str, space: str, db, lr: float) -> int:
     ):
         return 0
     applied = 0
-    with _write_transaction(db) as conn:
+    with db.transaction() as conn:
         pending = conn.execute(
             """SELECT id, atom_id, observed_probability, weight FROM evidence
                WHERE processed = 0 AND tenant_id = ? AND space = ? ORDER BY created_at""",
@@ -744,7 +708,7 @@ def _consolidate(
     if epoch_count % 10 == 0:
         hold()
         new_connections = discover_connections(tenant_id, space, db, embed_engine)
-        db.execute("PRAGMA optimize")
+        db.optimize()
 
     # 6. Prune atoms below both confidence and LTI floors.
     # User-authored episodes, beliefs and goals are exempt from direct pruning unless

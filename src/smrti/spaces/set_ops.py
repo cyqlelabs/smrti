@@ -104,11 +104,6 @@ def _get_embeddings(atom_ids: list[str], db) -> dict[str, list[float]]:
     return {atom_id: found[atom_id] for atom_id in atom_ids if atom_id in found}
 
 
-def _get_embedding(atom_id: str, db) -> list[float] | None:
-    """Fetch the stored embedding for an atom."""
-    return _get_embeddings([atom_id], db).get(atom_id)
-
-
 def _cosine_similarity(a: list[float], b: list[float]) -> float:
     dot = sum(x * y for x, y in zip(a, b))
     norm_a = sum(x * x for x in a) ** 0.5

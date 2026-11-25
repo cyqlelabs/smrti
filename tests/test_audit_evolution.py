@@ -155,7 +155,7 @@ def test_forget_cascade_removes_what_only_the_episode_supported(mem):
     key = mem.remember("prod DB key", type="concept", valence=0.0)
     vault = mem.remember("secret/prod", type="concept", valence=0.0)
     _mentions(mem, episode, key, vault)
-    claim = mem.atomspace.link_atoms(key, vault, "stored_in", T, S)
+    claim = mem.atomspace.link_atoms(key, vault, "stored_in", T, S, metadata={"episodes": [episode]})
 
     labels = mem.forget(atom_ids=[episode], cascade=True)
 
@@ -176,8 +176,8 @@ def test_forget_cascade_keeps_what_a_live_episode_supports(mem):
     acme = mem.remember("Acme", type="concept", valence=0.0)
     _mentions(mem, gone, alice, paris)
     _mentions(mem, kept, alice, acme)
-    lives_in = mem.atomspace.link_atoms(alice, paris, "lives_in", T, S)
-    works_at = mem.atomspace.link_atoms(alice, acme, "works_at", T, S)
+    lives_in = mem.atomspace.link_atoms(alice, paris, "lives_in", T, S, metadata={"episodes": [gone]})
+    works_at = mem.atomspace.link_atoms(alice, acme, "works_at", T, S, metadata={"episodes": [kept]})
 
     mem.forget(atom_ids=[gone], cascade=True)
 
@@ -185,6 +185,74 @@ def test_forget_cascade_keeps_what_a_live_episode_supports(mem):
     assert _meta(mem, paris).get("forgotten")
     for survivor in (alice, acme, works_at):
         assert not _meta(mem, survivor).get("forgotten")
+
+
+def test_forget_cascade_keeps_a_claim_another_episode_asserted(mem):
+    """Co-mention was read as provenance: forgetting an episode that merely
+    mentioned Alice and tea deleted the claim another episode stated."""
+    stated = mem.remember("Alice said she likes it", valence=0.0)
+    chatter = mem.remember("Alice and the tea were both at the party", valence=0.0)
+    alice = mem.remember("Alice", type="concept", valence=0.0)
+    tea = mem.remember("tea", type="concept", valence=0.0)
+    _mentions(mem, stated, alice)
+    _mentions(mem, chatter, alice, tea)
+    likes = mem.atomspace.link_atoms(alice, tea, "likes", T, S, metadata={"episodes": [stated]})
+
+    mem.forget(atom_ids=[chatter], cascade=True)
+
+    assert _row(mem, likes) is not None
+    assert not _meta(mem, tea).get("forgotten")
+
+
+def test_forget_cascade_keeps_a_claim_nothing_records_an_assertion_for(mem):
+    """A claim written before claims recorded who asserted them is kept: when
+    in doubt an atom stays."""
+    episode = mem.remember("Bob moved to Lisbon", valence=0.0)
+    bob = mem.remember("Bob", type="concept", valence=0.0)
+    lisbon = mem.remember("Lisbon", type="concept", valence=0.0)
+    _mentions(mem, episode, bob, lisbon)
+    lives_in = mem.atomspace.link_atoms(bob, lisbon, "lives_in", T, S)
+
+    mem.forget(atom_ids=[episode], cascade=True)
+
+    assert _row(mem, lives_in) is not None
+
+
+def test_forget_cascade_works_in_chunks(mem, monkeypatch):
+    """Lookups over many entities exceeded SQLite's 999-variable limit after
+    the episode had already been stamped."""
+    from smrti.evolution import forgetting
+
+    monkeypatch.setattr(forgetting, "_CHUNK", 1)
+    episode = mem.remember("Carol keeps the spare keys in the blue box", valence=0.0)
+    carol = mem.remember("Carol", type="concept", valence=0.0)
+    box = mem.remember("blue box", type="concept", valence=0.0)
+    _mentions(mem, episode, carol, box)
+    claim = mem.atomspace.link_atoms(carol, box, "keeps_keys_in", T, S, metadata={"episodes": [episode]})
+
+    mem.forget(atom_ids=[episode], cascade=True)
+
+    assert _row(mem, claim) is None
+    assert _meta(mem, carol).get("forgotten") and _meta(mem, box).get("forgotten")
+
+
+def test_a_stale_lease_holder_cannot_commit_its_decay(mem):
+    """The lease was checked between phases, so a holder that stalled past its
+    lease and resumed after a takeover decayed the space a second time."""
+    from smrti.evolution.epoch import _decay, _fence
+
+    atom_id = mem.remember("The kettle is in the left cupboard", valence=0.0)
+    mem.reflect()
+    mem.db.execute(
+        "UPDATE epoch_lease SET owner = 'someone-else', expires_at = ? WHERE tenant_id = ? AND space = ?",
+        (time.time() + 300, T, S),
+    )
+    before = _row(mem, atom_id)["confidence"]
+    p = personality_params(mem.db.fetchone("SELECT * FROM personality WHERE tenant_id = ? AND space = ?", (T, S)))
+
+    with pytest.raises(LeaseLost):
+        _decay(T, S, mem.db, p, fence=lambda conn: _fence(conn, T, S, "me"))
+    assert _row(mem, atom_id)["confidence"] == before
 
 
 # ── epochs across processes and failures ────────────────────────────────────
@@ -440,13 +508,14 @@ def test_propagation_commits_once_per_epoch(mem):
     mem.db.execute("UPDATE atoms SET sti = 1.0, intensity = 0.9 WHERE label LIKE 'active%'")
     p = personality_params(mem.db.fetchone("SELECT * FROM personality WHERE space = ?", (S,)))
 
-    with patch.object(mem.db, "execute_batch", wraps=mem.db.execute_batch) as batch, \
+    with patch.object(mem.db, "transaction", wraps=mem.db.transaction) as transaction, \
+            patch.object(mem.db, "execute_batch", wraps=mem.db.execute_batch) as batch, \
             patch.object(mem.db, "execute_many", wraps=mem.db.execute_many) as many, \
             patch.object(mem.db, "execute", wraps=mem.db.execute) as single:
         _propagate(T, S, mem.db, p)
 
-    assert batch.call_count == 1
-    assert many.call_count == 0 and single.call_count == 0
+    assert transaction.call_count == 1
+    assert batch.call_count == many.call_count == single.call_count == 0
 
 
 def test_decay_leaves_settled_rows_alone(mem):

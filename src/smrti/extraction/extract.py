@@ -18,6 +18,7 @@ from smrti.core.provenance import (
     ATOM_FORGOTTEN,
     ATOM_METADATA_JSON,
     ATOM_SOURCE,
+    CLAIM_EPISODES,
     SOURCE_AGENT,
     SUPERSEDED_BY,
     claim_current_sql,
@@ -729,6 +730,7 @@ def _link_claims(
                     valence=claim_valence,
                     metadata={"source": SOURCE_AGENT} if source == SOURCE_AGENT else None,
                 )
+                _record_assertion(mem, new_edge, episode_id)
                 if _is_superseded(mem, new_edge):
                     _revive(mem, new_edge, obj_id, episode_id, source)
                 # Lower the target's tone to the claim's straight away. Epoch
@@ -939,6 +941,36 @@ def _still_claimed(mem: "Smrti", obj_id: str, except_edge_id: str) -> bool:
             (obj_id, except_edge_id, *_STRUCTURAL_RELATIONS, mem.tenant_id, mem.write_space),
         )
         is not None
+    )
+
+
+def _record_assertion(mem: "Smrti", edge_id: str, episode_id: str | None) -> None:
+    """Name *episode_id* among the episodes that asserted the claim *edge_id*.
+
+    ``link_atoms`` reuses an existing edge, so a fact stated twice is one edge
+    with two supporting episodes; forgetting one of them must not take the
+    fact the other still states.
+    """
+    if not episode_id:
+        return
+    row = mem.db.fetchone(
+        "SELECT metadata FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+        (edge_id, mem.tenant_id, mem.write_space),
+    )
+    if row is None:
+        return
+    try:
+        meta = json.loads(row["metadata"] or "{}")
+    except ValueError:
+        meta = {}
+    episodes = meta.get(CLAIM_EPISODES) if isinstance(meta, dict) else None
+    episodes = [e for e in episodes if isinstance(e, str)] if isinstance(episodes, list) else []
+    if episode_id in episodes:
+        return
+    mem.db.execute(
+        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{CLAIM_EPISODES}', json(?))
+            WHERE id = ? AND tenant_id = ? AND space = ?""",
+        (json.dumps([*episodes, episode_id]), edge_id, mem.tenant_id, mem.write_space),
     )
 
 

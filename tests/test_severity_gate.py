@@ -128,3 +128,13 @@ def test_an_agents_estimated_distress_earns_no_floor(mem):
     for _ in range(100):
         mem.reflect()
     assert mem.db.fetchone("SELECT id FROM atoms WHERE id = ?", (atom.id,)) is None
+
+
+def test_a_superseded_warning_is_history_not_a_constraint():
+    """A replaced rule stayed a critical warning, so the agent was told to
+    obey both the rule and its replacement."""
+    from smrti.core.provenance import SUPERSEDED_BY
+
+    result = _result(AtomType.BELIEF, valence=-0.9, stated=True)
+    result.atom.metadata[SUPERSEDED_BY] = "newer-edge"
+    assert classify_memory(result) == "known_antipattern"

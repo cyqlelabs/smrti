@@ -63,6 +63,12 @@ ATOM_FORGOTTEN = forgotten_sql()
 # rendering reads its current state from the unmarked ones.
 SUPERSEDED_BY = "superseded_by"
 
+# The episodes that asserted a claim edge, appended each time extraction
+# draws or reuses it. Forgetting with cascade removes a claim only when every
+# episode recorded here is forgotten: co-mention says nothing about who
+# stated a fact.
+CLAIM_EPISODES = "episodes"
+
 
 def claim_current_sql(table: str = "") -> str:
     """Whether a claim edge in *table* has not been superseded."""
@@ -106,10 +112,13 @@ def valence_stated_sql(table: str = "") -> str:
     )
 
 
+# A warning a later claim replaced is history, not a rule: the replacement is
+# the one the agent must follow, and injecting both told it to obey each.
 CRITICAL_WARNING_SQL = (
     f"({valence_stated_sql()} AND type != 'concept' "
     f"AND {ATOM_OWN_VALENCE} < {WARNING_VALENCE} "
-    f"AND {ATOM_OWN_INTENSITY} > {WARNING_INTENSITY})"
+    f"AND {ATOM_OWN_INTENSITY} > {WARNING_INTENSITY} "
+    f"AND {claim_current_sql()})"
 )
 
 # What the epoch's severe floor holds and what recall lets past the confidence
@@ -132,6 +141,7 @@ def is_critical_warning(atom) -> bool:
         and _type_name(atom) != "concept"
         and atom.valence.own < WARNING_VALENCE
         and atom.valence.own_intensity > WARNING_INTENSITY
+        and not atom.metadata.get(SUPERSEDED_BY)
     )
 
 

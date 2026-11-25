@@ -5,10 +5,12 @@ import asyncio
 import logging
 import secrets
 import sys
+from collections import OrderedDict
 from typing import Optional
+from urllib.parse import parse_qs
 
 from fastapi import HTTPException, Request
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.datastructures import Headers
 
 from smrti.servers import config as cfg
@@ -21,8 +23,13 @@ logger = logging.getLogger("smrti.servers")
 GRACEFUL_SHUTDOWN_SECONDS = 3
 DRAIN_SECONDS = 5
 
-# The cookie the visualizer authenticates with (see _viz_login).
-KEY_COOKIE = "smrti_key"
+# The cookie the visualizer authenticates with (see _viz_login). It holds a
+# random session token, never the key, and is honoured only for reads.
+KEY_COOKIE = "smrti_session"
+# Live visualizer sessions: token -> the key that opened it. Bounded, oldest
+# dropped first; a server restart ends them all.
+_viz_sessions: OrderedDict[str, str] = OrderedDict()
+_VIZ_SESSIONS_MAX = 256
 
 # What a presented key may act on: None is every tenant (SMRTI_API_KEY), a
 # tuple is the tenants a SMRTI_API_KEYS entry lists, and _NO_KEY is a key
@@ -68,11 +75,19 @@ def _error(status: int, message: str, kind: str, code: str) -> JSONResponse:
 
 
 def _presented_tenants(request: Request):
-    """The tenants of the first known key the request presents, or _NO_KEY."""
+    """The tenants of the first known key the request presents, or _NO_KEY.
+
+    The visualizer's session cookie counts only on a read. A browser sends a
+    cookie to every port of a host and treats them as one site, so a page on
+    any other local port could otherwise write through it.
+    """
+    session_key = ""
+    if request.method in ("GET", "HEAD"):
+        session_key = _viz_sessions.get(request.cookies.get(KEY_COOKIE, ""), "")
     presented = (
         request.headers.get("x-api-key") or "",
         _bearer(request),
-        request.cookies.get(KEY_COOKIE, ""),
+        session_key,
     )
     for supplied in presented:
         tenants = _tenants_of(supplied)
@@ -120,10 +135,12 @@ async def api_key_middleware(request: Request, call_next):
     """
     if not (cfg.API_KEY or cfg.API_KEYS):
         return await call_next(request)
-    if request.url.path == "/viz" and "key" in request.query_params:
-        return _viz_login(request)
+    if request.url.path == "/viz/login" and request.method == "POST":
+        return await _viz_login(request)
     tenants = _presented_tenants(request)
     if tenants is _NO_KEY:
+        if request.url.path == "/viz" and request.method == "GET":
+            return HTMLResponse(_VIZ_LOGIN_FORM, status_code=401)
         return _error(401, "Invalid or missing API key", "authentication_error", "invalid_api_key")
     if tenants is not None:
         refusal = _refusal(request, tenants)
@@ -135,21 +152,36 @@ async def api_key_middleware(request: Request, call_next):
     return await call_next(request)
 
 
-def _viz_login(request: Request):
-    """Trade ``/viz?key=…`` for a cookie, then send the browser on to /viz.
+# What a browser gets for /viz without a key: a form that posts the key in
+# the request body, which neither the access log nor the history records.
+_VIZ_LOGIN_FORM = """<!doctype html><meta charset="utf-8"><title>smrti visualizer</title>
+<form method="post" action="viz/login"><label>API key
+<input type="password" name="key" autocomplete="current-password" autofocus required></label>
+<button type="submit">Open</button></form>"""
+
+
+async def _viz_login(request: Request):
+    """Trade a key posted from the login form for a cookie, then send the
+    browser on to /viz.
 
     A browser navigating to the visualizer, and the EventSource it opens for
     the live log, send no header, so with a key configured the page could
-    not load at all. The key is accepted once in the query and kept in an
-    HttpOnly, SameSite=Strict cookie the auth check reads like a header; the
-    redirect takes it back out of the address bar and the history.
+    not load at all. The key arrives once in a POST body — a key in the URL
+    landed in the access log and the history — and the browser keeps only a
+    random session token, in an HttpOnly, SameSite=Strict cookie the auth
+    check accepts on reads.
     """
-    supplied = request.query_params["key"]
+    body = (await request.body()).decode("utf-8", "replace")
+    supplied = (parse_qs(body).get("key") or [""])[0]
     if _tenants_of(supplied) is _NO_KEY:
-        return _error(401, "Invalid or missing API key", "authentication_error", "invalid_api_key")
-    response = RedirectResponse("viz", status_code=303)
+        return HTMLResponse(_VIZ_LOGIN_FORM, status_code=401)
+    token = secrets.token_urlsafe(32)
+    _viz_sessions[token] = supplied
+    while len(_viz_sessions) > _VIZ_SESSIONS_MAX:
+        _viz_sessions.popitem(last=False)
+    response = RedirectResponse("../viz", status_code=303)
     response.set_cookie(
-        KEY_COOKIE, supplied, httponly=True, samesite="strict",
+        KEY_COOKIE, token, httponly=True, samesite="strict",
         secure=request.url.scheme == "https",
     )
     return response

@@ -634,15 +634,22 @@ def test_an_oversized_request_body_is_refused_with_413(keyed, monkeypatch):
 
 
 def test_the_visualizer_takes_the_key_once_and_then_rides_a_cookie(keyed):
-    """With a key set, browser navigation and EventSource sent none, so /viz was unusable."""
-    assert keyed.get("/viz", params={"key": "wrong"}, follow_redirects=False).status_code == 401
-    login = keyed.get("/viz", params={"key": "admin-key"}, follow_redirects=False)
+    """With a key set, browser navigation and EventSource sent none, so /viz
+    was unusable; a key in the URL landed in the access log, so it is posted."""
+    form = keyed.get("/viz", follow_redirects=False)
+    assert form.status_code == 401 and 'action="viz/login"' in form.text
+    assert keyed.post("/viz/login", data={"key": "wrong"}, follow_redirects=False).status_code == 401
+    login = keyed.post("/viz/login", data={"key": "admin-key"}, follow_redirects=False)
     assert login.status_code == 303
-    assert login.headers["location"] == "viz"
+    assert login.headers["location"] == "../viz"
+    assert "admin-key" not in str(login.url)
     cookie = login.headers["set-cookie"].lower()
     assert "httponly" in cookie and "samesite=strict" in cookie
+    assert "admin-key" not in cookie  # a session token, never the key
     assert keyed.get("/viz").status_code == 200
     assert keyed.get("/llm-calls").status_code == 200
+    # A browser sends the cookie to every port of the host: it must not write.
+    assert keyed.post("/remember", json={"content": "planted"}).status_code == 401
     keyed.cookies.clear()
     assert keyed.get("/llm-calls").status_code == 401
 
@@ -712,9 +719,9 @@ def test_servers_without_auth_warn_on_any_exposed_bind(monkeypatch, tmp_path, ca
     assert capsys.readouterr().err == ""
 
 
-def test_serve_viz_opens_the_visualizer_with_its_key(monkeypatch, tmp_path):
-    """A bare /viz is refused when a key is set, so the browser has to arrive
-    with ?key= once to get its session cookie."""
+def test_serve_viz_never_puts_the_key_in_the_url_it_opens(monkeypatch, tmp_path):
+    """A key in the visualizer URL landed in the access log and the browser
+    history; /viz asks for it in a form instead."""
     from smrti import cli
 
     opened = []
@@ -733,7 +740,7 @@ def test_serve_viz_opens_the_visualizer_with_its_key(monkeypatch, tmp_path):
     monkeypatch.setattr("threading.Thread", _Thread)
     monkeypatch.setattr("smrti.servers.rest.run_rest_server", lambda **_kw: None)
     cli.serve_viz(host="127.0.0.1", port=18999, no_browser=False)
-    assert opened == ["http://127.0.0.1:18999/viz?key=k%2F1"]
+    assert opened == ["http://127.0.0.1:18999/viz"]
 
 
 def test_a_stated_warning_cut_by_top_k_still_reaches_the_recall_tool(tmp_path):
@@ -783,3 +790,27 @@ def test_the_proxy_injects_a_replaced_claim_once_as_outdated():
     lines = proxy._format_superseded({"nico": [claim], "tea": [claim]})
     assert lines == [("- Outdated: Nico prefers tea → coffee", "known_antipattern")]
     assert "Outdated: Nico prefers tea → coffee" in proxy._render_injection(lines)
+
+
+def test_a_warning_reaches_the_prompt_when_recall_finds_nothing():
+    """An empty recall returned before the warning search, so a warning
+    missing from the pool — stored without a vector, or phrased unlike the
+    question — was never injected."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from smrti.core.models import Atom, AtomType, RecallResult, Valence
+    from smrti.core.provenance import VALENCE_STATED
+    from smrti.servers import proxy
+
+    rule = Atom(type=AtomType.EPISODE, label="rule", content="Never run the migration twice",
+                valence=Valence(valence=-0.9, intensity=0.9), metadata={VALENCE_STATED: True},
+                tenant_id="t", space="s")
+    mem = MagicMock()
+    mem.find_warnings.return_value = [RecallResult(atom=rule, salience=0.4, similarity=0.4)]
+    mem.superseded_claims.return_value = {}
+    body = {"messages": [{"role": "user", "content": "Can I rerun the schema update?"}]}
+    with patch.object(proxy, "_recall", AsyncMock(return_value=[])), \
+            patch.object(proxy, "get_mem", return_value=mem):
+        _, injection, _ = asyncio.run(proxy._inject_context(body, "t", "s", ["s"]))
+    assert "Constraint: Never run the migration twice" in injection

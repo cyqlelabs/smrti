@@ -506,7 +506,7 @@ def rank_candidates(
     — the first stage of :func:`retrieve`, which makes no write.
 
     ``damp_echoes=False`` keeps an episode that restates the query; see
-    :func:`_similarity`."""
+    :func:`_restates_query`."""
     # One KNN probe is issued per read space, so a repeated name is repeated
     # work — and read_spaces can arrive straight from a request header.
     # Deduplicating in order also keeps the ``space IN (...)`` lists tight.

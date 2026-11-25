@@ -7,6 +7,7 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
 from collections import OrderedDict
@@ -122,7 +123,17 @@ def _bootstrap() -> tuple[str, str, str]:
     return _default_tenant_id, _default_write_space, _default_db_path  # type: ignore[return-value]
 
 
+# Guards the instance cache: instances are minted in the executor, since
+# minting writes a personality row that can wait on an epoch's write lock.
+_mints = threading.RLock()
+
+
 def get_mem(tenant_id: str, write_space: str) -> Smrti:
+    with _mints:
+        return _get_mem(tenant_id, write_space)
+
+
+def _get_mem(tenant_id: str, write_space: str) -> Smrti:
     key = (tenant_id, write_space)
     if key not in _instances:
         _, _, db_path = _bootstrap()
@@ -182,11 +193,11 @@ def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
 
 
 async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: list[str]) -> list:
-    mem = get_mem(tenant_id, write_space)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
+    return await asyncio.get_running_loop().run_in_executor(
         None,
-        lambda: mem.recall(query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces),
+        lambda: get_mem(tenant_id, write_space).recall(
+            query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces
+        ),
     )
 
 
@@ -201,9 +212,8 @@ async def _beyond_recall(
     seventy more similar memories, is still the one the model must not act
     against.
     """
-    mem = get_mem(tenant_id, write_space)
-
     def work():
+        mem = get_mem(tenant_id, write_space)
         shown = {r.atom.id for r in memories}
         warnings = [
             w for w in mem.find_warnings(query, read_spaces=read_spaces) if w.atom.id not in shown
@@ -477,10 +487,13 @@ async def _inject_context(
         return body, "", []
 
     memories = await _recall(query, tenant_id, write_space, read_spaces)
-    if not memories:
-        return body, "", []
+    # Asked even when recall found nothing: a warning stored without a vector,
+    # or phrased unlike the question, can be missing from the pool and still
+    # be the one memory the model must not act against.
     warnings, replaced = await _beyond_recall(query, memories, tenant_id, write_space, read_spaces)
     memories = [*warnings, *memories]
+    if not memories:
+        return body, "", []
 
     mem = get_mem(tenant_id, write_space)
     enriched_contents = [_enrich_content(r, mem) for r in memories]

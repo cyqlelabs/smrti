@@ -318,6 +318,22 @@ def test_rebridging_leaves_a_forgotten_bridge_forgotten(tmp_path):
     assert again["id"] == row["id"] and json.loads(again["metadata"])["forgotten"] is True
 
 
+def test_a_forgotten_bridge_outlives_the_pruner_as_its_tombstone(tmp_path):
+    """The tombstone was the forgotten bridge atom itself, and once an epoch
+    pruned it the next merge recreated the pair the caller forgot."""
+    left, right, bridge = _spaces(tmp_path, "a", "b", "a_x_b")
+    left.believe("Preserve snapshots before every deploy", 0.8, valence=0.0)
+    right.believe("Preserve snapshots before every deploy", 0.8, valence=0.0)
+    assert left.materialize_bridge("b") == 1
+    (row,) = _bridge_atoms(bridge, "a_x_b")
+    bridge.forget(atom_ids=[row["id"]])
+    for _ in range(3):
+        bridge.reflect()
+    assert left.materialize_bridge("b") == 0
+    (again,) = _bridge_atoms(bridge, "a_x_b")
+    assert again["id"] == row["id"]
+
+
 def test_a_bridge_earns_its_own_warning_and_authorship():
     """Bridges merged both parents' metadata, so a stated valence or an agent
     source on either parent leaked into the bridge: two ``context`` parents

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional
@@ -61,6 +62,11 @@ _SPACE_MEMS_MAX = 64
 # same way. A space of "" is that tenant's view of the configured space.
 _tenant_mems: OrderedDict[tuple[str, str], Smrti] = OrderedDict()
 
+# Guards both caches. Instances are resolved in the executor: minting one
+# writes its personality row, which waits on any epoch holding the write lock,
+# and on the event loop that wait stalled every other request.
+_mints = threading.RLock()
+
 # Strong references to fire-and-forget tasks so the GC cannot cancel them mid-flight
 _background_tasks: set[asyncio.Task] = set()
 
@@ -74,11 +80,13 @@ def get_mem(space: Optional[str] = None, tenant: Optional[str] = None) -> Smrti:
     *tenant* is the configured one; another tenant gets the same treatment in
     its own partition.
 
-    Called from the event loop thread only — every route resolves its instance
-    before handing the blocking work to ``_run_sync``, so the caches need no
-    lock. Keep it that way: minting also writes this space's personality row,
-    and moving that into the executor would race the cache.
+    Routes call it from the executor (see ``_amem_for``), under ``_mints``.
     """
+    with _mints:
+        return _get_mem(space, tenant)
+
+
+def _get_mem(space: Optional[str], tenant: Optional[str]) -> Smrti:
     global _mem
     if _mem is None:
         _mem = create_smrti()
@@ -132,12 +140,15 @@ def _mem_for(request: Request, space: Optional[str] = None) -> Smrti:
     return get_mem(space) if tenant == cfg.TENANT_ID else get_mem(space, tenant)
 
 
+async def _amem_for(request: Request, space: Optional[str] = None) -> Smrti:
+    """:func:`_mem_for`, resolved off the event loop."""
+    return await _run_sync(_mem_for, request, space)
+
+
 def _all_mems() -> list[Smrti]:
     """Every live instance, for the reflect loop — each space gets its own epochs."""
-    mems: list[Smrti] = [get_mem()]
-    mems.extend(_space_mems.values())
-    mems.extend(_tenant_mems.values())
-    return mems
+    with _mints:
+        return [get_mem(), *_space_mems.values(), *_tenant_mems.values()]
 
 
 async def _run_sync(fn, *args):
@@ -290,7 +301,7 @@ class SpaceMergeRequest(BaseModel):
 
 @app.post("/remember")
 async def remember(req: RememberRequest, request: Request):
-    mem = _mem_for(request, req.space)
+    mem = await _amem_for(request, req.space)
     result = await _run_sync(handle_tool, mem, "smrti_remember", req.model_dump())
     if cfg.EXTRACT:
         episode_id = result.get("atom_id", "")
@@ -310,19 +321,18 @@ async def remember(req: RememberRequest, request: Request):
 
 @app.post("/recall")
 async def recall(req: RecallRequest, request: Request):
-    return await _run_sync(handle_tool, _mem_for(request, req.space), "smrti_recall", req.model_dump())
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_recall", req.model_dump())
 
 
 @app.post("/reflect")
 async def reflect(request: Request, req: Optional[ReflectRequest] = None):
-    return await _run_sync(handle_tool, _mem_for(request, req.space if req else None), "smrti_reflect", {})
+    return await _run_sync(handle_tool, await _amem_for(request, req.space if req else None), "smrti_reflect", {})
 
 
 @app.post("/reinforce")
 async def reinforce(req: ReinforceRequest, request: Request):
     """Report that these memories were used, so being used can build confidence."""
-    return await _run_sync(
-        handle_tool, _mem_for(request, req.space), "smrti_reinforce", req.model_dump()
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_reinforce", req.model_dump()
     )
 
 
@@ -339,17 +349,17 @@ async def attend(req: AttendRequest, request: Request):
     the candidates itself and injected a few: the few it read are boosted,
     the rest are not. Attention, not evidence — ``/reinforce`` is the other.
     """
-    return await _run_sync(handle_tool, _mem_for(request, req.space), "smrti_attend", req.model_dump())
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_attend", req.model_dump())
 
 
 @app.post("/believe")
 async def believe(req: BelieveRequest, request: Request):
-    return await _run_sync(handle_tool, _mem_for(request, req.space), "smrti_believe", req.model_dump())
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_believe", req.model_dump())
 
 
 @app.post("/forget")
 async def forget(req: ForgetRequest, request: Request):
-    return await _run_sync(handle_tool, _mem_for(request, req.space), "smrti_forget", req.model_dump())
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_forget", req.model_dump())
 
 
 @app.get("/personality")
@@ -372,8 +382,7 @@ async def get_personality(request: Request, space: Optional[SpaceName] = Query(N
 
 @app.put("/personality")
 async def set_personality(req: PersonalityRequest, request: Request):
-    result = await _run_sync(
-        handle_tool, _mem_for(request, req.space), "smrti_personality", req.model_dump()
+    result = await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_personality", req.model_dump()
     )
     # A profile the engine refuses is the caller's mistake; answering 200 with
     # the refusal inside the body let a client believe the change took.
@@ -385,20 +394,20 @@ async def set_personality(req: PersonalityRequest, request: Request):
 @app.post("/space_query")
 async def space_query(req: SpaceQueryRequest, request: Request):
     """Compare two spaces: op=overlap (Jaccard), op=intersection, op=diff."""
-    mem = _other_space_mem(request, req.space, req.other_space)
+    mem = await _run_sync(_other_space_mem, request, req.space, req.other_space)
     return await _run_sync(handle_tool, mem, "smrti_space_query", req.model_dump())
 
 
 @app.post("/space_merge")
 async def space_merge(req: SpaceMergeRequest, request: Request):
     """Materialize a bridge space from the overlap between two spaces."""
-    mem = _other_space_mem(request, req.space, req.other_space)
+    mem = await _run_sync(_other_space_mem, request, req.space, req.other_space)
     return await _run_sync(handle_tool, mem, "smrti_space_merge", req.model_dump())
 
 
 @app.delete("/spaces/current")
 async def clear_current_space(request: Request, space: Optional[SpaceName] = Query(None)):
-    count = await _run_sync(_mem_for(request, space).clear_space)
+    count = await _run_sync((await _amem_for(request, space)).clear_space)
     return {"status": "ok", "deleted": count}
 
 

@@ -608,49 +608,63 @@ class Smrti:
         )
 
     def _forget(self, matches: list[tuple[str, str]], cascade: bool) -> list[str]:
-        forgotten = self._sink(matches)
-        if not cascade or not matches:
-            return forgotten
-        concepts, claims = derived_only_from(
-            [atom_id for atom_id, _ in matches], self.tenant_id, self.write_space, self.db
-        )
-        # A claim edge is deleted rather than stamped: the readers that render
-        # an entity's facts test the atoms an edge joins, not the edge, so a
-        # stamped claim between two live atoms would still be stated as fact.
-        if claims:
-            self.atomspace.delete_atoms([atom_id for atom_id, _ in claims], self.tenant_id)
-        return forgotten + [label for _, label in claims] + self._sink(concepts)
-
-    def _sink(self, matches: list[tuple[str, str]]) -> list[str]:
-        """Sink, stamp and unindex each ``(id, label)`` in the write space, zero
-        its attention and retire its pending evidence, in one transaction."""
+        """Sink and stamp *matches* and, with *cascade*, what only they gave
+        rise to — decided first, then written in one transaction, so a forget
+        never lands half done."""
         if not matches:
             return []
+        concepts, claims = (
+            derived_only_from([atom_id for atom_id, _ in matches], self.tenant_id, self.write_space, self.db)
+            if cascade
+            else ([], [])
+        )
+        with self.db.transaction() as conn:
+            for statement, params in self._sink_statements(matches + concepts):
+                conn.execute(statement, params)
+            # A claim edge is deleted rather than stamped: the readers that
+            # render an entity's facts test the atoms an edge joins, not the
+            # edge, so a stamped claim between two live atoms would still be
+            # stated as fact.
+            if claims:
+                self.db.delete_atoms_in(conn, [atom_id for atom_id, _ in claims], self.tenant_id)
+        return (
+            [label for _, label in matches]
+            + [label for _, label in claims]
+            + [label for _, label in concepts]
+        )
+
+    def _sink_statements(self, matches: list[tuple[str, str]]) -> list[tuple]:
+        """Sink, stamp and unindex each ``(id, label)`` in the write space, zero
+        its attention and retire its pending evidence. Chunked: SQLite before
+        3.32 binds at most 999 variables per statement."""
         # Below the floor by a margin, never merely at it: the decay floor
         # holds an atom that is still at or above the line.
         sunk_to = self._surfacing_floor() * 0.5
         ids = [atom_id for atom_id, _ in matches]
-        ph = ", ".join("?" for _ in ids)
-        self.db.execute_batch([
-            (
-                f"""UPDATE atoms SET
-                        confidence = MIN(confidence * 0.3, ?),
-                        sti = 0.0,
-                        metadata = json_set({ATOM_METADATA_JSON},
-                                            '$.forgotten', json('true')),
-                        updated_at = datetime('now')
-                    WHERE id IN ({ph}) AND tenant_id = ? AND space = ?""",
-                (sunk_to, *ids, self.tenant_id, self.write_space),
-            ),
-            (
-                f"""UPDATE evidence SET processed = 1
-                    WHERE atom_id IN ({ph}) AND tenant_id = ? AND processed = 0""",
-                (*ids, self.tenant_id),
-            ),
-            *vec_delete(ids),
-            *fts_delete(self.db, ids),
-        ])
-        return [label for _, label in matches]
+        statements: list[tuple] = []
+        for start in range(0, len(ids), 400):
+            chunk = ids[start : start + 400]
+            ph = ", ".join("?" for _ in chunk)
+            statements += [
+                (
+                    f"""UPDATE atoms SET
+                            confidence = MIN(confidence * 0.3, ?),
+                            sti = 0.0,
+                            metadata = json_set({ATOM_METADATA_JSON},
+                                                '$.forgotten', json('true')),
+                            updated_at = datetime('now')
+                        WHERE id IN ({ph}) AND tenant_id = ? AND space = ?""",
+                    (sunk_to, *chunk, self.tenant_id, self.write_space),
+                ),
+                (
+                    f"""UPDATE evidence SET processed = 1
+                        WHERE atom_id IN ({ph}) AND tenant_id = ? AND processed = 0""",
+                    (*chunk, self.tenant_id),
+                ),
+                *vec_delete(chunk),
+                *fts_delete(self.db, chunk),
+            ]
+        return statements
 
     def set_personality(self, preset_name: str) -> None:
         profile = load_preset(preset_name)

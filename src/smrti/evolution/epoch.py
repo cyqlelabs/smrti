@@ -70,6 +70,11 @@ _STRUCTURAL = ", ".join(f"'{relation}'" for relation in STRUCTURAL_RELATIONS)
 
 _ID_CHUNK = 400
 
+_FORGOTTEN_BRIDGE = (
+    f"({ATOM_FORGOTTEN} AND (CASE WHEN json_valid(metadata) "
+    f"THEN json_extract(metadata, '$.bridge_source_a') END) IS NOT NULL)"
+)
+
 
 class LeaseLost(RuntimeError):
     """Another process took over the space while this epoch was running."""
@@ -124,6 +129,23 @@ def _hold_lease(tenant_id: str, space: str, db, owner: str) -> None:
     the process that took over.
     """
     cursor = db.execute(
+        "UPDATE epoch_lease SET expires_at = ? WHERE tenant_id = ? AND space = ? AND owner = ?",
+        (time.time() + _LEASE_SECONDS, tenant_id, space, owner),
+    )
+    if cursor.rowcount != 1:
+        raise LeaseLost(f"epoch lease on tenant={tenant_id} space={space} was taken over")
+
+
+def _fence(conn, tenant_id: str, space: str, owner: str) -> None:
+    """Hold the lease inside the caller's write transaction, or stop the epoch.
+
+    The check between phases cannot fence a write: a holder that stalls
+    after renewing, past its lease, resumes after another process took the
+    space and decays it a second time. Made here, in the transaction that
+    writes, the check and the write are one: a stale holder's write is
+    rolled back instead of committed.
+    """
+    cursor = conn.execute(
         "UPDATE epoch_lease SET expires_at = ? WHERE tenant_id = ? AND space = ? AND owner = ?",
         (time.time() + _LEASE_SECONDS, tenant_id, space, owner),
     )
@@ -209,7 +231,7 @@ def _repair_vectors(tenant_id: str, space: str, db, embed_engine) -> None:
             return
 
 
-def _apply_evidence(tenant_id: str, space: str, db, lr: float) -> int:
+def _apply_evidence(tenant_id: str, space: str, db, lr: float, fence=None) -> int:
     """Revise truth values with the space's pending evidence.
 
     The rows are read, the atoms they bear on are read and revised, and the
@@ -231,6 +253,8 @@ def _apply_evidence(tenant_id: str, space: str, db, lr: float) -> int:
         return 0
     applied = 0
     with db.transaction() as conn:
+        if fence:
+            fence(conn)
         pending = conn.execute(
             """SELECT id, atom_id, observed_probability, weight FROM evidence
                WHERE processed = 0 AND tenant_id = ? AND space = ? ORDER BY created_at""",
@@ -270,7 +294,7 @@ def _apply_evidence(tenant_id: str, space: str, db, lr: float) -> int:
     return applied
 
 
-def _decay(tenant_id: str, space: str, db, p: dict) -> None:
+def _decay(tenant_id: str, space: str, db, p: dict, fence=None) -> None:
     """Decay STI, LTI and confidence, writing only the rows whose values change.
 
     Each new value is computed by one expression, and the same expression,
@@ -356,29 +380,32 @@ def _decay(tenant_id: str, space: str, db, p: dict) -> None:
                                        AND confidence >= :conf_floor THEN :conf_floor
                                   ELSE 0.0 END)"""
     min_conf = _param(p, "min_confidence_to_surface", 0.1)
-    for comparison, multiplier, lti_floor, conf_floor, permanent_at in (
-        ("!=", 1.0, _LTI_FLOOR_USER, min_conf, PERMANENT_PROBABILITY),
-        ("=", agent_multiplier, _LTI_FLOOR_AGENT, 0.0, _PERMANENCE_UNREACHABLE),
-    ):
-        sti_rate, lti_rate, conf_rate = (
-            min(rate * multiplier, 1.0) for rate in base_rates
-        )
-        db.execute(
-            f"""UPDATE atoms SET
-                    sti = {new_sti}, lti = {new_lti}, confidence = {new_confidence},
-                    updated_at = datetime('now')
-                WHERE tenant_id = :tenant_id AND space = :space
-                  AND {ATOM_SOURCE} {comparison} 'agent'
-                  AND (sti != {new_sti} OR lti != {new_lti}
-                       OR confidence != {new_confidence})""",
-            {
-                "tenant_id": tenant_id, "space": space,
-                "sti_rate": sti_rate, "lti_rate": lti_rate, "conf_rate": conf_rate,
-                "negligible": _NEGLIGIBLE, "critical_floor": _LTI_FLOOR_CRITICAL,
-                "lti_floor": lti_floor, "conf_floor": conf_floor,
-                "permanent_at": permanent_at,
-            },
-        )
+    with db.transaction() as conn:
+        if fence:
+            fence(conn)
+        for comparison, multiplier, lti_floor, conf_floor, permanent_at in (
+            ("!=", 1.0, _LTI_FLOOR_USER, min_conf, PERMANENT_PROBABILITY),
+            ("=", agent_multiplier, _LTI_FLOOR_AGENT, 0.0, _PERMANENCE_UNREACHABLE),
+        ):
+            sti_rate, lti_rate, conf_rate = (
+                min(rate * multiplier, 1.0) for rate in base_rates
+            )
+            conn.execute(
+                f"""UPDATE atoms SET
+                        sti = {new_sti}, lti = {new_lti}, confidence = {new_confidence},
+                        updated_at = datetime('now')
+                    WHERE tenant_id = :tenant_id AND space = :space
+                      AND {ATOM_SOURCE} {comparison} 'agent'
+                      AND (sti != {new_sti} OR lti != {new_lti}
+                           OR confidence != {new_confidence})""",
+                {
+                    "tenant_id": tenant_id, "space": space,
+                    "sti_rate": sti_rate, "lti_rate": lti_rate, "conf_rate": conf_rate,
+                    "negligible": _NEGLIGIBLE, "critical_floor": _LTI_FLOOR_CRITICAL,
+                    "lti_floor": lti_floor, "conf_floor": conf_floor,
+                    "permanent_at": permanent_at,
+                },
+            )
 
 
 def _far_ends(
@@ -465,7 +492,7 @@ def _propagation_statements(
     return statements
 
 
-def _propagate(tenant_id: str, space: str, db, p: dict) -> None:
+def _propagate(tenant_id: str, space: str, db, p: dict, fence=None) -> None:
     """Spread STI and valence one hop from every active atom, in one transaction.
 
     The statements are the ones the per-atom propagation issues, in the same
@@ -493,7 +520,11 @@ def _propagate(tenant_id: str, space: str, db, p: dict) -> None:
     )
     statements = _propagation_statements(tenant_id, space, active, neighbours, creditable, p)
     if statements:
-        db.execute_batch(statements)
+        with db.transaction() as conn:
+            if fence:
+                fence(conn)
+            for sql, params in statements:
+                conn.execute(sql, params)
 
 
 # Whether a current claim the user made, not forgotten, names the atom in the
@@ -540,6 +571,7 @@ def try_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult | Non
         result = _consolidate(
             tenant_id, space, db, embed_engine, epoch_count,
             hold=lambda: _hold_lease(tenant_id, space, db, owner),
+            fence=lambda conn: _fence(conn, tenant_id, space, owner),
         )
         completed = epoch_count
         return result
@@ -548,7 +580,7 @@ def try_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult | Non
 
 
 def _consolidate(
-    tenant_id: str, space: str, db, embed_engine, epoch_count: int, hold
+    tenant_id: str, space: str, db, embed_engine, epoch_count: int, hold, fence
 ) -> EpochResult:
     """Single deterministic consolidation pass for a (tenant_id, space) pair.
 
@@ -590,7 +622,7 @@ def _consolidate(
 
     # 1. Process pending evidence.
     beliefs_updated = _apply_evidence(
-        tenant_id, space, db, _param(p, "confidence_update_lr", 0.3)
+        tenant_id, space, db, _param(p, "confidence_update_lr", 0.3), fence
     )
 
     # 2. Decay STI, LTI, and confidence for all atoms in this space.
@@ -603,11 +635,11 @@ def _consolidate(
         (tenant_id, space),
     )
     atoms_decayed = decay_count_row["n"] if decay_count_row else 0
-    _decay(tenant_id, space, db, p)
+    _decay(tenant_id, space, db, p, fence)
 
     # 2b. Propagate STI and valence to 1-hop neighbors
     hold()
-    _propagate(tenant_id, space, db, p)
+    _propagate(tenant_id, space, db, p, fence)
 
     # 2c. Heal orphaned episodes (link to most salient person)
     hold()
@@ -726,11 +758,15 @@ def _consolidate(
     # must still be able to leave the graph.
     hold()
     min_conf = _param(p, "min_confidence_to_surface", 0.1)
+    # A forgotten bridge atom is the tombstone that keeps its pair from being
+    # bridged again; it is never recalled, and pruning it let the next merge
+    # recreate exactly what the caller forgot.
     dead_rows = db.fetchall(
         f"""SELECT id FROM atoms
            WHERE tenant_id = ? AND space = ?
              AND confidence < ? AND lti < 0.05
              AND type != 'relation'
+             AND NOT {_FORGOTTEN_BRIDGE}
              AND ({ATOM_FORGOTTEN}
                   OR ((type NOT IN ('episode', 'belief', 'goal')
                        OR {ATOM_SOURCE} = 'agent')

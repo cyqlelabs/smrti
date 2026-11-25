@@ -455,3 +455,29 @@ def test_idle_session_locks_are_dropped_but_a_held_one_is_kept():
         return len(locks._loop_entry()[1])
 
     assert asyncio.run(flood()) <= extract._MAX_SESSION_LOCKS
+
+
+def test_a_claim_edge_records_every_episode_that_asserted_it(tmp_path):
+    """Forgetting with cascade read co-mention as provenance; the claim edge
+    now names the episodes that stated it, and a restatement adds itself."""
+    import json
+
+    from smrti import Smrti
+    from smrti.extraction.extract import _link_claims
+    from smrti.extraction.resolve import EntityResolver
+
+    mem = Smrti(db_path=str(tmp_path / "c.db"), tenant_id="t", write_space="s")
+    resolver = EntityResolver(mem.db, mem.embed)
+    ids = {name: resolver.resolve(name, kind, "t", "s", ["s"])
+           for name, kind in (("Dana", "person"), ("Lisbon", "location"))}
+    claim = [{"subject": "Dana", "predicate": "lives_in", "object": "Lisbon"}]
+    first = mem.remember("Dana lives in Lisbon")
+    _link_claims(claim, ids, mem, first)
+    second = mem.remember("Dana still lives in Lisbon")
+    _link_claims(claim, ids, mem, second)
+    _link_claims(claim, ids, mem, second)
+    row = mem.db.fetchone(
+        "SELECT metadata FROM atoms WHERE type = 'relation' AND relation = 'lives_in'"
+    )
+    assert json.loads(row["metadata"])["episodes"] == [first, second]
+    mem.close()

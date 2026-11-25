@@ -936,17 +936,14 @@ class Database:
         an atom the delete then removed, and the commit failed its
         foreign-key check.
         """
-        with self._write_lock:
-            conn = self._write_conn
-            try:
-                conn.execute("BEGIN IMMEDIATE")
-                conn.execute("PRAGMA defer_foreign_keys = ON")
-                removed = self._cascade_delete(conn, atom_ids, tenant_id)
-                conn.commit()
-            except Exception:
-                conn.rollback()
-                raise
-        return removed
+        with self.transaction() as conn:
+            return self.delete_atoms_in(conn, atom_ids, tenant_id)
+
+    def delete_atoms_in(self, conn: sqlite3.Connection, atom_ids: list[str], tenant_id: str) -> int:
+        """:meth:`delete_atoms` inside a :meth:`transaction` the caller holds, so
+        the delete commits or rolls back with the rest of the caller's writes."""
+        conn.execute("PRAGMA defer_foreign_keys = ON")
+        return self._cascade_delete(conn, atom_ids, tenant_id)
 
     def _cascade_delete(self, conn: sqlite3.Connection, atom_ids: list[str], tenant_id: str) -> int:
         """Delete the closure of *atom_ids* within *tenant_id* on *conn*.

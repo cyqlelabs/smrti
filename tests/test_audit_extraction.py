@@ -280,6 +280,8 @@ def test_a_preference_makes_the_concept_of_the_same_name_a_belief(mem):
     assert _resolve(mem, "coffee", "preference") == concept
     row = mem.db.fetchone("SELECT type, entity_type FROM atoms WHERE id = ?", (concept,))
     assert (row["type"], row["entity_type"]) == ("belief", "preference")
+    # NER tags it a concept again on the next message; that finds the belief.
+    assert _resolve(mem, "coffee", "concept") == concept
 
 
 def test_a_name_that_only_looks_like_a_known_one_is_a_new_atom(mem):
@@ -314,14 +316,19 @@ def test_a_claim_naming_a_forgotten_atom_is_about_a_new_one(mem):
 
 
 def test_a_pronoun_alias_an_older_build_stored_is_never_a_match_and_is_purged(mem):
-    """"she" stored as Bob's alias made Bob of every later "she"."""
+    """"she" stored as Bob's alias made Bob of every later "she". The word
+    list also holds "us" and "it", so only aliases of people are judged by it."""
     bob = _concept(mem, "Bob", "person")
-    mem.db.execute(
-        "INSERT INTO aliases (alias, atom_id, tenant_id, space) VALUES ('she', ?, 't', 's')", (bob,),
-    )
+    usa = _concept(mem, "United States", "location")
+    team = _concept(mem, "IT department", "organization")
+    for alias, atom_id in (("she", bob), ("US", usa), ("IT", team)):
+        mem.db.execute(
+            "INSERT INTO aliases (alias, atom_id, tenant_id, space) VALUES (?, ?, 't', 's')", (alias, atom_id),
+        )
 
     assert _resolve(mem, "She", "person") != bob
-    assert mem.db.fetchall("SELECT alias FROM aliases") == []
+    assert {r["alias"] for r in mem.db.fetchall("SELECT alias FROM aliases")} == {"US", "IT"}
+    assert extract._resolver(mem, "user", "").aliases.lookup("US", "t", ["s"]) == usa
 
 
 def test_extraction_stores_no_alias_but_resolves_its_claims_with_them(mem):

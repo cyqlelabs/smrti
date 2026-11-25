@@ -147,8 +147,10 @@ class EntityResolver:
         # a place are each a distinct kind of referent, and a label shared
         # with one of them is a homonym: Java the island is not Java the
         # language, nor Apple the company the fruit. A goal only ever matches
-        # a goal; a preference or constraint also matches a concept of the
-        # same name, which it makes the belief it says it is.
+        # a goal. A preference or constraint also matches a concept of the
+        # same name, which it makes the belief it says it is, and a later
+        # mention of the concept finds that belief rather than making the
+        # concept again.
         atom_type = self._ENTITY_TYPE_TO_ATOM_TYPE.get(entity_type, "concept")
         if entity_type not in self._DISTINCT_KINDS:
             targets = self._CROSS_TYPE_TARGETS[atom_type]
@@ -161,7 +163,7 @@ class EntityResolver:
                 (name, *targets, *self._DISTINCT_KINDS, tenant_id, *read_spaces, atom_type),
             )
             if row:
-                if row["type"] != atom_type and row["space"] == write_space:
+                if atom_type == "belief" and row["type"] == "concept" and row["space"] == write_space:
                     self._make_belief(row["id"], entity_type, tenant_id, write_space)
                 self._boost_sti(row["id"], tenant_id, write_space)
                 return row["id"]
@@ -428,7 +430,7 @@ class EntityResolver:
 
     # The atom types a mention of each atom type may match under another
     # entity type (see tier 0b).
-    _CROSS_TYPE_TARGETS = {"goal": ("goal",), "belief": ("belief", "concept"), "concept": ("concept",)}
+    _CROSS_TYPE_TARGETS = {"goal": ("goal",), "belief": ("belief", "concept"), "concept": ("concept", "belief")}
 
     _ENTITY_TYPE_TO_ATOM_TYPE = {
         "goal": "goal",

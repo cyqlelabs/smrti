@@ -3,6 +3,13 @@ from __future__ import annotations
 
 from smrti.extraction.ner import _PRONOUNS
 
+# Older builds stored pronouns as aliases of person atoms only: the pronoun
+# merge folded them into the one person a text named, and the model was asked
+# to list a person's pronouns among their aliases. The word list is matched
+# against nothing else, because case-folded it also holds "US", "IT", "EU" and
+# "LA", which are real aliases of places and organizations.
+_PERSON_TARGET = "atom_id IN (SELECT id FROM atoms WHERE entity_type = 'person')"
+
 
 class AliasManager:
     def __init__(self, db) -> None:
@@ -12,21 +19,19 @@ class AliasManager:
         """Returns atom_id if alias is known in any of the given spaces, else None.
 
         Uses u_lower for Unicode-aware case folding (SQLite LOWER is ASCII-only).
-        A pronoun is never an alias, whatever the table says: older builds
-        stored "she" as the alias of whoever it first stood for, and every
-        later "she" became that person.
+        A pronoun is never a person's alias, whatever the table says: older
+        builds stored "she" as the alias of whoever it first stood for, and
+        every later "she" became that person.
         """
-        if alias.strip().casefold() in _PRONOUNS:
-            return None
         ph = ",".join("?" * len(spaces))
-        row = self.db.fetchone(
-            f"SELECT atom_id FROM aliases WHERE u_lower(alias) = u_lower(?) AND tenant_id = ? AND space IN ({ph})",
-            (alias, tenant_id, *spaces),
-        )
+        query = f"SELECT atom_id FROM aliases WHERE u_lower(alias) = u_lower(?) AND tenant_id = ? AND space IN ({ph})"
+        if alias.strip().casefold() in _PRONOUNS:
+            query += f" AND NOT {_PERSON_TARGET}"
+        row = self.db.fetchone(query, (alias, tenant_id, *spaces))
         return row["atom_id"] if row else None
 
     def purge_pronouns(self, tenant_id: str, space: str) -> None:
-        """Delete the pronoun aliases older builds stored in *space*.
+        """Delete the pronoun aliases older builds stored for persons in *space*.
 
         Idempotent, and a read when there is nothing to delete, so it can run
         whenever a resolver starts rather than once: a process on older code
@@ -35,6 +40,7 @@ class AliasManager:
         listed = sorted(_PRONOUNS)
         where = (
             f"tenant_id = ? AND space = ? AND u_lower(alias) IN ({','.join('?' * len(listed))})"
+            f" AND {_PERSON_TARGET}"
         )
         params = (tenant_id, space, *listed)
         if self.db.fetchone(f"SELECT 1 FROM aliases WHERE {where} LIMIT 1", params):

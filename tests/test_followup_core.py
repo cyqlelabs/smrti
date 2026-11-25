@@ -169,3 +169,36 @@ def test_two_writers_creating_one_entity_make_one_atom(db_path, monkeypatch):
     assert len(rows) == 1
     first.close()
     second.close()
+
+
+def test_two_writers_recording_one_claim_keep_both_episodes(mem, db_path, monkeypatch):
+    """The episodes behind a claim were read and rewritten as two statements,
+    so of two processes recording the same fact, the later write dropped the
+    earlier one's episode, and forgetting the episodes left then deleted a
+    claim the dropped one still stated."""
+    alice = mem.remember("Alice", type="concept")
+    berlin = mem.remember("Berlin", type="concept")
+    edge = mem.atomspace.link_atoms(alice, berlin, "lives_in", T, S, metadata={"episodes": ["e1"]})
+    other = Database(db_path)
+    other.initialize()
+    rival = threading.Thread(
+        target=lambda: _record_assertion(
+            types.SimpleNamespace(db=other, tenant_id=T, write_space=S), edge, "e3"
+        )
+    )
+    started = threading.Event()
+
+    def interleaved(text):
+        if not started.is_set():
+            started.set()
+            rival.start()
+            rival.join(timeout=1.0)
+        return json.loads(text)
+
+    monkeypatch.setattr(extract_module, "json", types.SimpleNamespace(loads=interleaved, dumps=json.dumps))
+    _record_assertion(mem, edge, "e2")
+    rival.join()
+
+    episodes = json.loads(_row(mem, edge)["metadata"])["episodes"]
+    assert sorted(episodes) == ["e1", "e2", "e3"]
+    other.close()

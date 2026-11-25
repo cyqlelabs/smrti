@@ -954,33 +954,40 @@ def _record_assertion(mem: "Smrti", edge_id: str, episode_id: str | None) -> Non
     ``link_atoms`` reuses an existing edge, so a fact stated twice is one edge
     with two supporting episodes; forgetting one of them must not take the
     fact the other still states.
+
+    The record is read and rewritten in one write transaction. Read and
+    written as two statements, two processes extracting the same fact each
+    appended their episode to the list as it stood before either wrote, the
+    second write dropped the first episode, and forgetting the ones left
+    deleted a claim the dropped episode still stated.
     """
     if not episode_id:
         return
-    row = mem.db.fetchone(
-        "SELECT metadata FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
-        (edge_id, mem.tenant_id, mem.write_space),
-    )
-    if row is None:
-        return
-    try:
-        meta = json.loads(row["metadata"] or "{}")
-    except ValueError:
-        meta = {}
-    episodes = meta.get(CLAIM_EPISODES) if isinstance(meta, dict) else None
-    # An edge with no record predates the record: older episodes stated it,
-    # and naming only this one would let forgetting it take their fact.
-    episodes = (
-        [e for e in episodes if isinstance(e, str)] if isinstance(episodes, list)
-        else [UNRECORDED_ASSERTION]
-    )
-    if episode_id in episodes:
-        return
-    mem.db.execute(
-        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{CLAIM_EPISODES}', json(?))
-            WHERE id = ? AND tenant_id = ? AND space = ?""",
-        (json.dumps([*episodes, episode_id]), edge_id, mem.tenant_id, mem.write_space),
-    )
+    with mem.db.transaction() as conn:
+        row = conn.execute(
+            "SELECT metadata FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+            (edge_id, mem.tenant_id, mem.write_space),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            meta = json.loads(row["metadata"] or "{}")
+        except ValueError:
+            meta = {}
+        episodes = meta.get(CLAIM_EPISODES) if isinstance(meta, dict) else None
+        # An edge with no record predates the record: older episodes stated it,
+        # and naming only this one would let forgetting it take their fact.
+        episodes = (
+            [e for e in episodes if isinstance(e, str)] if isinstance(episodes, list)
+            else [UNRECORDED_ASSERTION]
+        )
+        if episode_id in episodes:
+            return
+        conn.execute(
+            f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{CLAIM_EPISODES}', json(?))
+                WHERE id = ? AND tenant_id = ? AND space = ?""",
+            (json.dumps([*episodes, episode_id]), edge_id, mem.tenant_id, mem.write_space),
+        )
 
 
 def _is_superseded(mem: "Smrti", edge_id: str) -> bool:

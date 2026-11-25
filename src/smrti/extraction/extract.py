@@ -23,6 +23,7 @@ from smrti.core.provenance import (
 )
 from smrti.decisions import DecisionEngine
 from smrti.decisions.extraction import route_extraction, verify_supersession
+from smrti.personality.params import param_value
 
 from .prompts import AGENT_EXTRACTION_PROMPT, CLAIMS_ONLY_PROMPT, ENTITY_TYPES, EXTRACTION_PROMPT
 
@@ -457,9 +458,7 @@ def _agent_trust(mem: "Smrti") -> float:
         "SELECT agent_source_trust FROM personality WHERE tenant_id = ? AND space = ?",
         (mem.tenant_id, mem.write_space),
     )
-    if row is None or row["agent_source_trust"] is None:
-        return 0.5
-    return row["agent_source_trust"]
+    return param_value("agent_source_trust", row["agent_source_trust"] if row else None, 0.5)
 
 
 def _episode_text(mem: "Smrti", episode_id: str) -> str:

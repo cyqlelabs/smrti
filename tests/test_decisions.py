@@ -310,7 +310,9 @@ def test_laya_enforces_the_decision_deadline():
         return _reply(questions)
 
     provider = _laya(handler)
-    with pytest.raises(DecisionUnavailable, match="within 0.0s"):
+    # A timeout, not an outage: the engine files a spent slice of a rerank
+    # walk as budget and opens no cooldown for it.
+    with pytest.raises(DecisionTimeout, match="within 0.0s"):
         provider.ask("s", {"q": Noul("?")}, timeout=0.001)
     provider.close()
 

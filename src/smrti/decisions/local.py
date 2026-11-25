@@ -31,6 +31,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 from typing import Any, Mapping
 
 from .provider import (
+    DecisionTimeout,
     DecisionUnavailable,
     Decisions,
     Question,
@@ -200,7 +201,7 @@ class LocalProvider:
                     # nothing here worth salvaging — and the whole point of
                     # stopping is to not spend the next chunk's memory and
                     # cores on an answer that will never be read.
-                    raise DecisionUnavailable(
+                    raise DecisionTimeout(
                         f"the decision model answered {len(answers)} of {len(items)} "
                         "questions before the deadline"
                     )
@@ -272,7 +273,7 @@ class LocalProvider:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"decision timeout must be a number, got {timeout!r}") from exc
         if deadline <= 0:
-            raise DecisionUnavailable("decision deadline has already expired")
+            raise DecisionTimeout("decision deadline has already expired")
         return deadline
 
     def ask(
@@ -293,7 +294,7 @@ class LocalProvider:
             # Cancelling only helps while the work is still queued; one that
             # has started stops at its next question, on ``stop_at``.
             future.cancel()
-            raise DecisionUnavailable(f"no answer from the decision model within {deadline:.1f}s") from exc
+            raise DecisionTimeout(f"no answer from the decision model within {deadline:.1f}s") from exc
         return self._read(result, questions, started)
 
     async def ask_async(
@@ -315,7 +316,7 @@ class LocalProvider:
             # Cancelling only helps while the work is still queued; one that
             # has started stops at its next question, on ``stop_at``.
             future.cancel()
-            raise DecisionUnavailable(f"no answer from the decision model within {deadline:.1f}s") from exc
+            raise DecisionTimeout(f"no answer from the decision model within {deadline:.1f}s") from exc
         return self._read(result, questions, started)
 
     def close(self) -> None:

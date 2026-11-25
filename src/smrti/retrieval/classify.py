@@ -1,8 +1,8 @@
 """Severity classification for recall results."""
 from __future__ import annotations
 
-from smrti.core.models import Atom, AtomType, RecallResult
-from smrti.core.provenance import VALENCE_STATED
+from smrti.core.models import AtomType, RecallResult
+from smrti.core.provenance import is_critical_warning
 
 # The kinds of atom that hold a proposition whose probability can fall: a
 # belief, and a claim edge between two entities. A low probability on
@@ -11,18 +11,6 @@ from smrti.core.provenance import VALENCE_STATED
 # and reading one as "avoid this" turned an ordinary old episode into a
 # behavioural constraint.
 _PROPOSITIONS = frozenset({AtomType.BELIEF, AtomType.RELATION})
-
-
-def is_critical_warning(atom: Atom) -> bool:
-    """Whether the atom is a stated, severe warning — the one memory kind that
-    becomes a hard constraint at recall, and the one retrieval must never
-    damp on the way there."""
-    return (
-        atom.metadata.get(VALENCE_STATED) is True
-        and atom.type != AtomType.CONCEPT
-        and atom.valence.own < -0.5
-        and atom.valence.own_intensity > 0.5
-    )
 
 
 def classify_memory(r: RecallResult) -> str:

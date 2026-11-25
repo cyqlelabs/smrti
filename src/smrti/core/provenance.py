@@ -77,3 +77,70 @@ def claim_current_sql(table: str = "") -> str:
 # pair; everything that judges a memory reads these.
 ATOM_OWN_VALENCE = "COALESCE(intrinsic_valence, valence)"
 ATOM_OWN_INTENSITY = "COALESCE(intrinsic_intensity, intensity)"
+
+# Two tone lines, one meaning each, read by every judgement that turns on tone.
+#
+# A *stated* tone past the warning line, on anything that can hold a
+# proposition, is a critical warning: recall raises it to a constraint, and the
+# epoch keeps it as long as it keeps anything. Classification and retention
+# once used different lines, so a stated warning at -0.6 was handed to the
+# agent as a rule and then pruned.
+#
+# An *estimated* tone past the severe line is a failure reported in an ordinary
+# sentence — not a constraint, but kept from the pruner when the user wrote it.
+# An agent's own estimated tone earns no such floor: a model's apology scored
+# at -0.8 otherwise outlived every real memory and ranked first at a
+# confidence of nothing.
+WARNING_VALENCE = -0.5
+WARNING_INTENSITY = 0.5
+SEVERE_VALENCE = -0.7
+SEVERE_INTENSITY = 0.7
+
+
+def valence_stated_sql(table: str = "") -> str:
+    """Whether the caller stated the tone of the atom in *table*'s row."""
+    column = _metadata_column(table)
+    return (
+        f"COALESCE(CASE WHEN json_valid({column}) "
+        f"THEN json_extract({column}, '$.{VALENCE_STATED}') END, 0) = 1"
+    )
+
+
+CRITICAL_WARNING_SQL = (
+    f"({valence_stated_sql()} AND type != 'concept' "
+    f"AND {ATOM_OWN_VALENCE} < {WARNING_VALENCE} "
+    f"AND {ATOM_OWN_INTENSITY} > {WARNING_INTENSITY})"
+)
+
+# What the epoch's severe floor holds and what recall lets past the confidence
+# floor: whatever is a warning, or a severe failure the user reported.
+SEVERE_RETAINED_SQL = (
+    f"({CRITICAL_WARNING_SQL} OR ({ATOM_SOURCE} != '{SOURCE_AGENT}' "
+    f"AND {ATOM_OWN_VALENCE} < {SEVERE_VALENCE} "
+    f"AND {ATOM_OWN_INTENSITY} > {SEVERE_INTENSITY}))"
+)
+
+
+def _type_name(atom) -> str:
+    return getattr(atom.type, "value", atom.type)
+
+
+def is_critical_warning(atom) -> bool:
+    """:data:`CRITICAL_WARNING_SQL` for an atom already in memory."""
+    return (
+        atom.metadata.get(VALENCE_STATED) is True
+        and _type_name(atom) != "concept"
+        and atom.valence.own < WARNING_VALENCE
+        and atom.valence.own_intensity > WARNING_INTENSITY
+    )
+
+
+def is_severe_retained(atom) -> bool:
+    """:data:`SEVERE_RETAINED_SQL` for an atom already in memory."""
+    if is_critical_warning(atom):
+        return True
+    return (
+        atom.metadata.get("source", SOURCE_USER) != SOURCE_AGENT
+        and atom.valence.own < SEVERE_VALENCE
+        and atom.valence.own_intensity > SEVERE_INTENSITY
+    )

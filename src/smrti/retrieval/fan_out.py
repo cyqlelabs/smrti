@@ -7,11 +7,8 @@ from typing import Callable
 from smrti.core.models import AtomType, RecallResult, atom_from_row
 from smrti.core.atomspace import embedding_text
 from smrti.core.db import stable_rowid
-from smrti.core.provenance import (
-    ATOM_FORGOTTEN,
-    ATOM_OWN_INTENSITY,
-    ATOM_OWN_VALENCE,
-)
+from smrti.core.provenance import ATOM_FORGOTTEN, SEVERE_RETAINED_SQL
+from smrti.personality.params import personality_params
 from smrti.retrieval.classify import is_critical_warning
 from smrti.retrieval.diversify import diversify
 from smrti.retrieval.salience import compute_salience
@@ -55,12 +52,10 @@ _ECHO_MIN_SIMILARITY = 0.5
 # bounded pool spends a slot a live memory needed, and enough of them —
 # a space where the user forgot a whole topic — left recall empty while
 # the answer sat just past the cutoff. The confidence floor is bypassed for
-# an atom whose own tone is severely negative: a decayed warning is still a
-# warning. A forgotten atom never passes, whatever its tone.
-_ELIGIBLE = (
-    f"NOT {ATOM_FORGOTTEN} AND (confidence >= ? "
-    f"OR ({ATOM_OWN_VALENCE} < -0.5 AND {ATOM_OWN_INTENSITY} > 0.5))"
-)
+# what the epoch's severe floor keeps — a stated warning, or a severe failure
+# the user reported: a decayed warning is still a warning. A forgotten atom
+# never passes, whatever its tone.
+_ELIGIBLE = f"NOT {ATOM_FORGOTTEN} AND (confidence >= ? OR {SEVERE_RETAINED_SQL})"
 # How much wider each repeated KNN probe casts when the filtered pool came
 # up short, and how many ids one eligibility query carries.
 _REFILL_FACTOR = 4
@@ -415,7 +410,7 @@ def rank_candidates(
         "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
         (tenant_id, write_space),
     )
-    p = dict(personality) if personality else {}
+    p = personality_params(personality)
 
     def _pget(key: str, default: float) -> float:
         value = p.get(key)

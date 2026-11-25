@@ -14,7 +14,7 @@ from smrti.core.models import (
     TruthValue,
     atom_from_row,
 )
-from smrti.core.provenance import ATOM_METADATA_JSON
+from smrti.core.provenance import ATOM_METADATA_JSON, is_severe_retained
 
 # Stamped on an atom stored without a vector, so the epoch can find what
 # needs re-embedding without checking every atom against the index.
@@ -133,8 +133,8 @@ class AtomSpace:
             )
         ]
 
-        # Protect severe negative-valence atoms from epoch pruning
-        if atom.valence.valence < -0.7 and atom.valence.intensity > 0.7:
+        # Protect stated warnings and severe failures from epoch pruning
+        if is_severe_retained(atom):
             statements.append(
                 ("UPDATE atoms SET lti = MAX(lti, 0.5) WHERE id = ?", (atom.id,))
             )

@@ -12,15 +12,15 @@ from smrti.core.models import (
 from smrti.core.provenance import (
     ATOM_FORGOTTEN,
     ATOM_METADATA_JSON,
-    ATOM_OWN_INTENSITY,
-    ATOM_OWN_VALENCE,
     ATOM_SOURCE,
+    SEVERE_RETAINED_SQL,
 )
 from smrti.evolution.attention import propagate_sti
 from smrti.evolution.connections import discover_connections
 from smrti.evolution.healing import heal_orphaned_episodes
 from smrti.evolution.truth import update_truth
 from smrti.evolution.valence import propagate_valence
+from smrti.personality.params import personality_params
 
 # Atoms are pruned below an LTI of 0.05, so a floor above that line makes a
 # memory permanent. What the user stated keeps one; what the model volunteered
@@ -123,7 +123,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             contradictions_resolved=0,
         )
 
-    p = dict(personality)
+    p = personality_params(personality)
     lr = _param(p, "confidence_update_lr", 0.3)
 
     # 1. Process pending evidence — each atom's truth update and its evidence
@@ -241,8 +241,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
                sti        = sti        * (1.0 - ?),
                lti        = MAX(lti * (1.0 - ?),
                                 CASE WHEN {ATOM_FORGOTTEN} THEN 0.0
-                                     WHEN {ATOM_OWN_VALENCE} < -0.7
-                                          AND {ATOM_OWN_INTENSITY} > 0.7 THEN ?
+                                     WHEN {SEVERE_RETAINED_SQL} THEN ?
                                      WHEN lti >= ? THEN ?
                                      ELSE 0.0 END),
                confidence = MAX(CASE WHEN type = 'belief' AND probability >= ?

@@ -257,6 +257,8 @@ CREATE INDEX IF NOT EXISTS idx_aliases_atom ON aliases(atom_id);
 
 CREATE INDEX IF NOT EXISTS idx_atoms_label_norm ON atoms(tenant_id, u_lower(label));
 CREATE INDEX IF NOT EXISTS idx_aliases_alias_norm ON aliases(tenant_id, u_lower(alias));
+
+CREATE TABLE IF NOT EXISTS smrti_meta (key TEXT PRIMARY KEY, value TEXT);
 """
 
 _READ_POOL_SIZE = 4
@@ -785,6 +787,17 @@ class Database:
             except Exception:
                 self._write_conn.rollback()
                 raise
+
+    def meta_get(self, key: str) -> str | None:
+        """A value from ``smrti_meta``, the database's own key-value record of
+        which formats and one-time changes it has been through."""
+        row = self.fetchone("SELECT value FROM smrti_meta WHERE key = ?", (key,))
+        return row["value"] if row else None
+
+    def meta_set(self, key: str, value: str) -> None:
+        self.execute(
+            "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES (?, ?)", (key, value)
+        )
 
     @contextmanager
     def _read_conn(self):

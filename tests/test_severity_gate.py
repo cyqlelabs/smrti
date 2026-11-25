@@ -96,3 +96,35 @@ def test_ambient_conversation_cannot_mint_a_constraint(mem):
             if h.atom.id == result["atom_id"]]
     assert hits, "the episode should still be recallable"
     assert classify_memory(hits[0]) == "context"
+
+
+def test_a_stated_warning_keeps_its_floor_whoever_wrote_it(mem):
+    """Classification and retention once drew different lines, so a stated
+    warning at -0.6 was handed to the agent as a rule and then pruned."""
+    atom_id = mem.remember(
+        "Running the migration twice corrupted the ledger",
+        valence=-0.6,
+        metadata={"source": "agent"},
+    )
+    for _ in range(100):
+        mem.reflect()
+    row = mem.db.fetchone("SELECT lti FROM atoms WHERE id = ?", (atom_id,))
+    assert row is not None and row["lti"] >= 0.5
+
+
+def test_an_agents_estimated_distress_earns_no_floor(mem):
+    """A model's apology read as severe once outlived every real memory and
+    ranked first at a confidence of nothing."""
+    atom = Atom(
+        type=AtomType.EPISODE,
+        label="apology",
+        content="I am so sorry, I failed you again",
+        valence=Valence(valence=-0.9, intensity=0.9),
+        metadata={"source": "agent"},
+        tenant_id=mem.tenant_id,
+        space=mem.write_space,
+    )
+    mem.atomspace.add_atom(atom)
+    for _ in range(100):
+        mem.reflect()
+    assert mem.db.fetchone("SELECT id FROM atoms WHERE id = ?", (atom.id,)) is None

@@ -42,7 +42,7 @@ from smrti.extraction.resolve import EntityResolver
 from smrti.retrieval.fan_out import boost_attention, rank_candidates, retrieve
 from smrti.evolution.epoch import run_epoch
 from smrti.evolution.reinforcement import DEFAULT_WEIGHT as _REINFORCE_WEIGHT, reinforce_atoms
-from smrti.personality.params import PersonalityProfile, load_preset
+from smrti.personality.params import PersonalityProfile, load_preset, param_value
 from smrti.spaces.set_ops import (
     space_overlap as _space_overlap,
     space_intersection as _space_intersection,
@@ -331,7 +331,7 @@ class Smrti:
             "SELECT min_confidence_to_surface AS f FROM personality WHERE tenant_id = ? AND space = ?",
             (self.tenant_id, self.write_space),
         )
-        return 0.1 if row is None or row["f"] is None else float(row["f"])
+        return param_value("min_confidence_to_surface", row["f"] if row else None, 0.1)
 
     def recall(
         self,
@@ -384,7 +384,7 @@ class Smrti:
             "SELECT sti_boost_on_access AS b FROM personality WHERE tenant_id = ? AND space = ?",
             (self.tenant_id, self.write_space),
         )
-        sti_boost = 0.5 if row is None or row["b"] is None else float(row["b"])
+        sti_boost = param_value("sti_boost_on_access", row["b"] if row else None, 0.5)
         return boost_attention(self.db, list(atom_ids), self.tenant_id, self.write_space, sti_boost)
 
     def believe(

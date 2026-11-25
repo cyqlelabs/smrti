@@ -785,10 +785,12 @@ def _supersede(
     one as the loser, so the epoch cuts it to ``SUPERSEDED_PROBABILITY``
     rather than adjudicating by confidence (the older claim is usually the
     more confident, having been mentioned more); negative evidence against
-    it, so the log records why; and, on the edge, a ``superseded_by`` mark
-    that drops it from the entity context and from the proxy's rendering of
-    the entity. A superseded belief then reads as a known antipattern at
-    recall: the thing the user used to prefer.
+    it, so the log records why; and a ``superseded_by`` mark naming the new
+    edge, which on the edge drops it from the entity context and from the
+    proxy's rendering of the entity. A superseded belief then reads as a
+    known antipattern at recall, from the mark rather than from a confidence
+    that decays away: the thing the user used to prefer. Only edges are ever
+    filtered on the mark, so on a belief it hides nothing.
     """
     old_obj_id = _db_resolve_label(old_label, entity_ids, mem)
     if not old_obj_id or old_obj_id == new_obj_id:
@@ -824,12 +826,6 @@ def _supersede(
     ):
         return
 
-    mem.db.execute(
-        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}', ?)
-            WHERE id = ? AND tenant_id = ? AND space = ?""",
-        (new_edge_id, old_edge_id, mem.tenant_id, mem.write_space),
-    )
-
     new_obj = mem.db.fetchone("SELECT label FROM atoms WHERE id = ?", (new_obj_id,))
     note = f"superseded: {predicate} {old_label} -> {new_obj['label'] if new_obj else new_obj_id}"
     trust = _agent_trust(mem) if source == SOURCE_AGENT else 1.0
@@ -846,6 +842,11 @@ def _supersede(
     ):
         pairs.append((new_obj_id, old_obj_id))
     for winner, loser in pairs:
+        mem.db.execute(
+            f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{SUPERSEDED_BY}', ?)
+                WHERE id = ? AND tenant_id = ? AND space = ?""",
+            (new_edge_id, loser, mem.tenant_id, mem.write_space),
+        )
         mem.atomspace.link_atoms(
             winner, loser, "contradicts", mem.tenant_id, mem.write_space,
             metadata={"loser": loser},

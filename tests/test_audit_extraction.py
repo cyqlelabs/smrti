@@ -234,6 +234,35 @@ def test_an_agent_restating_a_replaced_claim_does_not_revive_it(mem):
     assert "superseded_by" in json.loads(_edge(mem, ids, "Berlin")["metadata"])
 
 
+def _stamp(mem, atom_id):
+    row = mem.db.fetchone("SELECT metadata FROM atoms WHERE id = ?", (atom_id,))
+    return json.loads(row["metadata"] or "{}").get("superseded_by")
+
+
+def test_a_cut_belief_is_stamped_superseded_only_when_no_one_still_holds_it(mem):
+    """Recall classifies a superseded belief from the stamp; the belief was
+    cut without one, so its antipattern status decayed away with confidence."""
+    prefers = lambda who, what, **extra: {"subject": who, "predicate": "prefers", "object": what, **extra}
+    ids = {"Alice": _concept(mem, "Alice", "person"), "Bob": _concept(mem, "Bob", "person"),
+           "tea": _concept(mem, "tea", "preference"), "coffee": _concept(mem, "coffee", "preference")}
+
+    extract._link_claims([prefers("Alice", "tea"), prefers("Bob", "tea")], ids, mem)
+    extract._link_claims([prefers("Alice", "coffee", supersedes="tea")], ids, mem)
+    assert _stamp(mem, ids["tea"]) is None
+
+    bob_edge = mem.db.fetchone("SELECT id FROM atoms WHERE relation = 'prefers' AND source_id = ?", (ids["Bob"],))
+    mem.atomspace.delete_atoms([bob_edge["id"]], "t")
+    extract._link_claims([prefers("Alice", "tea", supersedes="coffee")], ids, mem)
+    extract._link_claims([prefers("Alice", "coffee", supersedes="tea")], ids, mem)
+    coffee_edge = mem.db.fetchone(
+        "SELECT id FROM atoms WHERE relation = 'prefers' AND target_id = ?", (ids["coffee"],),
+    )["id"]
+    assert _stamp(mem, ids["tea"]) == coffee_edge
+
+    extract._link_claims([prefers("Alice", "tea", supersedes="coffee")], ids, mem)
+    assert _stamp(mem, ids["tea"]) is None
+
+
 def test_a_claim_under_another_predicate_is_never_superseded(mem):
     """"works_in Paris, supersedes Madrid" cut "born_in Madrid"."""
     ids = _places(mem, "Madrid", "Paris")

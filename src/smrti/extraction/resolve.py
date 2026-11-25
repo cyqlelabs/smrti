@@ -330,7 +330,7 @@ class EntityResolver:
         provider was given candidates, and only one of them, still present
         and not forgotten, can come back.
         """
-        if self.decisions is None or not self.decisions.enabled("entity"):
+        if not self._verifying():
             return None
         candidates = self._candidate_facts(candidate_ids, tenant_id, read_spaces)
         if not candidates:

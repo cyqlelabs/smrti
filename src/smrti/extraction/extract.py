@@ -663,6 +663,20 @@ def _lower_tone(mem: "Smrti", atom_id: str, valence: float) -> None:
     mem.db.execute(_LOWER_TONE_SQL, (valence, intensity, valence, intensity, atom_id))
 
 
+def _claim_predicate(claim: dict) -> str | None:
+    """The fact a claim states, or None when it states none.
+
+    A blank predicate states none, and the structural relations are the
+    engine's own bookkeeping: a "contradicts" edge drawn from the model's
+    output is one the epoch acts on, weakening whichever endpoint is less
+    confident.
+    """
+    predicate = claim.get("predicate", "related_to").strip()
+    if not predicate or predicate.lower() in _STRUCTURAL_RELATIONS:
+        return None
+    return predicate
+
+
 def _link_claims(
     claims: list[dict],
     entity_ids: dict[str, str],
@@ -686,13 +700,9 @@ def _link_claims(
     min_valence = 0.0
     for claim in claims:
         try:
-            predicate = claim.get("predicate", "related_to").strip()
-            # A claim states a fact. A blank predicate states none, and the
-            # structural relations are the engine's own bookkeeping: a
-            # "contradicts" edge drawn from the model's output is one the
-            # epoch acts on, weakening whichever endpoint is less confident.
-            if not predicate or predicate.lower() in _STRUCTURAL_RELATIONS:
-                logger.warning("skipping claim with predicate %r", predicate)
+            predicate = _claim_predicate(claim)
+            if predicate is None:
+                logger.warning("skipping claim with predicate %r", claim.get("predicate"))
                 continue
             subj_raw = claim.get("subject", "")
             obj_raw = claim.get("object", "")

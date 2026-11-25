@@ -10,7 +10,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import FileResponse, StreamingResponse
 
 from smrti import Smrti, __version__
-from smrti.core.db import Database, _registry, _registry_lock, _resolve_path
+from smrti.core.db import Database, _registry, _registry_lock, _resolve_path, get_database
 from smrti.servers import config as cfg
 from smrti.servers.common import tenant_for, visible
 
@@ -19,18 +19,19 @@ _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 # Type alias: callable that returns (or lazily creates) a Smrti instance.
 GetMemFn = Callable[[str, str], Smrti]
 
-# Cache of Smrti instances keyed by resolved absolute DB path.
-_db_cache: dict[str, Smrti] = {}
+# Cache of read handles keyed by resolved absolute DB path.
+_db_cache: dict[str, "_Reader"] = {}
 _DB_CACHE_MAX = 20
 
 
 class _Reader:
     """The reads the visualizer routes make over one database, and nothing else.
 
-    Status and the space list are taken per tenant and space rather than from
-    the configured instance, so a key bound to another tenant sees its own
-    figures, and no instance has to be minted — which writes a personality
-    row — to read one.
+    Reads used to go through a Smrti instance, and constructing one writes its
+    space's personality row — with SMRTI_PERSONALITY set it overwrote the
+    preset the live server runs, so browsing a graph changed how it decays.
+    Status and the space list are taken per tenant and space here instead, so
+    a key bound to another tenant sees its own figures and nothing is written.
     """
 
     def __init__(self, db: Database) -> None:
@@ -64,8 +65,8 @@ class _Reader:
         }
 
 
-def _db_mem(db_path: str) -> Smrti:
-    """Return a cached Smrti instance for *db_path* — registry or allowlist only.
+def _db_mem(db_path: str) -> _Reader:
+    """Return a cached read handle for *db_path* — registry or allowlist only.
 
     Accepts a path already present in the shared Database registry (the DB this
     server was started with) or one the operator named in SMRTI_VIZ_DBS. Any
@@ -101,12 +102,7 @@ def _db_mem(db_path: str) -> Smrti:
     if resolved not in _db_cache:
         if len(_db_cache) >= _DB_CACHE_MAX:
             _db_cache.pop(next(iter(_db_cache)))
-        _db_cache[resolved] = Smrti(
-            db_path=resolved,
-            personality="balanced",
-            tenant_id="default",
-            write_space="default",
-        )
+        _db_cache[resolved] = _Reader(get_database(resolved))
     return _db_cache[resolved]
 
 
@@ -131,7 +127,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         return get_mem(cfg.TENANT_ID, cfg.SPACE)
 
     def _reader(db: Optional[str]) -> _Reader:
-        return _Reader((_db_mem(db) if db else _configured_mem()).db)
+        return _db_mem(db) if db else _Reader(_configured_mem().db)
 
     @router.get("/viz", include_in_schema=False)
     async def visualizer():

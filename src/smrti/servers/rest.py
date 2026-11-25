@@ -333,12 +333,32 @@ async def forget(req: ForgetRequest, request: Request):
 
 @app.get("/personality")
 async def get_personality(request: Request, space: Optional[SpaceName] = Query(None)):
-    return await _run_sync(handle_tool, _mem_for(request, space), "smrti_personality", {"action": "get"})
+    """The personality row of a space, or {} for a space nobody has written.
+
+    Read straight from the database rather than through the space's
+    instance: minting one writes its personality row, so asking about three
+    unused spaces used to create three rows.
+    """
+    home = get_mem()
+    tenant = tenant_for(request, None, cfg.TENANT_ID)
+    row = await _run_sync(
+        home.db.fetchone,
+        "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
+        (tenant, space or home.write_space),
+    )
+    return dict(row) if row else {}
 
 
 @app.put("/personality")
 async def set_personality(req: PersonalityRequest, request: Request):
-    return await _run_sync(handle_tool, _mem_for(request, req.space), "smrti_personality", req.model_dump())
+    result = await _run_sync(
+        handle_tool, _mem_for(request, req.space), "smrti_personality", req.model_dump()
+    )
+    # A profile the engine refuses is the caller's mistake; answering 200 with
+    # the refusal inside the body let a client believe the change took.
+    if "error" in result:
+        raise HTTPException(status_code=422, detail=result["error"])
+    return result
 
 
 @app.post("/space_query")

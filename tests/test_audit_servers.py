@@ -214,3 +214,83 @@ def test_upstream_credentials_are_redacted_from_errors_and_the_call_log(proxied,
     assert response.status_code == 502
     assert "secret" not in response.text
     assert "secret" not in logged["upstream"] and "secret" not in logged["error"]
+
+
+# ── T3 / T4: personality writes are validated, reads write nothing ───────────
+
+def test_a_refused_personality_change_is_a_422_and_recall_keeps_working(keyed):
+    """PUT /personality answered 200 with the refusal in the body, or 500 on an unknown preset."""
+    bad = keyed.put("/personality", json={"action": "set", "params": {"w_sti": "abc"}}, headers=ADMIN)
+    assert bad.status_code == 422
+    assert "w_sti" in bad.json()["detail"]
+    unknown = keyed.put("/personality", json={"action": "preset", "preset": "nonsense"}, headers=ADMIN)
+    assert unknown.status_code == 422
+    assert keyed.post("/recall", json={"query": "launch codes"}, headers=ADMIN).status_code == 200
+
+
+def test_a_refused_mcp_personality_change_is_a_tool_error(tmp_path):
+    """The MCP tool returned the refusal as an ordinary result; it is now raised, which the SDK marks isError."""
+    import contextlib
+
+    from smrti.servers import mcp as mcp_mod
+
+    handlers, outcome = {}, {}
+
+    class _Server:
+        def __init__(self, name):
+            pass
+
+        def list_tools(self):
+            return lambda fn: fn
+
+        def call_tool(self):
+            return lambda fn: handlers.setdefault("call_tool", fn)
+
+        def create_initialization_options(self):
+            return {}
+
+        async def run(self, *_args):
+            try:
+                await handlers["call_tool"]("smrti_personality", {"action": "set", "params": {"w_sti": "abc"}})
+            except ValueError as exc:
+                outcome["error"] = str(exc)
+
+    @contextlib.asynccontextmanager
+    async def _stdio():
+        yield (None, None)
+
+    mem = Smrti(db_path=str(tmp_path / "mcp.db"))
+    with patch("smrti.servers.mcp.Server", _Server), \
+            patch("smrti.servers.mcp.create_smrti", return_value=mem), \
+            patch("smrti.servers.mcp.stdio_server", _stdio), \
+            patch("smrti.servers.mcp.run_reflect_loop", new=_noop_reflect):
+        mcp_mod.run_mcp_server()
+    assert "w_sti" in outcome["error"]
+
+
+def test_visualizer_and_personality_reads_write_no_personality_rows(keyed, monkeypatch):
+    """GET /status?db=<own db> rewrote the live preset, and GET /personality?space=x minted rows."""
+    from smrti.servers import config as cfg
+    from smrti.servers import rest as rest_mod
+
+    monkeypatch.setattr(cfg, "PERSONALITY", "deterministic")
+    monkeypatch.setenv("SMRTI_PERSONALITY", "deterministic")
+    _reset(rest_mod)
+    db = rest_mod.get_mem().db
+
+    def preset():
+        return db.fetchone(
+            "SELECT preset_name FROM personality WHERE tenant_id = 'default' AND space = 'default'"
+        )["preset_name"]
+
+    def rows():
+        return db.fetchone("SELECT COUNT(*) AS n FROM personality")["n"]
+
+    assert preset() == "deterministic"
+    before = rows()
+    keyed.get("/status", params={"db": keyed.db}, headers=ADMIN)
+    keyed.get("/metrics", params={"db": keyed.db}, headers=ADMIN)
+    for i in range(3):
+        assert keyed.get("/personality", params={"space": f"ghost{i}"}, headers=ADMIN).json() == {}
+    assert preset() == "deterministic"
+    assert rows() == before

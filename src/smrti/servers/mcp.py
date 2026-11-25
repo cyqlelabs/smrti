@@ -191,7 +191,10 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 return {"status": "ok", "preset": preset or "custom"}
             if not preset:
                 return {"error": "action requires a 'preset' or 'params' argument"}
-            mem.set_personality(preset)
+            try:
+                mem.set_personality(preset)
+            except ValueError as exc:  # an unknown preset name
+                return {"error": str(exc)}
             return {"status": "ok", "preset": preset}
         return {"error": f"Unknown action: {action}"}
 
@@ -333,6 +336,11 @@ def run_mcp_server() -> None:
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, handle_tool, mem, name, arguments)
+        if "error" in result:
+            # The SDK reports a raised error as a tool error (isError), which
+            # is how a client tells a refused call from a result: returned as
+            # a plain dict, a refused personality change read as a success.
+            raise ValueError(result["error"])
         if name == "smrti_remember" and cfg.EXTRACT:
             episode_id = result.get("atom_id", "")
             content = arguments.get("content", "")

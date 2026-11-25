@@ -32,8 +32,9 @@ def _mock_ner(pronoun_names=None):
 # consulted, so a name like "Mia" typed person stays a person.
 
 
-def test_batch_merge_single_person_absorbs_pronoun():
-    """1 named person + 1 pronoun → pronoun merged into named person."""
+def test_batch_merge_single_person_drops_the_pronoun():
+    """1 named person + 1 pronoun → the pronoun is dropped, not folded into the
+    person: "I" may be the speaker talking about someone else."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
     entities = [
@@ -47,10 +48,8 @@ def test_batch_merge_single_person_absorbs_pronoun():
     assert "Elara" in names
     assert "I" not in names
     assert "systems strategist" in names
-    # Pronoun aliases merged into Elara
     elara = next(e for e in result if e["name"] == "Elara")
-    assert "I" in elara["aliases"]
-    assert "my" in elara["aliases"]
+    assert elara["aliases"] == []
 
 
 def test_batch_merge_multi_person_drops_the_pronoun():
@@ -129,7 +128,8 @@ def test_batch_merge_dual_typed_pronoun():
 
 
 def test_batch_merge_dual_typed_with_named_person():
-    """'I' typed both person and pronoun alongside a real name merges into the name."""
+    """'I' typed both person and pronoun alongside a real name is a pronoun, and
+    is dropped rather than folded into the name."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
     entities = [
@@ -145,7 +145,7 @@ def test_batch_merge_dual_typed_with_named_person():
     assert "I" not in names
     assert "Python" in names
     elias = next(e for e in result if e["name"] == "Elias")
-    assert "I" in elias["aliases"]
+    assert "I" not in elias["aliases"]
 
 
 def test_a_lone_pronoun_is_dropped_even_when_an_old_alias_names_someone(mem):
@@ -191,8 +191,8 @@ def test_pronoun_gate_skips_creation(mem):
         entity_ids = _resolve_ner_entities(entities, episode_id, mem)
 
     assert "Elara" in entity_ids
-    # "I" is absorbed as alias of Elara (batch merge), so it maps to same atom
-    assert entity_ids.get("I") == entity_ids["Elara"]
+    # "I" is never folded into the person the text names: it may be the speaker.
+    assert "I" not in entity_ids
 
     # No separate atom with label "I" should exist
     row = mem.db.fetchone(

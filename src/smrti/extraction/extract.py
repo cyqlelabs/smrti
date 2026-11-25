@@ -595,9 +595,9 @@ def _resolve_ner_entities(
     """Resolve a list of {"name", "type"} dicts via the entity cascade.
 
     Returns a mapping of name → atom_id. Also creates mentions edges.
-    Pronoun entities are folded into the one person the text names, or
-    dropped (see ``merge_pronoun_entities_in_batch``). ``context`` is the
-    text the mentions came from; read from the episode when not given.
+    Pronoun entities are dropped (see ``merge_pronoun_entities_in_batch``).
+    ``context`` is the text the mentions came from; read from the episode
+    when not given.
     """
     from .pronouns import merge_pronoun_entities_in_batch
 
@@ -617,9 +617,9 @@ def _resolve_ner_entities(
             etype = "concept"
         atom_id = resolver.resolve(name, etype, mem.tenant_id, mem.write_space, [mem.write_space])
         _register_entity(entity_ids, name, atom_id)
-        # The other names this text uses for the entity, the pronouns folded
-        # into it and the model's aliases, resolve the claims read from the
-        # same text and are never stored. A stored alias is an identity for
+        # The other names this text uses for the entity, the model's
+        # aliases, resolve the claims read from the same text and are never
+        # stored. A stored alias is an identity for
         # the whole space, and which of them is a pronoun or a description
         # only this speaker can use ("my boss") cannot be told without a
         # word list: "she", once stored as Bob's, made Bob of every "she".
@@ -724,16 +724,19 @@ def _link_claims(
                 # A claim edge read from an agent turn carries the agent's
                 # provenance, as the atoms it joins do: it is what lets the
                 # supersession writer tell a user's statement from a
-                # model's guess about the same subject.
-                new_edge = mem.atomspace.link_atoms(
-                    subj_id, obj_id, predicate,
-                    mem.tenant_id, mem.write_space,
-                    valence=claim_valence,
-                    metadata={
-                        **({"source": SOURCE_AGENT} if source == SOURCE_AGENT else {}),
-                        **({CLAIM_EPISODES: [episode_id]} if episode_id else {}),
-                    },
-                )
+                # model's guess about the same subject. Looked up and drawn
+                # in one write transaction, so two processes stating the same
+                # fact at once share one edge.
+                with mem.db.transaction() as conn:
+                    new_edge = mem.atomspace.link_atoms_in(
+                        conn, subj_id, obj_id, predicate,
+                        mem.tenant_id, mem.write_space,
+                        valence=claim_valence,
+                        metadata={
+                            **({"source": SOURCE_AGENT} if source == SOURCE_AGENT else {}),
+                            **({CLAIM_EPISODES: [episode_id]} if episode_id else {}),
+                        },
+                    )
                 _record_assertion(mem, new_edge, episode_id)
                 if _is_superseded(mem, new_edge):
                     _revive(mem, new_edge, obj_id, episode_id, source)
@@ -954,33 +957,40 @@ def _record_assertion(mem: "Smrti", edge_id: str, episode_id: str | None) -> Non
     ``link_atoms`` reuses an existing edge, so a fact stated twice is one edge
     with two supporting episodes; forgetting one of them must not take the
     fact the other still states.
+
+    The record is read and rewritten in one write transaction. Read and
+    written as two statements, two processes extracting the same fact each
+    appended their episode to the list as it stood before either wrote, the
+    second write dropped the first episode, and forgetting the ones left
+    deleted a claim the dropped episode still stated.
     """
     if not episode_id:
         return
-    row = mem.db.fetchone(
-        "SELECT metadata FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
-        (edge_id, mem.tenant_id, mem.write_space),
-    )
-    if row is None:
-        return
-    try:
-        meta = json.loads(row["metadata"] or "{}")
-    except ValueError:
-        meta = {}
-    episodes = meta.get(CLAIM_EPISODES) if isinstance(meta, dict) else None
-    # An edge with no record predates the record: older episodes stated it,
-    # and naming only this one would let forgetting it take their fact.
-    episodes = (
-        [e for e in episodes if isinstance(e, str)] if isinstance(episodes, list)
-        else [UNRECORDED_ASSERTION]
-    )
-    if episode_id in episodes:
-        return
-    mem.db.execute(
-        f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{CLAIM_EPISODES}', json(?))
-            WHERE id = ? AND tenant_id = ? AND space = ?""",
-        (json.dumps([*episodes, episode_id]), edge_id, mem.tenant_id, mem.write_space),
-    )
+    with mem.db.transaction() as conn:
+        row = conn.execute(
+            "SELECT metadata FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
+            (edge_id, mem.tenant_id, mem.write_space),
+        ).fetchone()
+        if row is None:
+            return
+        try:
+            meta = json.loads(row["metadata"] or "{}")
+        except ValueError:
+            meta = {}
+        episodes = meta.get(CLAIM_EPISODES) if isinstance(meta, dict) else None
+        # An edge with no record predates the record: older episodes stated it,
+        # and naming only this one would let forgetting it take their fact.
+        episodes = (
+            [e for e in episodes if isinstance(e, str)] if isinstance(episodes, list)
+            else [UNRECORDED_ASSERTION]
+        )
+        if episode_id in episodes:
+            return
+        conn.execute(
+            f"""UPDATE atoms SET metadata = json_set({ATOM_METADATA_JSON}, '$.{CLAIM_EPISODES}', json(?))
+                WHERE id = ? AND tenant_id = ? AND space = ?""",
+            (json.dumps([*episodes, episode_id]), edge_id, mem.tenant_id, mem.write_space),
+        )
 
 
 def _is_superseded(mem: "Smrti", edge_id: str) -> bool:
@@ -1322,8 +1332,8 @@ async def extract_and_link_hybrid(
     if mode == "local":
         return
 
-    # Speaker injection: for user messages, if no person atom resolved (pronoun dropped
-    # because "I" alias wasn't in the alias table), inject the sole known person
+    # Speaker injection: for user messages, if no person atom resolved (a
+    # pronoun is never resolved to one), inject the sole known person
     # so claims — especially goals, preferences, and actions — can be attributed to them.
     # Attribution only happens when exactly one person atom exists in the write
     # space; with several candidates the speaker is ambiguous and we skip it.

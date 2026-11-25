@@ -114,6 +114,20 @@ def test_a_restatement_too_short_to_compare_is_still_an_echo(mem):
     assert short_answer in hits
 
 
+
+def test_a_short_query_asks_the_encoder_only_about_restatements(table_mem):
+    """With fewer than three words a query is too short to compare against
+    any candidate, and every one of them was re-embedded for the echo
+    verdict: 160 encoder calls a recall at twenty thousand atoms."""
+    for n in range(30):
+        _add(table_mem, f"redis benchmark note {n} with numbers and a longer story", 0.6 + n / 1000)
+    table_mem.embed.table["Redis benchmark"] = QUERY
+    calls = []
+    embed = table_mem.embed.embed
+    table_mem.embed.embed = lambda text: (calls.append(text), embed(text))[1]
+    assert len(table_mem.recall("Redis benchmark", top_k=10, boost=False)) == 10
+    assert calls == ["Redis benchmark"]
+
 # ── text: words keep their marks, lexical terms fold as the index does ───────
 
 def test_combining_marks_stay_inside_the_word_they_modify():
@@ -231,3 +245,57 @@ def test_a_locked_database_does_not_fail_a_finished_recall(table_mem, monkeypatc
     monkeypatch.setattr(table_mem.db, "execute", locked)
     assert [r.atom.id for r in table_mem.recall("q")] == [atom_id]
     assert table_mem.attend([atom_id]) == 0
+
+
+# ── T22: recall overhead ──────────────────────────────────────────────────────
+
+def test_a_recall_costs_the_same_statements_however_many_candidates_it_scores(table_mem, monkeypatch):
+    """Each recall counted the whole partition, and fetched the vector of
+    every candidate the graph reached with a statement of its own."""
+    hub = _add(table_mem, "project atlas hub", 0.9)
+    for n in range(60):
+        neighbour = _add(table_mem, f"atlas detail {n}", 0.2 + n / 1000)
+        table_mem.atomspace.link_atoms(hub, neighbour, "related", "t", "s")
+    for n in range(60):
+        _add(table_mem, f"filler note {n}", 0.5 - n / 1000)
+    table_mem.embed.table["atlas?"] = QUERY
+    table_mem.recall("atlas?", top_k=60, boost=False)
+
+    statements: list[str] = []
+    for name in ("fetchall", "fetchone"):
+        original = getattr(table_mem.db, name)
+
+        def counted(sql, params=(), _original=original):
+            statements.append(" ".join(sql.split()))
+            return _original(sql, params)
+
+        monkeypatch.setattr(table_mem.db, name, counted)
+    results = table_mem.recall("atlas?", top_k=60, boost=False)
+
+    assert len(results) == 60
+    assert not [s for s in statements if "COUNT(*)" in s or "WHERE rowid = ?" in s]
+    assert len(statements) <= 10
+
+
+def test_the_knn_refill_never_asks_for_more_than_sqlite_vec_returns():
+    """A space whose nearest neighbours were all sunk widened its probe by 4x
+    up to the space size, and sqlite-vec refuses any k over 4096."""
+    from smrti.retrieval.fan_out import _knn_entry_points
+
+    class AllSunk:
+        fts_enabled = False
+
+        def __init__(self):
+            self.asked: list[int] = []
+
+        def fetchall(self, sql, params=()):
+            if "vec_atoms" not in sql:
+                return []
+            self.asked.append(params[-1])
+            return [{"atom_id": f"a{n}", "distance": n / 10_000} for n in range(params[-1])]
+
+    db = AllSunk()
+    assert _knn_entry_points(b"", "t", "s", db, 50, 0.1) == []
+    assert max(db.asked) == 4096
+
+

@@ -139,9 +139,9 @@ def coverage(a: set[str], b: set[str]) -> float:
     covers the whole of a short query is not thereby a copy of it. "the
     deploy pipeline uses Jenkins" contains every word of "deploy pipeline
     Jenkins" and is the answer, not an echo; measured against the larger
-    side it shares three words of five, and is told apart. Returns 0 for a
-    pair too short to judge.
+    side it shares three words of five, and is told apart. Whether the pair
+    is long enough for the fraction to prove anything is the caller's
+    judgement — see :func:`comparable`.
     """
-    if not comparable(a, b):
-        return 0.0
-    return len(a & b) / max(len(a), len(b))
+    larger = max(len(a), len(b))
+    return len(a & b) / larger if larger else 0.0

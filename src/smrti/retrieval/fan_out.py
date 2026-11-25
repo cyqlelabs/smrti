@@ -4,7 +4,11 @@ from __future__ import annotations
 import logging
 import sqlite3
 import struct
+import time
+import weakref
 from typing import Callable
+
+import numpy as np
 
 from smrti.core.models import AtomType, RecallResult, atom_from_row
 from smrti.core.atomspace import embedding_text
@@ -49,12 +53,16 @@ _KNN_POOL_MAX = 256
 # echoes. Suspects are rare — no LongMemEval-S candidate is one — so the
 # encoder runs only where a verdict is due.
 #
-# A pair too short for overlap to prove anything ("deploy friday" against
-# "deploy on friday?") is decided by the encoder alone, which at this line
-# is near-identity; such pairs used to be exempt, and the two-word
-# restatement outranked the answer. A text whose words are exactly the
-# query's says nothing the query does not, whatever the encoder makes of
-# its punctuation ("Kubernetes!" scores 0.58 against "kubernetes").
+# A pair too short for the overlap bar to mean anything ("deploy friday"
+# against "deploy on friday?", where one dropped word is a third of the
+# text) needs only half its words in common before the encoder decides,
+# which at this line is near-identity; such pairs used to be exempt, and the
+# two-word restatement outranked the answer. The words still gate the
+# encoder there: a two-word query is short against every candidate, and
+# asking the encoder about each one cost 160 embeddings a recall. A text
+# whose words are exactly the query's says nothing the query does not,
+# whatever the encoder makes of its punctuation ("Kubernetes!" scores 0.58
+# against "kubernetes").
 #
 # Beliefs and concepts are exempt: searching for a fact by stating it must
 # return the fact first. So is a stated warning: "never deploy without a
@@ -64,6 +72,7 @@ _KNN_POOL_MAX = 256
 # discarding. The gate on the stored similarity just skips the work where
 # zeroing could not change the ranking anyway.
 _ECHO_OVERLAP = 0.8
+_ECHO_SHORT_OVERLAP = 0.5
 _ECHO_IDENTITY = 0.9
 _ECHO_MIN_SIMILARITY = 0.5
 
@@ -80,6 +89,16 @@ _ELIGIBLE = f"NOT {ATOM_FORGOTTEN} AND (confidence >= ? OR {SEVERE_RETAINED_SQL}
 # up short, and how many ids one eligibility query carries.
 _REFILL_FACTOR = 4
 _ID_CHUNK = 400
+# The most neighbours sqlite-vec returns from one probe; asking for more is
+# an error, not a shorter answer.
+_KNN_MAX_K = 4096
+
+# How long a counted space size stands in for a fresh count. The size only
+# sets the KNN pool, 4·√N clamped to 50–256, so a count a few writes old picks
+# the same pool, while counting on every recall scanned the whole partition:
+# 8–16 ms of a recall at twenty thousand atoms.
+_SPACE_SIZE_TTL_SECONDS = 30.0
+_counted_sizes: weakref.WeakKeyDictionary = weakref.WeakKeyDictionary()
 
 # 1-hop expansion budget per direction. Ordered by the standing of the atom
 # on the far end, so a hub with a hundred edges to trivia cannot evict the
@@ -116,9 +135,29 @@ _FTS_POOL = 10
 _DEFAULT_MIN_CONFIDENCE = 0.1
 
 
-def _blob_to_vec(blob) -> list[float]:
-    n = len(blob) // 4
-    return list(struct.unpack(f"{n}f", blob))
+def _stored_vectors(atom_ids: list[str], db) -> dict[str, np.ndarray]:
+    """The stored vectors of *atom_ids*; an atom stored without one is absent.
+
+    One statement per chunk, joined through a list of values so that vec0
+    still answers each id as a point lookup: it answers ``rowid IN (...)`` by
+    scanning every vector in the table, six times slower at twenty thousand
+    atoms than the one-statement-per-candidate fetch it would replace.
+    """
+    by_rowid = {stable_rowid(atom_id): atom_id for atom_id in atom_ids}
+    rowids = list(by_rowid)
+    vectors: dict[str, np.ndarray] = {}
+    for start in range(0, len(rowids), _ID_CHUNK):
+        chunk = rowids[start : start + _ID_CHUNK]
+        values = ",".join("(?)" for _ in chunk)
+        for row in db.fetchall(
+            f"""WITH wanted(rowid) AS (VALUES {values})
+                SELECT v.rowid AS rowid, v.embedding AS embedding
+                FROM wanted CROSS JOIN vec_atoms v ON v.rowid = wanted.rowid""",
+            tuple(chunk),
+        ):
+            if row["embedding"] is not None:
+                vectors[by_rowid[row["rowid"]]] = np.frombuffer(row["embedding"], dtype=np.float32)
+    return vectors
 
 
 def _term_list(text: str) -> list[str]:
@@ -168,68 +207,40 @@ def _is_echo(query_vec: list[float], query_tokens: set[str], text: str, embed_en
     Word overlap against the larger side: an echo may add a word ("please")
     or drop one and still cover most of both texts, while an answer that
     merely contains the query's words is much longer than the query and does
-    not. A text that passes, or is too short for overlap to judge, must
-    also be near-identical to the query on the encoder — see
-    ``_ECHO_IDENTITY``.
+    not. A text that passes must also be near-identical to the query on the
+    encoder — see ``_ECHO_IDENTITY``.
     """
     words = word_set(text)
-    if comparable(query_tokens, words) and coverage(query_tokens, words) < _ECHO_OVERLAP:
-        return False
     if words == query_tokens:
         return True
+    bar = _ECHO_OVERLAP if comparable(query_tokens, words) else _ECHO_SHORT_OVERLAP
+    if coverage(query_tokens, words) < bar:
+        return False
     return _cosine(query_vec, embed_engine.embed(text)) >= _ECHO_IDENTITY
 
 
-def _cosine(a: list[float], b: list[float]) -> float:
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a < 1e-9 or norm_b < 1e-9:
+def _cosine(a, b) -> float:
+    """Cosine of two vectors; 0 when either has no length, as a zero vector
+    is about nothing."""
+    a = np.asarray(a, dtype=np.float32)
+    b = np.asarray(b, dtype=np.float32)
+    norms = float(np.linalg.norm(a)) * float(np.linalg.norm(b))
+    if norms < 1e-12:
         return 0.0
-    return dot / (norm_a * norm_b)
+    return float(a @ b) / norms
 
 
-def _similarity(
-    atom, query_vec: list[float], query_tokens: set[str], knn_distances: dict[str, float],
-    db, embed_engine, damp_echoes: bool = True,
-) -> float:
-    """How much the candidate is about the query.
-
-    From the probe's distance when the probe found it. A candidate that
-    entered through the graph instead is scored on its real stored embedding
-    — handing it similarity 0 lets a sticky concept with no bearing on the
-    query outrank the fact one edge away from a hit. One stored with no
-    vector at all (its encoder failed at write time, and the lexical index
-    is how it got here) is embedded now: at similarity 0 it has no salience
-    and is dropped, which made the fallback that kept the atom a fallback
-    that kept it unreachable. The epoch files the vector for good.
-
-    An episode that echoes the query scores nothing, unless it is a stated
-    warning — see ``_ECHO_OVERLAP`` — or the caller is looking for the memory
-    itself rather than an answer (``damp_echoes=False``, which is forget's
-    case: quoting a memory is the natural way to name the one to drop).
-    """
-    if atom.id in knn_distances:
-        similarity = max(0.0, 1.0 - knn_distances[atom.id])
-    else:
-        emb_row = db.fetchone(
-            "SELECT embedding FROM vec_atoms WHERE rowid = ?",
-            (stable_rowid(atom.id),),
-        )
-        if emb_row and emb_row["embedding"] is not None:
-            stored = _blob_to_vec(emb_row["embedding"])
-        else:
-            stored = embed_engine.embed(embedding_text(atom))
-        similarity = max(0.0, _cosine(query_vec, stored))
-    if (
-        damp_echoes
-        and atom.type == AtomType.EPISODE
+def _restates_query(
+    atom, similarity: float, query_vec: list[float], query_tokens: set[str], embed_engine
+) -> bool:
+    """Whether the candidate is an episode echoing the query, which scores
+    nothing — unless it is a stated warning; see ``_ECHO_OVERLAP``."""
+    return (
+        atom.type == AtomType.EPISODE
         and similarity >= _ECHO_MIN_SIMILARITY
         and not is_critical_warning(atom)
         and _is_echo(query_vec, query_tokens, atom.content or atom.label, embed_engine)
-    ):
-        return 0.0
-    return similarity
+    )
 
 
 def _lexical_entry_points(
@@ -277,7 +288,10 @@ def _eligible_ids(
         eligible.update(
             r["id"]
             for r in db.fetchall(
-                f"SELECT id FROM atoms WHERE id IN ({ph}) AND tenant_id = ? AND space = ? AND {_ELIGIBLE}",
+                # The unary plus keeps the planner on the primary key: offered
+                # the (tenant_id, space) index it scanned the whole partition,
+                # 13 ms at twenty thousand atoms against 0.4 ms by id.
+                f"SELECT id FROM atoms WHERE id IN ({ph}) AND +tenant_id = ? AND +space = ? AND {_ELIGIBLE}",
                 (*chunk, tenant_id, space, min_confidence),
             )
         )
@@ -285,8 +299,7 @@ def _eligible_ids(
 
 
 def _knn_entry_points(
-    vec_bytes: bytes, tenant_id: str, space: str, db, pool: int,
-    min_confidence: float, space_size: int,
+    vec_bytes: bytes, tenant_id: str, space: str, db, pool: int, min_confidence: float,
 ) -> list:
     """The nearest *pool* eligible atoms in one space, ascending distance.
 
@@ -294,8 +307,10 @@ def _knn_entry_points(
     space whose nearest neighbours are forgotten or sunk hands back a pool
     with nothing in it that can surface. The probe is repeated wider —
     ``_REFILL_FACTOR`` times — for as long as the filtered pool came up short
-    and the space had rows past the cutoff to offer, which on a healthy graph
-    is never and on a decayed one a handful of times.
+    and the probe came back full, which on a healthy graph is never and on a
+    decayed one a handful of times. A probe that returned fewer rows than it
+    asked for has seen the whole space; one that asked for ``_KNN_MAX_K``
+    has asked for all sqlite-vec will give.
     """
     limit = pool
     while True:
@@ -308,9 +323,34 @@ def _knn_entry_points(
         )
         eligible = _eligible_ids([r["atom_id"] for r in rows], tenant_id, space, db, min_confidence)
         kept = [r for r in rows if r["atom_id"] in eligible]
-        if len(kept) >= pool or len(rows) < limit or limit >= space_size:
+        if len(kept) >= pool or len(rows) < limit or limit >= _KNN_MAX_K:
             return kept[:pool]
-        limit = min(limit * _REFILL_FACTOR, space_size)
+        limit = min(limit * _REFILL_FACTOR, _KNN_MAX_K)
+
+
+def _graph_size(db, tenant_id: str, read_spaces: list[str]) -> int:
+    """How many candidate atoms the read spaces hold, counted at most once
+    per ``_SPACE_SIZE_TTL_SECONDS`` per space and database."""
+    now = time.monotonic()
+    counted = _counted_sizes.setdefault(db, {})
+    stale = [
+        space for space in read_spaces
+        if now - counted.get((tenant_id, space), (float("-inf"), 0))[0] > _SPACE_SIZE_TTL_SECONDS
+    ]
+    if stale:
+        ph = ",".join("?" * len(stale))
+        sizes = {
+            r["space"]: r["n"]
+            for r in db.fetchall(
+                f"""SELECT space, COUNT(*) AS n FROM atoms
+                    WHERE tenant_id = ? AND space IN ({ph}) AND type != 'relation'
+                    GROUP BY space""",
+                (tenant_id, *stale),
+            )
+        }
+        for space in stale:
+            counted[(tenant_id, space)] = (now, sizes.get(space, 0))
+    return sum(counted[(tenant_id, space)][1] for space in read_spaces)
 
 
 # A hook between ranking and selection: given the query and the salience-
@@ -487,24 +527,12 @@ def rank_candidates(
     # and their ranked lists are fused. One probe per read_space (the space
     # partition key only supports equality during KNN), merged by ascending
     # distance so no space can starve the others out of the candidate budget.
-    space_sizes = {
-        r["space"]: r["n"]
-        for r in db.fetchall(
-            f"""SELECT space, COUNT(*) AS n FROM atoms
-                WHERE tenant_id = ? AND space IN ({spaces_ph}) AND type != 'relation'
-                GROUP BY space""",
-            (tenant_id, *read_spaces),
-        )
-    }
-    graph_size = sum(space_sizes.values())
+    graph_size = _graph_size(db, tenant_id, read_spaces)
     knn_pool = max(_KNN_POOL_MIN, min(_KNN_POOL_MAX, 4 * int(graph_size**0.5)))
     knn_rows: list = []
     for space in read_spaces:
         knn_rows.extend(
-            _knn_entry_points(
-                vec_bytes, tenant_id, space, db, knn_pool, min_confidence,
-                space_sizes.get(space, 0),
-            )
+            _knn_entry_points(vec_bytes, tenant_id, space, db, knn_pool, min_confidence)
         )
     knn_rows.sort(key=lambda r: r["distance"])
     knn_rows = knn_rows[:knn_pool]
@@ -573,12 +601,42 @@ def rank_candidates(
     )
 
     # Step 4: Score each candidate by salience.
+    #
+    # Similarity comes from the probe's distance when the probe found the
+    # candidate. One that entered through the graph or the lexical index is
+    # scored on its real stored embedding — handing it similarity 0 lets a
+    # sticky concept with no bearing on the query outrank the fact one edge
+    # away from a hit. One stored with no vector at all (its encoder failed
+    # at write time, and the lexical index is how it got here) is embedded
+    # now: at similarity 0 it has no salience and is dropped, which made the
+    # fallback that kept the atom a fallback that kept it unreachable. The
+    # epoch files the vector for good.
+    query = np.asarray(query_vec, dtype=np.float32)
+    stored = _stored_vectors([r["id"] for r in atoms_rows if r["id"] not in knn_distances], db)
     results: list[RecallResult] = []
     for row in atoms_rows:
-        atom = atom_from_row(row)
-        similarity = _similarity(
-            atom, query_vec, query_tokens, knn_distances, db, embed_engine, damp_echoes
-        )
+        atom = None
+        if row["id"] in knn_distances:
+            similarity = max(0.0, 1.0 - knn_distances[row["id"]])
+        else:
+            vector = stored.get(row["id"])
+            if vector is None:
+                atom = atom_from_row(row)
+                vector = embed_engine.embed(embedding_text(atom))
+            similarity = max(0.0, _cosine(query, vector))
+        # A candidate the query does not reach is no result, and is dropped
+        # before its row is turned into an atom — most of what a candidate
+        # costs. The KNN probe returns its nearest neighbours however far they
+        # are, and on a small graph that is every atom in it.
+        if similarity <= 0.0:
+            continue
+        atom = atom or atom_from_row(row)
+        # An episode that echoes the query scores nothing, unless the caller
+        # is looking for the memory itself rather than an answer
+        # (``damp_echoes=False``, which is forget's case: quoting a memory is
+        # the natural way to name the one to drop).
+        if damp_echoes and _restates_query(atom, similarity, query_vec, query_tokens, embed_engine):
+            continue
         # The engine already trusts agent-authored content less at decay and
         # prune time; ranking is where that asymmetry reaches the reader. An
         # agent's stored reply competes with the user testimony it was
@@ -610,10 +668,8 @@ def rank_candidates(
             valence_weight=valence_weight,
             standing_scale=standing_scale,
         )
-        # An atom with no relevance has no salience, and a result with no
-        # salience is not a result: the KNN probe always returns its nearest
-        # neighbours however far they are, and on a small graph that is
-        # every atom in it.
+        # A result with no salience is not a result, whatever weights the
+        # personality carries.
         if salience <= 0.0:
             continue
         results.append(RecallResult(atom=atom, salience=salience, similarity=similarity))

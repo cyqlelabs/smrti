@@ -126,18 +126,24 @@ def _entity_type_score(a: Atom, b: Atom) -> float | None:
 
 
 def _get_neighbor_labels(atom_id: str, tenant_id: str, space: str, db) -> list[str]:
-    """Get labels of 1-hop neighbors (via relation edges) for context."""
+    """Get labels of 1-hop neighbors (via relation edges) for context.
+
+    One branch per direction rather than one join on ``source_id = ? OR
+    target_id = ?``: SQLite answers the OR with a scan of the whole space,
+    34–39 ms a call at 48k rows, while each branch names the tenant, the
+    space and one endpoint and is answered from an index.
+    """
+    neighbour = f"a.tenant_id = ? AND a.space = ? AND a.type != 'relation' AND NOT {forgotten_sql('a')}"
     rows = db.fetchall(
-        f"""SELECT a.label FROM atoms a
-           INNER JOIN atoms r ON (
-               (r.source_id = ? AND r.target_id = a.id)
-               OR (r.target_id = ? AND r.source_id = a.id)
-           )
-           WHERE r.type = 'relation' AND r.tenant_id = ? AND r.space = ?
-             AND a.tenant_id = ? AND a.space = ?
-             AND a.type != 'relation' AND NOT {forgotten_sql('a')}
+        f"""SELECT a.label FROM atoms r JOIN atoms a ON a.id = r.target_id
+           WHERE r.tenant_id = ? AND r.space = ? AND r.source_id = ? AND r.type = 'relation'
+             AND {neighbour}
+           UNION ALL
+           SELECT a.label FROM atoms r JOIN atoms a ON a.id = r.source_id
+           WHERE r.tenant_id = ? AND r.space = ? AND r.target_id = ? AND r.type = 'relation'
+             AND {neighbour}
            LIMIT 20""",
-        (atom_id, atom_id, tenant_id, space, tenant_id, space),
+        (tenant_id, space, atom_id, tenant_id, space, tenant_id, space, atom_id, tenant_id, space),
     )
     return [r["label"] for r in rows]
 

@@ -339,6 +339,29 @@ def test_an_accent_is_not_a_different_name_but_a_kana_mark_is(mem):
     assert _resolve(mem, "かとう", "person") != _resolve(mem, "がとう", "person")
 
 
+def test_an_entity_another_writer_created_meanwhile_is_reused(mem):
+    """Two processes resolving one new name each created it: the lookup ran
+    before the slow embedding and the insert after it."""
+    from smrti.core.models import Atom, AtomType, EntityType
+
+    resolver = extract._resolver(mem, "user", "", context="")
+    real_embed = resolver.embed_engine.embed
+    other = []
+
+    def embed_while_another_writer_inserts(text):
+        vec = real_embed(text)
+        if not other:
+            other.append(mem.atomspace.add_atom(Atom(
+                type=AtomType.CONCEPT, label="Zed", entity_type=EntityType.PERSON,
+                tenant_id="t", space="s",
+            ), embedding=list(vec)))
+        return vec
+
+    with patch.object(resolver.embed_engine, "embed", side_effect=embed_while_another_writer_inserts):
+        assert resolver.resolve("Zed", "person", "t", "s", ["s"]) == other[0]
+    assert len(mem.db.fetchall("SELECT id FROM atoms WHERE label = 'Zed'")) == 1
+
+
 def test_a_claim_naming_a_forgotten_atom_is_about_a_new_one(mem):
     """_db_resolve_label found the forgotten atom the resolver skips."""
     ids = {"Carol": _concept(mem, "Carol", "person")}

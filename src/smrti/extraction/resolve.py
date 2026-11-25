@@ -133,13 +133,10 @@ class EntityResolver:
 
         # Tier 0: exact label match across read_spaces (u_lower: Unicode-aware
         # case folding — SQLite's LOWER() only folds ASCII)
-        row = self.db.fetchone(
-            f"SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND entity_type = ? AND tenant_id = ? AND space IN ({spaces_ph}) AND NOT {ATOM_FORGOTTEN}",
-            (name, entity_type, tenant_id, *read_spaces),
-        )
-        if row:
-            self._boost_sti(row["id"], tenant_id, write_space)
-            return row["id"]
+        atom_id = self._exact_match(name, entity_type, tenant_id, read_spaces)
+        if atom_id:
+            self._boost_sti(atom_id, tenant_id, write_space)
+            return atom_id
 
         # Tier 0b: the same label under a compatible entity type. GLiNER puts
         # several labels on one span, so "Python" arrives as technology in
@@ -246,6 +243,14 @@ class EntityResolver:
 
         # Tier 4: create new atom in write_space (reusing the probe vector)
         return self._create_atom(name, entity_type, tenant_id, write_space, vec=query_vec)
+
+    def _exact_match(self, name: str, entity_type: str, tenant_id: str, spaces: list[str]) -> str | None:
+        row = self.db.fetchone(
+            f"""SELECT id FROM atoms WHERE u_lower(label) = u_lower(?) AND entity_type = ?
+                AND tenant_id = ? AND space IN ({",".join("?" * len(spaces))}) AND NOT {ATOM_FORGOTTEN}""",
+            (name, entity_type, tenant_id, *spaces),
+        )
+        return row["id"] if row else None
 
     def _confirmed_or_new(
         self,
@@ -486,6 +491,14 @@ class EntityResolver:
             except Exception:
                 logger.warning("could not embed %r; created without a vector", name, exc_info=True)
                 vec = None
+        # Another writer may have created the same entity while the vector was
+        # computed, the slow part of creating one. Looking again narrows the
+        # window to the insert itself; closing it takes a constraint the
+        # schema does not have.
+        existing = self._exact_match(name, typed.value, tenant_id, [space])
+        if existing:
+            self._boost_sti(existing, tenant_id, space)
+            return existing
         return AtomSpace(self.db, self.embed_engine).add_atom(
             atom, embedding=None if vec is None else list(vec),
             require_vector=vec is not None,

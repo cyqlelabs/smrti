@@ -130,3 +130,87 @@ def test_a_malformed_api_keys_entry_stops_the_server_without_echoing_the_key():
         with pytest.raises(ValueError) as exc:
             _parse_api_keys(raw)
         assert "sekrit" not in str(exc.value)
+
+
+# ── T2: the Smrti key never leaves the server ────────────────────────────────
+
+def _proxy_upstream(seen, reply=None, status=200):
+    """An httpx client whose transport records each upstream request."""
+    import httpx
+
+    def handler(request):
+        seen.append(request)
+        return httpx.Response(status, json=reply or {"choices": [{"index": 0, "message": {"content": "ok"}}]})
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+@pytest.fixture()
+def proxied(tmp_path, monkeypatch):
+    """The proxy against a recording fake upstream, on its own database."""
+    from smrti.servers import config as cfg
+    from smrti.servers import proxy
+
+    seen = []
+    monkeypatch.setattr(cfg, "EXTRACT", False)
+    monkeypatch.setattr(proxy, "_http", _proxy_upstream(seen))
+    monkeypatch.setattr(proxy, "_UPSTREAM", "http://upstream.test")
+    monkeypatch.setattr(proxy, "_default_tenant_id", None)
+    monkeypatch.setattr(proxy, "_instances", type(proxy._instances)())
+    monkeypatch.setattr(cfg, "DB", str(tmp_path / "proxy.db"))
+    with patch("smrti.servers.proxy.run_reflect_loop", new=_noop_reflect):
+        with TestClient(proxy.app, raise_server_exceptions=True) as client:
+            client.seen = seen
+            client.proxy = proxy
+            yield client
+
+
+def _chat(client, content="hello", headers=None, **extra):
+    body = {"model": "m", "messages": [{"role": "user", "content": content}], **extra}
+    return client.post("/v1/chat/completions", json=body, headers=headers or {})
+
+
+def test_the_proxy_forwards_an_upstream_key_but_never_the_smrti_key(proxied, monkeypatch):
+    """Authorization: Bearer <SMRTI_API_KEY> was forwarded verbatim to the upstream."""
+    from smrti.servers import config as cfg
+
+    monkeypatch.setattr(cfg, "API_KEY", "smrti-key")
+    assert _chat(proxied, headers={"Authorization": "Bearer smrti-key"}).status_code == 200
+    assert "authorization" not in proxied.seen[-1].headers
+
+    _chat(proxied, headers={"X-Api-Key": "smrti-key", "Authorization": "Bearer sk-upstream"})
+    assert proxied.seen[-1].headers["authorization"] == "Bearer sk-upstream"
+
+
+def test_rest_extraction_never_receives_the_smrti_key(keyed, monkeypatch):
+    """REST /remember handed the client's Authorization — the Smrti key — to extraction."""
+    from smrti.servers import config as cfg
+
+    received = []
+
+    async def _capture(episode_id, content, mem, auth, *args, **kwargs):
+        received.append(auth)
+
+    monkeypatch.setattr(cfg, "EXTRACT", True)
+    with patch("smrti.extraction.extract.extract_and_link_serialized", _capture):
+        keyed.post("/remember", json={"content": "Alice joined Acme"},
+                   headers={"Authorization": "Bearer admin-key"})
+        keyed.post("/remember", json={"content": "Bob joined Acme"},
+                   headers={"X-Api-Key": "admin-key", "Authorization": "Bearer sk-extract"})
+    assert received == ["", "Bearer sk-extract"]
+
+
+def test_upstream_credentials_are_redacted_from_errors_and_the_call_log(proxied, monkeypatch):
+    """A failed upstream echoed http://user:secret@host in the error body and on /llm-calls."""
+    import httpx
+
+    def _refuse(request):
+        raise httpx.ConnectError("connection failed to http://user:secret@upstream.test")
+
+    monkeypatch.setattr(proxied.proxy, "_http", httpx.AsyncClient(transport=httpx.MockTransport(_refuse)))
+    monkeypatch.setattr(proxied.proxy, "_UPSTREAM", "http://user:secret@upstream.test")
+    response = _chat(proxied)
+    logged = proxied.get("/llm-calls").json()[0]
+    assert response.status_code == 502
+    assert "secret" not in response.text
+    assert "secret" not in logged["upstream"] and "secret" not in logged["error"]

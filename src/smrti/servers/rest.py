@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from smrti import Smrti
 from smrti.servers import config as cfg
-from smrti.servers.common import api_key_middleware, tenant_for
+from smrti.servers.common import api_key_middleware, tenant_for, upstream_authorization
 from smrti.servers.mcp import create_smrti, handle_tool
 from smrti.servers.reflect_loop import run_reflect_loop
 from smrti.servers.viz_routes import create_viz_router
@@ -275,7 +275,7 @@ async def remember(req: RememberRequest, request: Request):
         episode_id = result.get("atom_id", "")
         if episode_id:
             from smrti.extraction.extract import extract_and_link_serialized
-            auth = request.headers.get("Authorization", "")
+            auth = upstream_authorization(request)
             task = asyncio.create_task(
                 extract_and_link_serialized(
                     episode_id, req.content, mem, auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,

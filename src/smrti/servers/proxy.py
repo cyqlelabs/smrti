@@ -20,11 +20,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from smrti import Smrti
+from smrti.call_log import redact
 from smrti.core.models import RecallResult
 from smrti.core.provenance import SOURCE_AGENT, claim_current_sql, forgotten_sql
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
-from smrti.servers.common import api_key_middleware, tenant_for
+from smrti.servers.common import api_key_middleware, tenant_for, upstream_authorization
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
 from smrti.servers.viz_routes import create_viz_router
@@ -541,7 +542,7 @@ def _first_choice(payload: dict) -> dict:
 
 def _upstream_headers(request: Request) -> dict:
     headers = {"Content-Type": "application/json"}
-    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    auth = upstream_authorization(request)
     if auth:
         headers["Authorization"] = auth
     return headers
@@ -640,7 +641,7 @@ async def _non_stream_proxy(
             json=body,
         )
     except httpx.HTTPError as exc:
-        return _upstream_error(f"upstream request failed: {exc}", "upstream_unreachable")
+        return _upstream_error(f"upstream request failed: {redact(str(exc))}", "upstream_unreachable")
     try:
         data = response.json()
     except ValueError as exc:
@@ -724,11 +725,11 @@ async def _stream_proxy(
         raise
     except Exception as exc:
         log_entry["status"] = 500
-        log_entry["error"] = str(exc)
+        log_entry["error"] = redact(str(exc))
         log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
         from smrti.call_log import update as _update_log
         _update_log(log_entry)
-        err = {"error": {"message": str(exc), "type": "proxy_error"}}
+        err = {"error": {"message": log_entry["error"], "type": "proxy_error"}}
         yield f"data: {json.dumps(err)}\n\ndata: [DONE]\n\n".encode()
 
 

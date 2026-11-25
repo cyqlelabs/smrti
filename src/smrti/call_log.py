@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -13,6 +14,23 @@ _subscribers: list[asyncio.Queue[dict[str, Any]]] = []
 
 _MAX_ENTRY_BYTES = 50_000
 _TRUNCATION_MARKER = "…[truncated]"
+
+# The user:password part of a URL. Upstream and extraction endpoints may carry
+# basic-auth credentials, and both the URL and the errors that quote it are
+# served back on /llm-calls and in the proxy's error bodies.
+_URL_CREDENTIALS = re.compile(r"(?<=://)[^/@\s]+@")
+_REDACTED_FIELDS = ("upstream", "error")
+
+
+def redact(text: str) -> str:
+    """Mask the credentials of every URL in *text*."""
+    return _URL_CREDENTIALS.sub("***@", text)
+
+
+def _redact_fields(entry: dict[str, Any]) -> None:
+    for key in _REDACTED_FIELDS:
+        if isinstance(entry.get(key), str):
+            entry[key] = redact(entry[key])
 
 
 def _now() -> str:
@@ -62,6 +80,7 @@ def _notify(msg: dict[str, Any]) -> None:
 def append(entry: dict[str, Any]) -> None:
     entry.setdefault("id", uuid.uuid4().hex[:8])
     entry.setdefault("ts", _now())
+    _redact_fields(entry)
     _cap_entry(entry)
     _CALL_LOG.append(entry)
     _notify(entry)
@@ -70,6 +89,7 @@ def append(entry: dict[str, Any]) -> None:
 def update(entry: dict[str, Any]) -> None:
     """The deque holds a reference to the same dict so caller mutations are
     already reflected in get_all(). We still notify SSE subscribers."""
+    _redact_fields(entry)
     _notify({"__update__": True, **entry})
 
 

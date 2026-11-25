@@ -104,6 +104,21 @@ async def api_key_middleware(request: Request, call_next):
     return await call_next(request)
 
 
+def upstream_authorization(request: Request) -> str:
+    """The client's Authorization header, unless it carries this server's own key.
+
+    A client that authenticates to Smrti with ``Authorization: Bearer <key>``
+    has no upstream credential in that header, and forwarding it handed the
+    Smrti key to the model provider and to the extraction endpoint. A client
+    that authenticated with X-Api-Key keeps its Authorization: that is the
+    documented way to pass the upstream key through.
+    """
+    bearer = _bearer(request)
+    if bearer and _tenants_of(bearer) is not _NO_KEY:
+        return ""
+    return request.headers.get("authorization", "")
+
+
 def tenant_for(request: Request, named: Optional[str], default: str) -> str:
     """The tenant a request acts on.
 

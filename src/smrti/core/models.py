@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import uuid
 from enum import Enum
 from typing import Optional
 
 from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 class AtomType(str, Enum):
@@ -258,6 +261,30 @@ def _clamp(value: float | None, lo: float, hi: float, default: float = 0.0) -> f
     return min(hi, max(lo, value))
 
 
+_unreadable_metadata_logged = False
+
+
+def _metadata(raw: str | None, atom_id: str) -> dict:
+    """An atom's metadata, or an empty one when the stored text is not a JSON object.
+
+    One row a hand edit or another tool wrote badly used to raise out of
+    every recall, epoch and listing that reached it. Read as empty, the
+    atom keeps its place in the graph and loses only what it cannot say.
+    Logged once per process, since the same row is read on every recall.
+    """
+    global _unreadable_metadata_logged
+    try:
+        value = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        value = None
+    if isinstance(value, dict):
+        return value
+    if not _unreadable_metadata_logged:
+        _unreadable_metadata_logged = True
+        logger.warning("atom %s has metadata that is not a JSON object; reading it as empty", atom_id)
+    return {}
+
+
 def atom_from_row(row) -> Atom:
     d = dict(row)
     return Atom(
@@ -291,7 +318,7 @@ def atom_from_row(row) -> Atom:
         relation=d.get("relation"),
         tenant_id=d.get("tenant_id", "default"),
         space=d.get("space", "default"),
-        metadata=json.loads(d.get("metadata") or "{}"),
+        metadata=_metadata(d.get("metadata"), d["id"]),
         created_at=d.get("created_at"),
         updated_at=d.get("updated_at"),
     )

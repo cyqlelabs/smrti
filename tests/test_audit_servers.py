@@ -644,3 +644,21 @@ def test_an_evicted_instance_with_pending_activity_gets_its_epoch(tmp_path, monk
 
     asyncio.run(_run())
     assert epochs("busy") == 1
+
+
+# ── CLI: an exposed bind is always warned about ──────────────────────────────
+
+def test_servers_without_auth_warn_on_any_exposed_bind(monkeypatch, capsys):
+    """`serve town` and `serve decisions` bound to 0.0.0.0 in silence, though they check no key."""
+    from smrti import cli
+
+    monkeypatch.setenv("SMRTI_API_KEY", "set-but-irrelevant")
+    cli._warn_if_unauthenticated("0.0.0.0", "town simulation")
+    assert "checks no API key" in capsys.readouterr().err
+    cli._warn_if_unauthenticated("127.0.0.1", "decision server")
+    assert capsys.readouterr().err == ""
+
+    monkeypatch.delenv("SMRTI_API_KEY")
+    monkeypatch.setenv("SMRTI_API_KEYS", "k:acme")
+    cli._warn_if_exposed("0.0.0.0")  # a bound key turns authentication on too
+    assert capsys.readouterr().err == ""

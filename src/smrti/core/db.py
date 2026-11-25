@@ -282,6 +282,9 @@ def _make_connection(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Under WAL, NORMAL cannot corrupt the file: a power cut can lose the
+    # last commits, never the database. FULL syncs the log on every commit.
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA cache_size=-64000")
@@ -303,10 +306,17 @@ class Database:
         # decide whether the lexical half of the search exists at all.
         self.fts_enabled = False
 
+    @property
+    def _in_memory(self) -> bool:
+        """A private in-memory database exists only on the connection that
+        opened it, so it gets no read pool: reads share the write connection."""
+        return self._db_path == ":memory:"
+
     def initialize(self) -> None:
         self._write_conn = _make_connection(self._db_path)
-        for _ in range(_READ_POOL_SIZE):
-            self._read_pool.put(_make_connection(self._db_path))
+        if not self._in_memory:
+            for _ in range(_READ_POOL_SIZE):
+                self._read_pool.put(_make_connection(self._db_path))
         with self._write_lock:
             self._migrate_vec_atoms()
             self._migrate_content_hash()
@@ -608,7 +618,7 @@ class Database:
         later release's migration overwrites it, by which point this
         snapshot's state has already been validated by a successful upgrade.
         """
-        if self._migration_backup_done or self._db_path == ":memory:":
+        if self._migration_backup_done or self._in_memory:
             return
         backup_path = self._db_path + ".pre-migration.bak"
         try:
@@ -801,6 +811,10 @@ class Database:
 
     @contextmanager
     def _read_conn(self):
+        if self._in_memory:
+            with self._write_lock:
+                yield self._write_conn
+            return
         conn = self._read_pool.get()
         try:
             yield conn

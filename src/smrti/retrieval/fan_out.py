@@ -11,7 +11,7 @@ from typing import Callable
 
 import numpy as np
 
-from smrti.core.models import AtomType, RecallResult, atom_from_row
+from smrti.core.models import Atom, AtomType, RecallResult, atom_from_row
 from smrti.core.atomspace import embedding_text
 from smrti.core.db import stable_rowid
 from smrti.core.provenance import (
@@ -146,6 +146,20 @@ _FTS_POOL = 10
 
 # The surfacing floor when neither the caller nor the personality names one.
 _DEFAULT_MIN_CONFIDENCE = 0.1
+
+# What ranking reads from the write space's personality, and what it reads
+# when the space has no personality row or the column is NULL.
+_RANKING_DEFAULTS = {
+    "w_similarity": 0.35,
+    "w_sti": 0.25,
+    "w_confidence": 0.20,
+    "w_lti": 0.10,
+    "w_valence": 0.10,
+    "valence_weight": 0.2,
+    "sti_boost_on_access": 0.5,
+    "agent_source_trust": 0.5,
+    "min_confidence_to_surface": _DEFAULT_MIN_CONFIDENCE,
+}
 
 
 def _stored_vectors(atom_ids: list[str], db) -> dict[str, np.ndarray]:
@@ -511,52 +525,64 @@ def rank_candidates(
     # work — and read_spaces can arrive straight from a request header.
     # Deduplicating in order also keeps the ``space IN (...)`` lists tight.
     read_spaces = list(dict.fromkeys(read_spaces))
-    spaces_ph = ",".join("?" * len(read_spaces))
-
     query_vec = embed_engine.embed(query)
-    vec_bytes = struct.pack(f"{len(query_vec)}f", *query_vec)
-    query_tokens = word_set(query)
 
-    # Load personality weights from write_space, fall back to defaults.
-    # A NULL column must fall back too, not propagate None into arithmetic.
+    params = _ranking_params(db, tenant_id, write_space)
+    sti_boost = params["sti_boost_on_access"]
+    if min_confidence is None:
+        min_confidence = params["min_confidence_to_surface"]
+
+    entry_ids, knn_distances = _entry_points(
+        query, query_vec, tenant_id, read_spaces, db, min_confidence
+    )
+    if not entry_ids:
+        return [], sti_boost, min_confidence
+
+    rows = _candidate_rows(
+        _expand(entry_ids, tenant_id, read_spaces, db, min_confidence),
+        tenant_id, read_spaces, db, min_confidence,
+    )
+    results = _score(
+        rows, knn_distances, query_vec, word_set(query), db, embed_engine, params, damp_echoes
+    )
+    results.sort(key=lambda r: r.salience, reverse=True)
+    # The diversity cap and the cut to top_k run in ``select``: ranking is
+    # per-atom and has no opinion about the shape of the set it produces,
+    # which is how five copies of a single exchange came to be a whole
+    # response. The access boost runs after that, on the write space only —
+    # reading from a foreign space must not mutate that space's attention
+    # weights, and reading a candidate the cut discarded is not reading.
+    return results, sti_boost, min_confidence
+
+
+def _ranking_params(db, tenant_id: str, write_space: str) -> dict[str, float]:
+    """The write space's ranking weights, access boost, source trust and
+    surfacing floor. A NULL column must fall back to its default too, not
+    propagate None into arithmetic."""
     personality = db.fetchone(
         "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
         (tenant_id, write_space),
     )
     p = personality_params(personality)
+    return {
+        key: default if p.get(key) is None else p[key]
+        for key, default in _RANKING_DEFAULTS.items()
+    }
 
-    def _pget(key: str, default: float) -> float:
-        value = p.get(key)
-        return default if value is None else value
 
-    w_similarity = _pget("w_similarity", 0.35)
-    w_sti = _pget("w_sti", 0.25)
-    w_confidence = _pget("w_confidence", 0.20)
-    w_lti = _pget("w_lti", 0.10)
-    w_valence = _pget("w_valence", 0.10)
-    valence_weight = _pget("valence_weight", 0.2)
-    sti_boost = _pget("sti_boost_on_access", 0.5)
-    agent_trust = _pget("agent_source_trust", 0.5)
-    if min_confidence is None:
-        min_confidence = _pget("min_confidence_to_surface", _DEFAULT_MIN_CONFIDENCE)
+def _entry_points(
+    query: str, query_vec: list[float], tenant_id: str, read_spaces: list[str], db,
+    min_confidence: float,
+) -> tuple[list[str], dict[str, float]]:
+    """The fused entry pool, best first, and the probe distance of every
+    atom the vector half found.
 
-    # Step 1: entry points — the vector and lexical searches run side by side
-    # and their ranked lists are fused. One probe per read_space (the space
-    # partition key only supports equality during KNN), merged by ascending
-    # distance so no space can starve the others out of the candidate budget.
+    The vector and lexical searches run side by side and their ranked lists
+    are fused, in a pool that scales with the graph.
+    """
     graph_size = _graph_size(db, tenant_id, read_spaces)
     knn_pool = max(_KNN_POOL_MIN, min(_KNN_POOL_MAX, 4 * int(graph_size**0.5)))
-    knn_rows: list = []
-    # A query vector with no length is near nothing — vec0 gives every row
-    # a NULL distance against it — so the lexical half searches alone.
-    if np.linalg.norm(query_vec) > 0.0:
-        for space in read_spaces:
-            knn_rows.extend(
-                _knn_entry_points(vec_bytes, tenant_id, space, db, knn_pool, min_confidence)
-            )
-    knn_rows.sort(key=lambda r: r["distance"])
-    knn_rows = knn_rows[:knn_pool]
-
+    knn_rows = _vector_entry_points(query_vec, tenant_id, read_spaces, db, knn_pool, min_confidence)
     knn_ids = [r["atom_id"] for r in knn_rows]
     knn_distances = {r["atom_id"]: r["distance"] for r in knn_rows}
 
@@ -567,28 +593,56 @@ def rank_candidates(
     lexical_ids = _lexical_entry_points(
         query, tenant_id, read_spaces, db, min(_FTS_POOL, knn_pool), min_confidence
     )
-    entry_ids = _rrf_fuse([knn_ids, lexical_ids], knn_pool)
+    return _rrf_fuse([knn_ids, lexical_ids], knn_pool), knn_distances
 
-    if not entry_ids:
-        return [], sti_boost, min_confidence
 
-    # Step 2: 1-hop expansion via relation atoms, capped so a hub atom cannot
-    # pull an unbounded neighborhood into the scoring set. The budget goes to
-    # the highest-standing endpoints first: an unordered LIMIT hands it to
-    # whatever the scan meets, which in a chatty graph is froth. And it goes
-    # only to endpoints that could be returned — eligible, a candidate kind,
-    # in a read space — since a hub's hundred forgotten or sunk neighbours
-    # used to take the whole budget and be dropped afterwards, while its one
-    # live neighbour waited past the cut. An endpoint reached by several
-    # edges takes one place.
-    #
-    # Nothing else enters. An earlier version also added the three
-    # highest-standing person atoms to every candidate set "to anchor the
-    # graph"; scored on their true similarity they carried none for most
-    # queries, and their standing alone put them above every relevant
-    # episode — a person concept at similarity zero was the first result for
-    # a question about Kubernetes. Candidacy comes from the query or from an
-    # edge out of something the query found.
+def _vector_entry_points(
+    query_vec: list[float], tenant_id: str, read_spaces: list[str], db, pool: int,
+    min_confidence: float,
+) -> list:
+    """The nearest *pool* eligible atoms across the read spaces, ascending
+    distance.
+
+    One probe per read_space (the space partition key only supports equality
+    during KNN), merged by ascending distance so no space can starve the
+    others out of the candidate budget.
+    """
+    # A query vector with no length is near nothing — vec0 gives every row
+    # a NULL distance against it — so the lexical half searches alone.
+    if not np.linalg.norm(query_vec) > 0.0:
+        return []
+    vec_bytes = struct.pack(f"{len(query_vec)}f", *query_vec)
+    knn_rows: list = []
+    for space in read_spaces:
+        knn_rows.extend(_knn_entry_points(vec_bytes, tenant_id, space, db, pool, min_confidence))
+    knn_rows.sort(key=lambda r: r["distance"])
+    return knn_rows[:pool]
+
+
+def _expand(
+    entry_ids: list[str], tenant_id: str, read_spaces: list[str], db, min_confidence: float,
+) -> set[str]:
+    """The entry pool and the candidates one relation edge away from it.
+
+    The 1-hop expansion is capped so a hub atom cannot pull an unbounded
+    neighborhood into the scoring set. The budget goes to the
+    highest-standing endpoints first: an unordered LIMIT hands it to
+    whatever the scan meets, which in a chatty graph is froth. And it goes
+    only to endpoints that could be returned — eligible, a candidate kind,
+    in a read space — since a hub's hundred forgotten or sunk neighbours
+    used to take the whole budget and be dropped afterwards, while its one
+    live neighbour waited past the cut. An endpoint reached by several
+    edges takes one place.
+
+    Nothing else enters. An earlier version also added the three
+    highest-standing person atoms to every candidate set "to anchor the
+    graph"; scored on their true similarity they carried none for most
+    queries, and their standing alone put them above every relevant
+    episode — a person concept at similarity zero was the first result for
+    a question about Kubernetes. Candidacy comes from the query or from an
+    edge out of something the query found.
+    """
+    spaces_ph = ",".join("?" * len(read_spaces))
     id_ph = ",".join("?" * len(entry_ids))
     expanded_ids: set[str] = set(entry_ids)
     for near, far in (("source_id", "target_id"), ("target_id", "source_id")):
@@ -605,12 +659,19 @@ def rank_candidates(
                 (*entry_ids, tenant_id, *read_spaces, tenant_id, *read_spaces, min_confidence),
             )
         )
+    return expanded_ids
 
-    # Step 3: Fetch candidate atoms — space-filtered here (overlay boundary),
-    # and eligibility-filtered again for what the lexical half found.
-    exp_list = list(expanded_ids)
+
+def _candidate_rows(
+    candidate_ids: set[str], tenant_id: str, read_spaces: list[str], db, min_confidence: float,
+) -> list:
+    """The atom rows of *candidate_ids* — space-filtered here (overlay
+    boundary), and eligibility-filtered again for what the lexical half
+    found."""
+    spaces_ph = ",".join("?" * len(read_spaces))
+    exp_list = list(candidate_ids)
     exp_ph = ",".join("?" * len(exp_list))
-    atoms_rows = db.fetchall(
+    return db.fetchall(
         f"""SELECT * FROM atoms
             WHERE id IN ({exp_ph})
               AND +tenant_id = ?
@@ -620,30 +681,17 @@ def rank_candidates(
         (*exp_list, tenant_id, *read_spaces, min_confidence),
     )
 
-    # Step 4: Score each candidate by salience.
-    #
-    # Similarity comes from the probe's distance when the probe found the
-    # candidate. One that entered through the graph or the lexical index is
-    # scored on its real stored embedding — handing it similarity 0 lets a
-    # sticky concept with no bearing on the query outrank the fact one edge
-    # away from a hit. One stored with no vector at all (its encoder failed
-    # at write time, and the lexical index is how it got here) is embedded
-    # now: at similarity 0 it has no salience and is dropped, which made the
-    # fallback that kept the atom a fallback that kept it unreachable. The
-    # epoch files the vector for good.
-    query = np.asarray(query_vec, dtype=np.float32)
-    stored = _stored_vectors([r["id"] for r in atoms_rows if r["id"] not in knn_distances], db)
+
+def _score(
+    rows: list, knn_distances: dict[str, float], query_vec: list[float], query_tokens: set[str],
+    db, embed_engine, params: dict[str, float], damp_echoes: bool,
+) -> list[RecallResult]:
+    """Every candidate the query reaches, scored by salience, in row order."""
+    query_array = np.asarray(query_vec, dtype=np.float32)
+    stored = _stored_vectors([r["id"] for r in rows if r["id"] not in knn_distances], db)
     results: list[RecallResult] = []
-    for row in atoms_rows:
-        atom = None
-        if row["id"] in knn_distances:
-            similarity = max(0.0, 1.0 - knn_distances[row["id"]])
-        else:
-            vector = stored.get(row["id"])
-            if vector is None:
-                atom = atom_from_row(row)
-                vector = embed_engine.embed(embedding_text(atom))
-            similarity = max(0.0, _cosine(query, vector))
+    for row in rows:
+        similarity, atom = _similarity(row, query_array, knn_distances, stored, embed_engine)
         # A candidate the query does not reach is no result, and is dropped
         # before its row is turned into an atom — most of what a candidate
         # costs. The KNN probe returns its nearest neighbours however far they
@@ -657,51 +705,77 @@ def rank_candidates(
         # the natural way to name the one to drop).
         if damp_echoes and _restates_query(atom, similarity, query_vec, query_tokens, embed_engine):
             continue
-        # The engine already trusts agent-authored content less at decay and
-        # prune time; ranking is where that asymmetry reaches the reader. An
-        # agent's stored reply competes with the user testimony it was
-        # derived from — and when the reply was wrong, ranking it first
-        # re-serves the mistake as memory.
-        #
-        # The discount reaches the standing terms only. Attention, confidence
-        # and valence say how much the graph has come to trust the atom, and
-        # an agent's say in that is what the discount exists to shrink;
-        # similarity says how much the atom is *about the question*, which is
-        # a property of the query. Discounting it too buried the one memory
-        # that held the answer whenever that memory was the agent's own reply
-        # — "what did you recommend?" has no user-authored answer, and
-        # measured on LongMemEval the whole single-session-assistant category
-        # scored zero. On equal relevance the user's version still wins.
-        standing_scale = agent_trust if atom.metadata.get("source") == "agent" else 1.0
-        salience = compute_salience(
-            similarity=similarity,
-            sti=atom.attention.sti,
-            confidence=atom.truth.confidence,
-            lti=atom.attention.lti,
-            valence=atom.valence.own,
-            intensity=atom.valence.own_intensity,
-            w_similarity=w_similarity,
-            w_sti=w_sti,
-            w_confidence=w_confidence,
-            w_lti=w_lti,
-            w_valence=w_valence,
-            valence_weight=valence_weight,
-            standing_scale=standing_scale,
-        )
+        salience = _salience(atom, similarity, params)
         # A result with no salience is not a result, whatever weights the
         # personality carries.
         if salience <= 0.0:
             continue
         results.append(RecallResult(atom=atom, salience=salience, similarity=similarity))
+    return results
 
-    results.sort(key=lambda r: r.salience, reverse=True)
-    # The diversity cap and the cut to top_k run in ``select``: ranking is
-    # per-atom and has no opinion about the shape of the set it produces,
-    # which is how five copies of a single exchange came to be a whole
-    # response. The access boost runs after that, on the write space only —
-    # reading from a foreign space must not mutate that space's attention
-    # weights, and reading a candidate the cut discarded is not reading.
-    return results, sti_boost, min_confidence
+
+def _similarity(
+    row, query_array: np.ndarray, knn_distances: dict[str, float],
+    stored: dict[str, np.ndarray], embed_engine,
+) -> tuple[float, Atom | None]:
+    """The candidate's similarity to the query, with its atom when working
+    the similarity out needed one (None otherwise).
+
+    Similarity comes from the probe's distance when the probe found the
+    candidate. One that entered through the graph or the lexical index is
+    scored on its real stored embedding — handing it similarity 0 lets a
+    sticky concept with no bearing on the query outrank the fact one edge
+    away from a hit. One stored with no vector at all (its encoder failed
+    at write time, and the lexical index is how it got here) is embedded
+    now: at similarity 0 it has no salience and is dropped, which made the
+    fallback that kept the atom a fallback that kept it unreachable. The
+    epoch files the vector for good.
+    """
+    if row["id"] in knn_distances:
+        return max(0.0, 1.0 - knn_distances[row["id"]]), None
+    atom = None
+    vector = stored.get(row["id"])
+    if vector is None:
+        atom = atom_from_row(row)
+        vector = embed_engine.embed(embedding_text(atom))
+    return max(0.0, _cosine(query_array, vector)), atom
+
+
+def _salience(atom, similarity: float, params: dict[str, float]) -> float:
+    """The candidate's salience under the write space's weights.
+
+    The engine already trusts agent-authored content less at decay and
+    prune time; ranking is where that asymmetry reaches the reader. An
+    agent's stored reply competes with the user testimony it was derived
+    from — and when the reply was wrong, ranking it first re-serves the
+    mistake as memory.
+
+    The discount reaches the standing terms only. Attention, confidence and
+    valence say how much the graph has come to trust the atom, and an
+    agent's say in that is what the discount exists to shrink; similarity
+    says how much the atom is *about the question*, which is a property of
+    the query. Discounting it too buried the one memory that held the
+    answer whenever that memory was the agent's own reply — "what did you
+    recommend?" has no user-authored answer, and measured on LongMemEval the
+    whole single-session-assistant category scored zero. On equal relevance
+    the user's version still wins.
+    """
+    agent = atom.metadata.get("source") == "agent"
+    return compute_salience(
+        similarity=similarity,
+        sti=atom.attention.sti,
+        confidence=atom.truth.confidence,
+        lti=atom.attention.lti,
+        valence=atom.valence.own,
+        intensity=atom.valence.own_intensity,
+        w_similarity=params["w_similarity"],
+        w_sti=params["w_sti"],
+        w_confidence=params["w_confidence"],
+        w_lti=params["w_lti"],
+        w_valence=params["w_valence"],
+        valence_weight=params["valence_weight"],
+        standing_scale=params["agent_source_trust"] if agent else 1.0,
+    )
 
 
 # How similar a stated warning must be to the query for find_warnings to

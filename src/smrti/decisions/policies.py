@@ -55,6 +55,21 @@ TASKS = (TASK_ROUTING, TASK_RERANK, TASK_SUPERSESSION, TASK_ENTITY, TASK_TONE)
 # - routing: off. On the gate set it avoided 1 of 11 skippable LLM calls
 #   and skipped claim extraction for 2 of 11 durable facts; a claim never
 #   extracted is lost for good.
+# - supersession: off. On ``bench/decisions/supersession_set.json`` it
+#   blocked 12 of the 13 cuts of a current fact the writer makes, but let
+#   one through ("I like coffee too" read as a contradiction at 0.97) and
+#   blocked 7 of 8 real updates: it answers "contradiction" for nearly
+#   every pair, and one destroyed fact is one too many for a default.
+# - entity: off. On ``bench/decisions/entity_set.json`` it merged nothing,
+#   right or wrong: no answer reached the 0.6 line, and the choices under
+#   it were no better than chance. An inference per uncertain mention for
+#   no merge is pure cost.
+# - tone: active. On ``bench/decisions/tone_set.json`` it damped 2 of 14
+#   speaker-toned sentences (both apologies) and none of the 15 about a
+#   failure, bug, rule or preference — no wrong-direction answer reached
+#   any confidence at all — and it only ever shrinks an estimated negative
+#   valence, never a stated one. It runs on the write path only, so recall
+#   never waits on the model.
 DEFAULT_MODES = {
     TASK_ROUTING: MODE_OFF,
     TASK_RERANK: MODE_OFF,

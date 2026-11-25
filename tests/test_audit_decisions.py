@@ -239,3 +239,34 @@ def test_an_unconfigured_recall_never_reaches_the_model(tmp_path, monkeypatch):
     assert engine.provider is not None and not engine.provider.ready
     assert engine.provider._loader is None
     assert audit.get_all() == []
+
+
+# ── the measurements behind the defaults ────────────────────────────────────
+
+
+def test_the_supersession_set_counts_an_unanswered_check_as_the_writers_cut():
+    """The supersession default rests on this set: a ``keep`` pair the check
+    allowed, or could not answer, is a current fact the writer destroys."""
+    from bench.decisions.supersession import DEFAULT_SET, load_items, score_verdicts
+
+    items = load_items(DEFAULT_SET)
+    keep = [i for i, item in enumerate(items) if item["label"] == "keep"]
+    verdicts = [{"label": "compatible", "allowed": False} for _ in items]
+    assert score_verdicts(items, verdicts)["destructive"] == []
+    verdicts[keep[0]] = {"label": None}
+    report = score_verdicts(items, verdicts)
+    assert len(report["destructive"]) == 1 and report["blocked_keep"]["blocked"] == len(keep) - 1
+
+
+def test_the_entity_set_fails_on_a_merge_into_the_wrong_candidate():
+    """The entity default rests on this set: merging a mention into anything
+    but its gold candidate is the one error that cannot be undone."""
+    from bench.decisions.entity import DEFAULT_SET, load_items, score_verdicts
+
+    items = load_items(DEFAULT_SET)
+    verdicts = [{"chosen": item["gold"], "raw_label": "c0"} for item in items]
+    report = score_verdicts(items, verdicts)
+    assert report["wrong_merges"] == [] and report["true_merges"]["merged"] == report["true_merges"]["n"]
+    separate = next(i for i, item in enumerate(items) if item["gold"] is None)
+    verdicts[separate] = {"chosen": 0, "raw_label": "c0"}
+    assert len(score_verdicts(items, verdicts)["wrong_merges"]) == 1

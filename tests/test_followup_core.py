@@ -148,8 +148,11 @@ def test_two_writers_creating_one_entity_make_one_atom(db_path, monkeypatch):
     first, second = Database(db_path), Database(db_path)
     first.initialize()
     second.initialize()
+    resolved = []
     rival = threading.Thread(
-        target=lambda: EntityResolver(second, _FixedEmbed()).resolve("Zarnow", "person", T, S, [S])
+        target=lambda: resolved.append(
+            EntityResolver(second, _FixedEmbed()).resolve("Zarnow", "person", T, S, [S])
+        )
     )
     real_fts_write = atomspace_module.fts_write
     started = threading.Event()
@@ -162,13 +165,61 @@ def test_two_writers_creating_one_entity_make_one_atom(db_path, monkeypatch):
         return real_fts_write(*args, **kwargs)
 
     monkeypatch.setattr(atomspace_module, "fts_write", interleaved)
-    EntityResolver(first, _FixedEmbed()).resolve("Zarnow", "person", T, S, [S])
+    resolved.append(EntityResolver(first, _FixedEmbed()).resolve("Zarnow", "person", T, S, [S]))
     rival.join()
 
     rows = first.fetchall("SELECT id FROM atoms WHERE label = 'Zarnow'")
     assert len(rows) == 1
+    assert resolved == [rows[0]["id"]] * 2
     first.close()
     second.close()
+
+
+def test_two_writers_stating_one_claim_draw_one_edge(mem, db_path, monkeypatch):
+    """A claim's edge was looked up, then drawn, as two writes, so two
+    processes stating the same fact at once each found no edge and each drew
+    one. The second writer runs on its own connection at the moment the
+    first is building its insert."""
+    from smrti.core.atomspace import AtomSpace
+    from smrti.extraction.extract import _link_claims
+
+    alice = mem.remember("Alice", type="concept")
+    berlin = mem.remember("Berlin", type="concept")
+    claims = [{"subject": "Alice", "predicate": "lives_in", "object": "Berlin"}]
+    entity_ids = {"Alice": alice, "Berlin": berlin}
+    other = Database(db_path)
+    other.initialize()
+    rival_mem = types.SimpleNamespace(
+        db=other, atomspace=AtomSpace(other, mem.embed), tenant_id=T, write_space=S
+    )
+    errors = []
+
+    def rival_claim():
+        try:
+            _link_claims(claims, dict(entity_ids), rival_mem, "e2")
+        except Exception as exc:
+            errors.append(exc)
+
+    rival = threading.Thread(target=rival_claim)
+    real_is_severe_retained = atomspace_module.is_severe_retained
+    started = threading.Event()
+
+    def interleaved(atom):
+        if not started.is_set():
+            started.set()
+            rival.start()
+            rival.join(timeout=1.0)
+        return real_is_severe_retained(atom)
+
+    monkeypatch.setattr(atomspace_module, "is_severe_retained", interleaved)
+    _link_claims(claims, dict(entity_ids), mem, "e1")
+    rival.join()
+
+    assert errors == []
+    edges = mem.db.fetchall("SELECT metadata FROM atoms WHERE type = 'relation' AND relation = 'lives_in'")
+    assert len(edges) == 1
+    assert sorted(json.loads(edges[0]["metadata"])["episodes"]) == ["e1", "e2"]
+    other.close()
 
 
 def test_two_writers_recording_one_claim_keep_both_episodes(mem, db_path, monkeypatch):

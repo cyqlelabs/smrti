@@ -331,17 +331,50 @@ class AtomSpace:
         valence: float = 0.0,
         metadata: Optional[dict] = None,
     ) -> str:
+        return self._link(
+            None, source_id, target_id, relation, tenant_id, space, truth, valence, metadata
+        )
+
+    def link_atoms_in(
+        self,
+        conn,
+        source_id: str,
+        target_id: str,
+        relation: str,
+        tenant_id: str,
+        space: str,
+        truth: Optional[TruthValue] = None,
+        valence: float = 0.0,
+        metadata: Optional[dict] = None,
+    ) -> str:
+        """:meth:`link_atoms` inside a :meth:`Database.transaction` the caller
+        holds. Looked up and drawn as two writes, an edge two processes drew
+        at once was drawn twice: each found none and each inserted one."""
+        return self._link(
+            conn, source_id, target_id, relation, tenant_id, space, truth, valence, metadata
+        )
+
+    def _link(
+        self, conn, source_id, target_id, relation, tenant_id, space, truth, valence, metadata
+    ) -> str:
+        """Draw the edge, or reuse the one already drawn, through the database
+        or, when *conn* is given, on the caller's transaction."""
         # Idempotent: boost STI and return existing relation if already present
-        existing = self._db.fetchone(
+        lookup = (
             """SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?
                AND relation = ? AND tenant_id = ? AND space = ?""",
             (source_id, target_id, relation, tenant_id, space),
         )
+        existing = self._db.fetchone(*lookup) if conn is None else conn.execute(*lookup).fetchone()
         if existing:
-            self._db.execute(
+            reuse = (
                 "UPDATE atoms SET sti = MIN(sti + 0.2, 3.0), updated_at = datetime('now') WHERE id = ?",
                 (existing["id"],),
             )
+            if conn is None:
+                self._db.execute(*reuse)
+            else:
+                conn.execute(*reuse)
             return existing["id"]
 
         if truth is None:
@@ -360,7 +393,7 @@ class AtomSpace:
             valence=ValenceModel(valence=max(-1.0, min(1.0, valence)), intensity=abs(valence)),
             metadata=dict(metadata or {}),
         )
-        return self.add_atom(link_atom)
+        return self.add_atom(link_atom) if conn is None else self.add_atom_in(conn, link_atom)
 
     def get_neighbors(
         self,

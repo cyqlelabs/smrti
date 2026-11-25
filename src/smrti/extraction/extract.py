@@ -724,16 +724,19 @@ def _link_claims(
                 # A claim edge read from an agent turn carries the agent's
                 # provenance, as the atoms it joins do: it is what lets the
                 # supersession writer tell a user's statement from a
-                # model's guess about the same subject.
-                new_edge = mem.atomspace.link_atoms(
-                    subj_id, obj_id, predicate,
-                    mem.tenant_id, mem.write_space,
-                    valence=claim_valence,
-                    metadata={
-                        **({"source": SOURCE_AGENT} if source == SOURCE_AGENT else {}),
-                        **({CLAIM_EPISODES: [episode_id]} if episode_id else {}),
-                    },
-                )
+                # model's guess about the same subject. Looked up and drawn
+                # in one write transaction, so two processes stating the same
+                # fact at once share one edge.
+                with mem.db.transaction() as conn:
+                    new_edge = mem.atomspace.link_atoms_in(
+                        conn, subj_id, obj_id, predicate,
+                        mem.tenant_id, mem.write_space,
+                        valence=claim_valence,
+                        metadata={
+                            **({"source": SOURCE_AGENT} if source == SOURCE_AGENT else {}),
+                            **({CLAIM_EPISODES: [episode_id]} if episode_id else {}),
+                        },
+                    )
                 _record_assertion(mem, new_edge, episode_id)
                 if _is_superseded(mem, new_edge):
                     _revive(mem, new_edge, obj_id, episode_id, source)

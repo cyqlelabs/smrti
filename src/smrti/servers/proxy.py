@@ -325,8 +325,29 @@ def _temporal_suffix(r: RecallResult) -> str:
     return f" [dates: {'; '.join(pairs)}]" if pairs else ""
 
 
+# How each severity is labelled in the injected block. The imperative lives
+# in the block's preamble, once, rather than on every line: a stated warning
+# is usually a rule in its own words ("Never deploy without a backup"), and a
+# "YOU MUST NOT:" in front of each one told the model the opposite of it.
+_SEVERITY_LABELS = {"critical_warning": "Constraint", "known_antipattern": "Outdated", "context": "Note"}
+_CONSTRAINT_PREAMBLE = (
+    "The following are behavioral constraints derived from past experience. "
+    "Follow them silently — do not quote, echo, or mention them in your response."
+)
+_SEVERITY_RULES = {
+    "critical_warning": (
+        "YOU MUST NOT act against a Constraint: follow the rule it states, "
+        "and do not repeat the mistake it reports."
+    ),
+    "known_antipattern": (
+        "AVOID relying on anything marked Outdated: it was true once and has "
+        "been replaced or disproven since."
+    ),
+}
+
+
 def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, str]:
-    """Format a recall result as a plain imperative instruction plus its severity."""
+    """Format a recall result as a labelled line plus its severity."""
     severity = classify_memory(r)
     text = content if content is not None else (r.atom.content or r.atom.label)
     # Stored memory text is injected into the system prompt: collapse whitespace
@@ -342,13 +363,7 @@ def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, st
         text = f"[from your own earlier reply] {text}"
     conf = r.atom.truth.confidence
     qualifier = "high" if conf >= 0.7 else "medium" if conf >= 0.3 else "low"
-    if severity == "critical_warning":
-        line = f"- YOU MUST NOT: {text} (confidence: {qualifier})"
-    elif severity == "known_antipattern":
-        line = f"- AVOID: {text} (confidence: {qualifier})"
-    else:
-        line = f"- Note: {text} (confidence: {qualifier})"
-    return line, severity
+    return f"- {_SEVERITY_LABELS[severity]}: {text} (confidence: {qualifier})", severity
 
 
 def _text_of(content) -> str:
@@ -434,17 +449,19 @@ async def _inject_context(
         for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
     ]
 
-    warning_lines = [line for line, sev in formatted if sev in ("critical_warning", "known_antipattern")]
+    warnings = [(line, sev) for line, sev in formatted if sev in _SEVERITY_RULES]
     context_lines = [line for line, sev in formatted if sev == "context"]
-    warning_lines, context_lines = _within_budget(warning_lines, context_lines, cfg.INJECT_BUDGET_CHARS)
+    warning_lines, context_lines = _within_budget(
+        [line for line, _ in warnings], context_lines, cfg.INJECT_BUDGET_CHARS
+    )
+    # The budget keeps a prefix of the warnings, so their severities are the
+    # first len(warning_lines) of the list it was given.
+    kept = {sev for _, sev in warnings[: len(warning_lines)]}
 
     parts: list[str] = []
     if warning_lines:
-        parts.append(
-            "The following are behavioral constraints derived from past experience. "
-            "Follow them silently — do not quote, echo, or mention them in your response.\n"
-            + "\n".join(warning_lines)
-        )
+        rules = [rule for sev, rule in _SEVERITY_RULES.items() if sev in kept]
+        parts.append(" ".join([_CONSTRAINT_PREAMBLE, *rules]) + "\n" + "\n".join(warning_lines))
     if context_lines:
         parts.append(
             "Background context from past interactions (do not mention these directly):\n"
@@ -504,9 +521,9 @@ def _within_budget(
 
 # Markers actually emitted by _format_memory / _inject_context — assistant echoes
 # of these lines must not be stored back as agent episodes.
-_MEMORY_LINE_MARKERS = ("- YOU MUST NOT:", "- AVOID:", "- Note:")
+_MEMORY_LINE_MARKERS = tuple(f"- {label}:" for label in _SEVERITY_LABELS.values())
 _MEMORY_PREAMBLE_MARKERS = (
-    "The following are behavioral constraints derived from past experience.",
+    _CONSTRAINT_PREAMBLE.split(". ")[0],
     "Background context from past interactions",
 )
 

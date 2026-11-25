@@ -446,3 +446,30 @@ def test_background_stores_wait_for_room_instead_of_growing_without_bound(monkey
         await asyncio.gather(*list(proxy._background_tasks))
 
     asyncio.run(_run())
+
+
+# ── T14 (proxy half): a stated rule is injected the way it was stated ────────
+
+def test_a_negated_warning_is_not_injected_under_a_second_negation():
+    """'YOU MUST NOT: Never deploy…' told the model to deploy; the imperative is now the preamble's."""
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from smrti.core.models import Atom, AtomType, RecallResult, TruthValue, Valence
+    from smrti.servers import proxy
+
+    rule = Atom(
+        type=AtomType.EPISODE, label="rule", content="Never deploy on Friday without a backup",
+        truth=TruthValue(probability=0.9, confidence=0.8),
+        valence=Valence(valence=-0.9, intensity=0.9), metadata={"valence_stated": True},
+    )
+    body = {"messages": [{"role": "user", "content": "Can I deploy today?"}]}
+    with patch.object(proxy, "_recall", AsyncMock(return_value=[RecallResult(atom=rule, salience=1, similarity=1)])), \
+            patch.object(proxy, "get_mem", return_value=MagicMock()):
+        _, injection, _ = asyncio.run(proxy._inject_context(body, "t", "s", ["s"]))
+
+    assert "YOU MUST NOT:" not in injection
+    assert "- Constraint: Never deploy on Friday without a backup (confidence: high)" in injection
+    assert injection.count("YOU MUST NOT") == 1
+    assert "Outdated" not in injection  # only the rule for a severity present is stated
+    assert proxy._scrub_injected_memory(injection + "\nThe real answer.") == "The real answer."

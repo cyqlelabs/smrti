@@ -33,6 +33,7 @@ from smrti.servers.common import (
     api_root,
     cached_instance,
     drain,
+    evicted_instances,
     serve,
     tenant_for,
     upstream_authorization,
@@ -48,7 +49,7 @@ logger = logging.getLogger("smrti.proxy")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     _bootstrap()  # write personality to DB before any other process can claim it
-    task = asyncio.create_task(run_reflect_loop(lambda: list(_instances.values())))
+    task = asyncio.create_task(run_reflect_loop(_all_mems))
     yield
     task.cancel()
     # An exchange is stored after its answer has gone out, so at shutdown the
@@ -162,6 +163,15 @@ def get_mem(tenant_id: str, write_space: str) -> Smrti:
         ),
         _mints, _INSTANCES_MAX, _background_tasks,
     )
+
+
+def _all_mems() -> list[Smrti]:
+    """Every instance the reflect loop consolidates: the cached ones, read
+    under the lock the executor threads mutate the cache under, and the
+    evicted ones still holding activity (see evicted_instances)."""
+    with _mints:
+        cached = list(_instances.values())
+    return [*cached, *evicted_instances()]
 
 
 app.include_router(create_viz_router(get_mem))

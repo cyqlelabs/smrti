@@ -7,6 +7,7 @@ import os
 from typing import Callable, Sequence
 
 from smrti import Smrti
+from smrti.servers.common import epoch_owed
 
 logger = logging.getLogger("smrti.reflect_loop")
 
@@ -41,9 +42,19 @@ def _has_pending(mem: Smrti) -> bool:
 
 
 def _evicted_with_pending(seen: list[Smrti], current: list[Smrti]) -> list[Smrti]:
-    """The instances seen before that are no longer served and still hold activity."""
+    """The instances seen before that are no longer served and still hold activity.
+
+    One whose owed epoch is still queued or running is left to it: its count
+    is reset only when that epoch ends, so a pass in between would run a
+    second epoch behind the first. Once the owed epoch ends, the server shows
+    the instance again whenever it holds activity (see
+    ``common.evicted_instances``).
+    """
     live = {id(mem) for mem in current}
-    return [mem for mem in seen if id(mem) not in live and _has_pending(mem)]
+    return [
+        mem for mem in seen
+        if id(mem) not in live and _has_pending(mem) and not epoch_owed(mem)
+    ]
 
 
 async def run_reflect_loop(get_instances: Callable[[], Sequence[Smrti]]) -> None:

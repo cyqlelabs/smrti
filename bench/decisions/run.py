@@ -150,9 +150,6 @@ def main(argv: list[str] | None = None) -> int:
         engine = build_engine(policy)
         reason = decisions_unavailable(engine)
         if reason is not None:
-            # preload() reports a failed load by returning False, not by
-            # raising, so the check this replaces never fired and a run
-            # without the model scored the fallback.
             print(f"the decision provider cannot answer: {reason}", file=sys.stderr)
             return 2
         routes = asyncio.run(route_all(items, engine, args.concurrency))

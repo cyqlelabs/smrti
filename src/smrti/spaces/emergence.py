@@ -148,6 +148,69 @@ def _refuse_foreign_bridge(
         )
 
 
+def _existing_bridges(
+    db, tenant_id: str, bridge_space: str
+) -> tuple[dict[tuple[str, str], str], set[tuple[str, str]]]:
+    """The bridge atoms already in *bridge_space*, by source pair, and the
+    pairs whose bridge atom was forgotten.
+
+    Keys are order-normalized so discovery from either parent space finds
+    the same stored bridge atom. A forgotten one is a tombstone: its pair is
+    neither refreshed nor bridged again.
+    """
+    rows = db.fetchall(
+        "SELECT id, metadata FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'",
+        (tenant_id, bridge_space),
+    )
+    bridged: dict[tuple[str, str], str] = {}
+    tombstones: set[tuple[str, str]] = set()
+    for row in rows:
+        meta = json.loads(row["metadata"] or "{}")
+        src_a = meta.get("bridge_source_a")
+        src_b = meta.get("bridge_source_b")
+        if not (src_a and src_b):
+            continue
+        key = tuple(sorted((src_a, src_b)))
+        if meta.get("forgotten"):
+            tombstones.add(key)
+        else:
+            bridged[key] = row["id"]
+    return bridged, tombstones
+
+
+def _write_bridge(
+    pair: AtomPair, bridge_id: str | None, bridge_space: str, tenant_id: str, db, embed_engine, atomspace
+) -> None:
+    """Write one pair's bridge atom — new, or refreshed in place when
+    *bridge_id* names the existing one — and whichever of its two edges it
+    lacks, in one transaction."""
+    bridge_atom = _merge_pair(pair, bridge_space, tenant_id)
+    deferred = _Deferred(db)
+    writer = AtomSpace(deferred, embed_engine)
+    linked: set[str] = set()
+    if bridge_id is None:
+        writer.add_atom(bridge_atom)
+    else:
+        bridge_atom.id = bridge_id
+        writer.update_atom(bridge_atom)
+        linked = {
+            edge.target_id
+            for edge in atomspace.get_relations(bridge_id, tenant_id, [bridge_space])
+            if edge.relation == "bridge" and edge.source_id == bridge_id
+        }
+    for source in (pair.atom_a, pair.atom_b):
+        if source.id not in linked:
+            writer.link_atoms(
+                source_id=bridge_atom.id,
+                target_id=source.id,
+                relation="bridge",
+                tenant_id=tenant_id,
+                space=bridge_space,
+                truth=TruthValue(probability=pair.similarity, confidence=0.8),
+            )
+    db.execute_batch(deferred.statements)
+
+
 def materialize_bridge(
     overlap: SpaceOverlap,
     tenant_id: str,
@@ -188,63 +251,15 @@ def materialize_bridge(
         return 0
 
     bridge_space = overlap.bridge_space_name
-    count = 0
-
-    # Index existing bridge atoms by their source pair so we can update.
-    # Keys are order-normalized so discovery from either parent space finds
-    # the same stored bridge atom. A forgotten one is a tombstone: its pair
-    # is neither refreshed nor bridged again.
-    existing = db.fetchall(
-        "SELECT id, metadata FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'",
-        (tenant_id, bridge_space),
-    )
-    source_pair_to_id: dict[tuple[str, str], str] = {}
-    tombstones: set[tuple[str, str]] = set()
-    sources: set[str] = set()
-    for row in existing:
-        meta = json.loads(row["metadata"] or "{}")
-        src_a = meta.get("bridge_source_a")
-        src_b = meta.get("bridge_source_b")
-        if src_a and src_b:
-            key = tuple(sorted((src_a, src_b)))
-            if meta.get("forgotten"):
-                tombstones.add(key)
-            else:
-                source_pair_to_id[key] = row["id"]
-            sources.update(key)
+    bridged, tombstones = _existing_bridges(db, tenant_id, bridge_space)
+    sources = {atom_id for key in (*bridged, *tombstones) for atom_id in key}
     _refuse_foreign_bridge(bridge_space, sources, overlap, tenant_id, db)
 
+    count = 0
     for pair in overlap.pairs:
         key = tuple(sorted((pair.atom_a.id, pair.atom_b.id)))
         if key in tombstones:
             continue
-        bridge_atom = _merge_pair(pair, bridge_space, tenant_id)
-        deferred = _Deferred(db)
-        writer = AtomSpace(deferred, embed_engine)
-
-        if key in source_pair_to_id:
-            bridge_atom.id = source_pair_to_id[key]
-            writer.update_atom(bridge_atom)
-            linked = {
-                edge.target_id
-                for edge in atomspace.get_relations(bridge_atom.id, tenant_id, [bridge_space])
-                if edge.relation == "bridge" and edge.source_id == bridge_atom.id
-            }
-        else:
-            writer.add_atom(bridge_atom)
-            linked = set()
-
-        for source in (pair.atom_a, pair.atom_b):
-            if source.id not in linked:
-                writer.link_atoms(
-                    source_id=bridge_atom.id,
-                    target_id=source.id,
-                    relation="bridge",
-                    tenant_id=tenant_id,
-                    space=bridge_space,
-                    truth=TruthValue(probability=pair.similarity, confidence=0.8),
-                )
-        db.execute_batch(deferred.statements)
+        _write_bridge(pair, bridged.get(key), bridge_space, tenant_id, db, embed_engine, atomspace)
         count += 1
-
     return count

@@ -201,21 +201,27 @@ def _contextual_similarity(
         cache = {} if neighbor_cache is None else neighbor_cache
         vec_a = _neighbor_context_embedding(atom_a, db, embed_engine, cache)
         vec_b = _neighbor_context_embedding(atom_b, db, embed_engine, cache)
-    typed = atom_a.entity_type is not None or atom_b.entity_type is not None
-    linked = vec_a is not None or vec_b is not None
-    if not typed and not linked:
-        return max(0.0, min(1.0, emb_sim))
+    if _context_free(atom_a, atom_b, vec_a, vec_b):
+        return _unit(emb_sim)
 
-    et_score = _entity_type_score(atom_a, atom_b)
-    w_emb = W_EMBEDDING
-    score = W_ENTITY_TYPE * (NEUTRAL if et_score is None else et_score)
+    score = W_EMBEDDING * emb_sim + W_ENTITY_TYPE * _or_neutral(_entity_type_score(atom_a, atom_b))
     if embed_engine is None:
-        w_emb += W_NEIGHBORHOOD
-    elif vec_a is not None and vec_b is not None:
-        score += W_NEIGHBORHOOD * _cosine_similarity(vec_a, vec_b)
-    else:
-        score += W_NEIGHBORHOOD * NEUTRAL
-    return max(0.0, min(1.0, w_emb * emb_sim + score))
+        return _unit(score + W_NEIGHBORHOOD * emb_sim)
+    both_linked = vec_a is not None and vec_b is not None
+    return _unit(score + W_NEIGHBORHOOD * _or_neutral(_cosine_similarity(vec_a, vec_b) if both_linked else None))
+
+
+def _context_free(atom_a: Atom, atom_b: Atom, vec_a: list[float] | None, vec_b: list[float] | None) -> bool:
+    """Whether neither atom carries an entity type or neighbours."""
+    return atom_a.entity_type is None and atom_b.entity_type is None and vec_a is None and vec_b is None
+
+
+def _or_neutral(score: float | None) -> float:
+    return NEUTRAL if score is None else score
+
+
+def _unit(score: float) -> float:
+    return max(0.0, min(1.0, score))
 
 
 def _match_atoms(
@@ -237,45 +243,14 @@ def _match_atoms(
         matched_a_ids: IDs from atoms_a that were matched
         matched_b_ids: IDs from atoms_b that were matched
     """
-    emb_a = _get_embeddings([atom.id for atom in atoms_a], db)
-    emb_b = _get_embeddings([atom.id for atom in atoms_b], db)
-
+    atom_a_map = {a.id: a for a in atoms_a}
+    atom_b_map = {a.id: a for a in atoms_b}
     pairs: list[AtomPair] = []
     matched_a: set[str] = set()
     matched_b: set[str] = set()
-    atom_b_map = {a.id: a for a in atoms_b}
-    atom_a_map = {a.id: a for a in atoms_a}
-
-    # Pre-filter: only compute expensive contextual similarity for pairs whose
-    # raw embedding similarity is above a looser pre-filter (threshold - 0.15).
-    # This avoids neighborhood embedding calls for clearly-unrelated pairs.
-    # The raw similarities come from one matrix product — two full samples
-    # are a quarter of a million pairs, which as Python cosines was seconds
-    # per operation.
-    pre_filter = max(0.0, threshold - 0.15)
-
-    neighbor_cache: dict[str, list[float] | None] = {}
-    candidates: list[tuple[float, str, str]] = []
-    if emb_a and emb_b:
-        ids_a, ids_b = list(emb_a), list(emb_b)
-        sims = _unit_rows([emb_a[i] for i in ids_a]) @ _unit_rows([emb_b[i] for i in ids_b]).T
-        hits = list(zip(*np.nonzero(sims >= pre_filter)))
-        if embed_engine is not None and hits:
-            _prefetch_neighbor_contexts(
-                [atom_a_map[ids_a[i]] for i in sorted({i for i, _ in hits})]
-                + [atom_b_map[ids_b[j]] for j in sorted({j for _, j in hits})],
-                db, embed_engine, neighbor_cache,
-            )
-        for i, j in hits:
-            aid, bid = ids_a[i], ids_b[j]
-            ctx_sim = _contextual_similarity(
-                atom_a_map[aid], atom_b_map[bid], float(sims[i, j]), db, embed_engine,
-                neighbor_cache=neighbor_cache,
-            )
-            if ctx_sim >= threshold:
-                candidates.append((ctx_sim, aid, bid))
 
     # Sort by contextual similarity descending, greedily assign
+    candidates = _candidates(atom_a_map, atom_b_map, db, threshold, embed_engine)
     candidates.sort(key=lambda x: x[0], reverse=True)
     for sim, aid, bid in candidates:
         if aid in matched_a or bid in matched_b:
@@ -289,6 +264,55 @@ def _match_atoms(
         matched_b.add(bid)
 
     return pairs, matched_a, matched_b
+
+
+def _raw_similarities(
+    atom_a_map: dict[str, Atom], atom_b_map: dict[str, Atom], db
+) -> tuple[list[str], list[str], np.ndarray]:
+    """The ids of the sampled atoms that have vectors, and the cosine
+    similarity of every a × b pair of them."""
+    emb_a = _get_embeddings(list(atom_a_map), db)
+    emb_b = _get_embeddings(list(atom_b_map), db)
+    ids_a, ids_b = list(emb_a), list(emb_b)
+    if not ids_a or not ids_b:
+        return ids_a, ids_b, np.zeros((len(ids_a), len(ids_b)), dtype=np.float32)
+    return ids_a, ids_b, _unit_rows([emb_a[i] for i in ids_a]) @ _unit_rows([emb_b[i] for i in ids_b]).T
+
+
+def _candidates(
+    atom_a_map: dict[str, Atom],
+    atom_b_map: dict[str, Atom],
+    db,
+    threshold: float,
+    embed_engine=None,
+) -> list[tuple[float, str, str]]:
+    """Every pair whose contextual similarity reaches *threshold*, as
+    ``(similarity, a id, b id)``.
+
+    Pre-filter: only compute expensive contextual similarity for pairs whose
+    raw embedding similarity is above a looser pre-filter (threshold - 0.15).
+    This avoids neighborhood embedding calls for clearly-unrelated pairs.
+    The raw similarities come from one matrix product — two full samples
+    are a quarter of a million pairs, which as Python cosines was seconds
+    per operation.
+    """
+    ids_a, ids_b, sims = _raw_similarities(atom_a_map, atom_b_map, db)
+    rows, cols = np.nonzero(sims >= max(0.0, threshold - 0.15))
+
+    neighbor_cache: dict[str, list[float] | None] = {}
+    if embed_engine is not None and len(rows):
+        involved = [atom_a_map[ids_a[i]] for i in np.unique(rows)] + [atom_b_map[ids_b[j]] for j in np.unique(cols)]
+        _prefetch_neighbor_contexts(involved, db, embed_engine, neighbor_cache)
+    found: list[tuple[float, str, str]] = []
+    for i, j in zip(rows, cols):
+        aid, bid = ids_a[i], ids_b[j]
+        ctx_sim = _contextual_similarity(
+            atom_a_map[aid], atom_b_map[bid], float(sims[i, j]), db, embed_engine,
+            neighbor_cache=neighbor_cache,
+        )
+        if ctx_sim >= threshold:
+            found.append((ctx_sim, aid, bid))
+    return found
 
 
 def space_overlap(

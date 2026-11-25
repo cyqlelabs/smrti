@@ -10,7 +10,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "Cyqle Labs", email = "nico@cyqle.com" }]
-keywords = ["memory", "ai", "agents", "atomspace", "bayesian", "knowledge-graph"]
+keywords = ["memory", "ai", "agents", "atomspace", "pln", "knowledge-graph"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",

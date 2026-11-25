@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import re
 
 DB: str = os.environ.get("SMRTI_DB", "~/.smrti/memory.db")
 PERSONALITY: str = os.environ.get("SMRTI_PERSONALITY", "balanced")
@@ -9,8 +10,45 @@ TENANT_ID: str = os.environ.get("SMRTI_TENANT_ID", "default")
 SPACE: str = os.environ.get("SMRTI_SPACE", "default")
 
 # Optional API key — when set, REST/proxy/viz require it on every request
-# (Authorization: Bearer <key> or X-Api-Key: <key>).
+# (Authorization: Bearer <key> or X-Api-Key: <key>). It may act on every tenant.
 API_KEY: str = os.environ.get("SMRTI_API_KEY", "")
+
+
+def _parse_api_keys(raw: str) -> dict[str, tuple[str, ...]]:
+    """Read SMRTI_API_KEYS: ``key:tenant1|tenant2`` entries split by ``;`` or ``,``.
+
+    A key bound this way may act only on the tenants it lists, and acts on the
+    first of them when a request names none. The key ends at the first ``:``,
+    so a key cannot contain one, and a tenant name cannot contain ``|``, ``;``
+    or ``,``. A malformed entry stops the server rather than leaving a key
+    that silently grants nothing; the message names the entry by position so
+    the key itself never reaches a log.
+    """
+    keys: dict[str, tuple[str, ...]] = {}
+    for position, entry in enumerate(re.split(r"[;,]", raw), start=1):
+        entry = entry.strip()
+        if not entry:
+            continue
+        key, sep, listed = entry.partition(":")
+        key = key.strip()
+        tenants = tuple(t.strip() for t in listed.split("|") if t.strip())
+        if not sep or not key or not tenants:
+            raise ValueError(
+                f"SMRTI_API_KEYS entry {position} must read key:tenant1|tenant2"
+            )
+        if key in keys:
+            raise ValueError(f"SMRTI_API_KEYS entry {position} repeats an earlier key")
+        keys[key] = tenants
+    return keys
+
+
+# Keys bound to tenants (see _parse_api_keys); SMRTI_API_KEY above stays the
+# key for every tenant. Either one being set turns authentication on.
+API_KEYS: dict[str, tuple[str, ...]] = _parse_api_keys(os.environ.get("SMRTI_API_KEYS", ""))
+
+# Largest request body REST and the proxy accept, in bytes; a larger one gets
+# a 413 before it is read into memory. 0 turns the limit off.
+MAX_BODY_BYTES: int = int(os.environ.get("SMRTI_MAX_BODY_BYTES", str(8 * 1024 * 1024)))
 
 # Extra SQLite paths the visualizer's ?db= param may open — os.pathsep-separated.
 # Empty by default, so the only browsable DB is the one the server was started
@@ -66,9 +104,10 @@ TEMPORAL: bool = os.environ.get("SMRTI_TEMPORAL", "1") == "1" and EXTRACT_MODE !
 EXTRACT_THINKING: str = os.environ.get("SMRTI_EXTRACT_THINKING", "disabled")
 
 # Semantic decisions (``smrti.decisions``) — read there, listed here so the
-# reference is in one place: SMRTI_DECISIONS (off | shadow | active, with
-# active the default for every task), SMRTI_DECISIONS_ROUTING / _RERANK / _SUPERSESSION
-# / _ENTITY (per-task override), SMRTI_DECISIONS_MODEL (the model directory,
+# reference is in one place: SMRTI_DECISIONS (off | shadow | active for every
+# task; left unset, each task runs under its own default from
+# ``decisions/policies.py``), SMRTI_DECISIONS_ROUTING / _RERANK / _SUPERSESSION
+# / _ENTITY / _TONE (per-task override), SMRTI_DECISIONS_MODEL (the model directory,
 # found through ``decisions/model.py`` when unset), SMRTI_DECISIONS_DEVICE,
 # SMRTI_DECISIONS_THREADS (cores one inference may hold),
 # SMRTI_DECISIONS_TIMEOUT (how long one decision may hold up the request
@@ -76,4 +115,3 @@ EXTRACT_THINKING: str = os.environ.get("SMRTI_EXTRACT_THINKING", "disabled")
 # provider that just failed, so an unavailable model costs one deadline per
 # window instead of one per recall), SMRTI_DECISIONS_CACHE (answers kept), and
 # the thresholds in ``decisions/policies.py``.
-DECISIONS: str = os.environ.get("SMRTI_DECISIONS", "active")

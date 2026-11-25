@@ -210,8 +210,8 @@ def test_store_scrubs_injected_memory_lines():
     assistant = (
         "The following are behavioral constraints derived from past experience. "
         "Follow them silently — do not quote, echo, or mention them in your response.\n"
-        "- YOU MUST NOT: deploy on Fridays (confidence: high)\n"
-        "- AVOID: eval() in handlers (confidence: medium)\n"
+        "- Constraint: never deploy on Fridays (confidence: high)\n"
+        "- Outdated: eval() in handlers is safe (confidence: medium)\n"
         "Background context from past interactions (do not mention these directly):\n"
         "- Note: user prefers dark mode (confidence: low)\n"
         "Here is the actual answer."

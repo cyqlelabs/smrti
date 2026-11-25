@@ -13,6 +13,7 @@ from smrti import Smrti, _write_metadata
 from smrti.personality.params import PersonalityProfile, load_preset
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
+from smrti.servers.common import api_root, drain
 from smrti.servers.tools import TOOLS
 from smrti.servers.reflect_loop import run_reflect_loop
 
@@ -191,7 +192,10 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 return {"status": "ok", "preset": preset or "custom"}
             if not preset:
                 return {"error": "action requires a 'preset' or 'params' argument"}
-            mem.set_personality(preset)
+            try:
+                mem.set_personality(preset)
+            except ValueError as exc:  # an unknown preset name
+                return {"error": str(exc)}
             return {"status": "ok", "preset": preset}
         return {"error": f"Unknown action: {action}"}
 
@@ -333,6 +337,11 @@ def run_mcp_server() -> None:
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, handle_tool, mem, name, arguments)
+        if "error" in result:
+            # The SDK reports a raised error as a tool error (isError), which
+            # is how a client tells a refused call from a result: returned as
+            # a plain dict, a refused personality change read as a success.
+            raise ValueError(result["error"])
         if name == "smrti_remember" and cfg.EXTRACT:
             episode_id = result.get("atom_id", "")
             content = arguments.get("content", "")
@@ -340,7 +349,7 @@ def run_mcp_server() -> None:
                 from smrti.extraction.extract import extract_and_link_serialized
                 task = asyncio.create_task(
                     extract_and_link_serialized(
-                        episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
+                        episode_id, content, mem, "", cfg.EXTRACT_MODEL, api_root(cfg.EXTRACT_URL),
                         arguments.get("source", "user"), mode=cfg.EXTRACT_MODE,
                     )
                 )
@@ -359,5 +368,8 @@ def run_mcp_server() -> None:
                 )
         finally:
             task.cancel()
+            # Extractions still running are graphs for memories the client
+            # was already told it stored; they used to be dropped here.
+            await drain(_background_tasks)
 
     asyncio.run(_main())

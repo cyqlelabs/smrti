@@ -105,12 +105,32 @@ def _signal(pid: int, sig: int) -> None:
 
 def _warn_if_exposed(host: str) -> None:
     """Warn once at startup when binding beyond loopback without an API key."""
-    if host in _LOOPBACK_HOSTS or os.environ.get("SMRTI_API_KEY"):
+    if host in _LOOPBACK_HOSTS or os.environ.get("SMRTI_API_KEY") or os.environ.get("SMRTI_API_KEYS"):
         return
     typer.secho(
         f"WARNING: binding to {host} without SMRTI_API_KEY set — the API is "
         "reachable from other machines with no authentication. "
         "Set SMRTI_API_KEY to require a key on every request.",
+        fg=typer.colors.YELLOW,
+        err=True,
+        bold=True,
+    )
+
+
+def _warn_if_unauthenticated(host: str, server: str) -> None:
+    """Warn at startup when a server that checks no key binds beyond loopback.
+
+    The town simulation and the decision server take no API key at all —
+    Factor calls the decision server unauthenticated on loopback — so no
+    environment variable makes such a bind safe, and the advice is to keep
+    them on 127.0.0.1.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return
+    typer.secho(
+        f"WARNING: binding the {server} to {host} — it checks no API key, so "
+        "anyone who can reach this address can use it. Bind it to 127.0.0.1 "
+        "unless the network in front of it is trusted.",
         fg=typer.colors.YELLOW,
         err=True,
         bold=True,
@@ -314,6 +334,7 @@ def serve_decisions(
         directory = model or str(resolve_student())
     except (FileNotFoundError, ValueError) as exc:
         raise typer.BadParameter(str(exc)) from exc
+    _warn_if_unauthenticated(host, "decision server")
     typer.echo(f"Starting Smrti student decisions on http://{host}:{port}/v1/systemone ({directory})")
     with _pidfile("decisions", port):
         run_student_server(directory, host=host, port=port, threads=threads or None)
@@ -346,6 +367,7 @@ def serve_town(
 
     from smrti_town.server import serve
 
+    _warn_if_unauthenticated(host, "town simulation")
     url = f"http://{host}:{port}"
     typer.echo(f"Starting smrti-town simulation on {url}")
     typer.echo(f"DB: {os.path.expanduser(db)} | Tenant: {tenant_id}")

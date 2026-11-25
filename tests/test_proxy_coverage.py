@@ -226,6 +226,6 @@ def test_inject_context_serves_agent_episodes_as_the_models_own():
         return result, ctx, mems
 
     result, ctx, mems = run(_run())
-    assert "[from your own earlier reply] Agent output" in ctx
+    assert '[from your own earlier reply] "Agent output"' in ctx
     assert result["messages"][0]["role"] == "system"
     assert mems[0]["source"] == "agent"

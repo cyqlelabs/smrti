@@ -18,6 +18,7 @@ from smrti.servers.common import (
     api_root,
     cached_instance,
     drain,
+    evicted_instances,
     serve,
     tenant_for,
     upstream_authorization,
@@ -149,10 +150,17 @@ async def _amem_for(request: Request, space: Optional[str] = None) -> Smrti:
 
 
 def _all_mems() -> list[Smrti]:
-    """Every live instance, for the reflect loop — each space gets its own epochs."""
-    home = _home()
+    """Every instance for the reflect loop — each space gets its own epochs.
+
+    The loop calls this on the event loop, so a configured instance no
+    request has built yet is left out rather than minted here: it has no
+    activity to consolidate. Evicted instances still holding activity are
+    included (see :func:`evicted_instances`).
+    """
+    home = [] if _mem is None else [_mem]
     with _mints:
-        return [home, *_space_mems.values(), *_tenant_mems.values()]
+        cached = [*_space_mems.values(), *_tenant_mems.values()]
+    return [*home, *cached, *evicted_instances()]
 
 
 async def _run_sync(fn, *args):
@@ -376,7 +384,7 @@ async def get_personality(request: Request, space: Optional[SpaceName] = Query(N
     instance: minting one writes its personality row, so asking about three
     unused spaces used to create three rows.
     """
-    home = get_mem()
+    home = await _run_sync(get_mem)
     tenant = tenant_for(request, None, cfg.TENANT_ID)
     row = await _run_sync(
         home.db.fetchone,

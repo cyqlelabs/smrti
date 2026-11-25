@@ -5,7 +5,9 @@ import asyncio
 import logging
 import secrets
 import sys
+import threading
 from collections import OrderedDict
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from urllib.parse import parse_qs
 
@@ -158,6 +160,8 @@ _VIZ_LOGIN_FORM = """<!doctype html><meta charset="utf-8"><title>smrti visualize
 <form method="post" action="viz/login"><label>API key
 <input type="password" name="key" autocomplete="current-password" autofocus required></label>
 <button type="submit">Open</button></form>"""
+# The most the login form may post: a key, URL-encoded, with room to spare.
+_LOGIN_BODY_MAX = 4096
 
 
 async def _viz_login(request: Request):
@@ -170,8 +174,20 @@ async def _viz_login(request: Request):
     landed in the access log and the history — and the browser keeps only a
     random session token, in an HttpOnly, SameSite=Strict cookie the auth
     check accepts on reads.
+
+    The login is answered by the auth middleware, before BodyLimit sees the
+    request, so it bounds its own read: it read any body whole, and a
+    10 KB post passed a 64-byte limit unauthenticated.
     """
-    body = (await request.body()).decode("utf-8", "replace")
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > _LOGIN_BODY_MAX:
+        return _too_large(_LOGIN_BODY_MAX)
+    raw = b""
+    async for chunk in request.stream():
+        raw += chunk
+        if len(raw) > _LOGIN_BODY_MAX:
+            return _too_large(_LOGIN_BODY_MAX)
+    body = raw.decode("utf-8", "replace")
     supplied = (parse_qs(body).get("key") or [""])[0]
     if _tenants_of(supplied) is _NO_KEY:
         return HTMLResponse(_VIZ_LOGIN_FORM, status_code=401)
@@ -272,10 +288,19 @@ async def drain(tasks: set) -> None:
 
     Each task is a memory a client was already answered as though it were
     stored, so shutdown waits for them, and the wait is bounded because one
-    hung model call must not hold the process up.
+    hung model call must not hold the process up. The epochs owed by evicted
+    instances are waited for too (see :func:`consolidate_evicted`), and those
+    the epoch worker has not started by then are dropped: the worker's thread
+    is joined at exit, and a queue of them would hold the process past the
+    bound the same way.
     """
-    if tasks:
-        await asyncio.wait(list(tasks), timeout=DRAIN_SECONDS)
+    with _evicted_lock:
+        epochs = list(_epochs)
+    pending = [*tasks, *(asyncio.wrap_future(future) for future in epochs)]
+    if pending:
+        await asyncio.wait(pending, timeout=DRAIN_SECONDS)
+    for future in epochs:
+        future.cancel()
 
 
 def cached_instance(cache: OrderedDict, key, mint, lock, limit: int, tasks: set):
@@ -307,6 +332,32 @@ def cached_instance(cache: OrderedDict, key, mint, lock, limit: int, tasks: set)
     return mem
 
 
+# Runs the epochs owed by instances evicted off the event loop — which is
+# where most evictions happen, since requests resolve their instance in the
+# executor — so that no request waits on an epoch it merely caused. One
+# worker: epochs on one database contend for its write lock, so a second
+# would only wait.
+_epoch_worker = ThreadPoolExecutor(max_workers=1, thread_name_prefix="smrti-evicted-epoch")
+# Guards the three collections below, which request threads, the epoch
+# worker and the event loop all touch. Instances are kept by id, since the
+# reflect loop may hold unhashable ones; an id stays unique while its entry
+# lives, because the entry — or, for _owing, the epoch's own callback —
+# holds the instance.
+_evicted_lock = threading.Lock()
+# The ids of instances whose owed epoch is queued or running.
+_owing: set[int] = set()
+# The epoch worker's futures, for drain. They are kept out of a server's own
+# task set, which holds asyncio futures and is awaited as such.
+_epochs: set = set()
+# Evicted instances a request may still hold, by id, each with the number of
+# reflect passes in a row that found it idle (see evicted_instances).
+_evicted: dict[int, tuple] = {}
+# How many idle passes in a row let an evicted instance go: two, so that it
+# is held for at least one whole interval after its eviction or its last
+# epoch, whichever came later.
+_IDLE_PASSES = 2
+
+
 def consolidate_evicted(mem, tasks: set) -> None:
     """Run the epoch an instance evicted from a cache is owed.
 
@@ -314,23 +365,81 @@ def consolidate_evicted(mem, tasks: set) -> None:
     instance takes its activity count with it: with more active spaces than
     a cache holds, spaces left before their epoch came round, and none of
     them ever aged. One with activity since its last epoch is consolidated
-    as it leaves, in the executor, and tracked in *tasks* so shutdown waits
-    for it. Nothing runs when the reflect loop is off.
+    as it leaves, never in the thread that evicted it: run there, the epoch
+    held whichever request caused the eviction for all of it, and its
+    failure became that request's. On the event loop it goes to the
+    executor and is tracked in *tasks*; off it, to the epoch worker, which
+    drain also waits for. Either way a failure is logged, and the instance
+    is then handed to the reflect loop for what is done through it later.
+    Nothing runs when the reflect loop is off.
     """
     from smrti.servers import reflect_loop
 
     ops = getattr(mem, "ops_since_reflect", None)
-    if not isinstance(ops, int) or ops <= 0 or reflect_loop.REFLECT_INTERVAL <= 0:
+    if not isinstance(ops, int) or reflect_loop.REFLECT_INTERVAL <= 0:
         return
+    if ops <= 0:
+        with _evicted_lock:
+            _evicted[id(mem)] = (mem, 0)
+        return
+    with _evicted_lock:
+        _owing.add(id(mem))
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        mem.reflect()  # no event loop to keep free
-        return
-    future = loop.run_in_executor(None, mem.reflect)
-    tasks.add(future)
-    future.add_done_callback(tasks.discard)
+        future = _epoch_worker.submit(mem.reflect)
+        with _evicted_lock:
+            _epochs.add(future)
+    else:
+        future = loop.run_in_executor(None, mem.reflect)
+        tasks.add(future)
+        future.add_done_callback(tasks.discard)
     future.add_done_callback(_log_failure)
+    future.add_done_callback(lambda done: _owed_epoch_done(mem, done))
+
+
+def _owed_epoch_done(mem, future) -> None:
+    """Hand an instance whose owed epoch has ended to the reflect loop.
+
+    Only now, not at eviction: the loop would otherwise see the activity the
+    epoch is still consolidating and run a second one behind it, decaying
+    the space twice for one interval of use.
+    """
+    with _evicted_lock:
+        _owing.discard(id(mem))
+        _epochs.discard(future)
+        _evicted[id(mem)] = (mem, 0)
+
+
+def epoch_owed(mem) -> bool:
+    """Whether *mem*'s owed epoch is still queued or running."""
+    with _evicted_lock:
+        return id(mem) in _owing
+
+
+def evicted_instances() -> list:
+    """The evicted instances holding activity no epoch has consolidated,
+    for the reflect loop to run beside a cache's own.
+
+    A request that resolved an instance before it was evicted can still be
+    using it, and what it does there lands on an activity count no cache
+    holds any more; held weakly, the instance would be gone as soon as that
+    request let go, its activity with it. Each one is held until
+    _IDLE_PASSES passes in a row find it idle, and is let go then; activity
+    later still — a request holding an evicted instance across that long —
+    is not consolidated. Called once per pass, by the reflect loop alone.
+    """
+    pending = []
+    with _evicted_lock:
+        for key, (mem, idle) in list(_evicted.items()):
+            if mem.ops_since_reflect > 0:
+                pending.append(mem)
+                _evicted[key] = (mem, 0)
+            elif idle + 1 >= _IDLE_PASSES:
+                del _evicted[key]
+            else:
+                _evicted[key] = (mem, idle + 1)
+    return pending
 
 
 def _log_failure(future) -> None:

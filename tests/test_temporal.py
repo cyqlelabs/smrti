@@ -252,12 +252,12 @@ def test_server_modes_resolve_deixis_by_default():
 
 def test_a_parser_that_raises_resolves_nothing(monkeypatch):
     """dateparser is a dependency, not a promise — a miss must cost nothing."""
-    import dateparser
+    from dateparser.date import DateDataParser
 
     def _boom(*args, **kwargs):
         raise RuntimeError("locale data missing")
 
-    monkeypatch.setattr(dateparser, "parse", _boom)
+    monkeypatch.setattr(DateDataParser, "get_date_data", _boom)
 
     assert resolve_spans("La sesión es mañana", BASE, StubNER([("mañana", "date")])) == []
 

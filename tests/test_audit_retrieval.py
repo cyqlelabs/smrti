@@ -323,3 +323,65 @@ def test_find_warnings_reaches_a_stated_warning_the_candidate_pool_misses(table_
     assert [r.atom.id for r in found] == [warning]
     assert found[0].similarity == pytest.approx(0.7, abs=1e-3)
 
+
+# ── T17: a superseded claim stays visible as what used to be true ─────────────
+
+def _superseded_preference(m):
+    """Nico preferred tea, then said he now prefers coffee instead."""
+    from smrti.extraction.extract import _link_claims
+    from smrti.extraction.resolve import EntityResolver
+
+    resolver = EntityResolver(m.db, m.embed)
+    ids = {name: resolver.resolve(name, kind, "t", "s", ["s"])
+           for name, kind in (("Nico", "person"), ("tea", "preference"), ("coffee", "preference"))}
+    first = m.remember("Nico prefers tea")
+    _link_claims([{"subject": "Nico", "predicate": "prefers", "object": "tea"}], ids, m, first)
+    second = m.remember("Nico now prefers coffee instead")
+    _link_claims([{"subject": "Nico", "predicate": "prefers", "object": "coffee",
+                   "supersedes": "tea"}], ids, m, second)
+    old_edge = m.db.fetchone(
+        "SELECT id FROM atoms WHERE type = 'relation' AND relation = 'prefers' AND target_id = ?",
+        (ids["tea"],),
+    )["id"]
+    return ids, old_edge
+
+
+def test_a_superseded_claim_stays_a_known_antipattern_after_its_confidence_decays(table_mem):
+    """known_antipattern needed confidence over 0.3, which a superseded claim
+    loses to decay within a few epochs; from then on the claim the user
+    abandoned read as plain context."""
+    from smrti.core.models import RecallResult, atom_from_row
+    from smrti.retrieval.classify import classify_memory
+
+    ids, old_edge = _superseded_preference(table_mem)
+    # The stamp extraction puts on a superseded claim edge, carried by the
+    # belief it pointed at as well.
+    table_mem.db.execute(
+        "UPDATE atoms SET metadata = json_set(metadata, '$.superseded_by', ?) WHERE id = ?",
+        ("coffee", ids["tea"]),
+    )
+    fresh = table_mem.believe("the user dislikes licorice", probability=0.1)
+    for _ in range(50):
+        table_mem.reflect()
+
+    def severity(atom_id):
+        row = table_mem.db.fetchone("SELECT * FROM atoms WHERE id = ?", (atom_id,))
+        return classify_memory(RecallResult(atom=atom_from_row(row), salience=1.0, similarity=1.0))
+
+    assert table_mem.db.fetchone("SELECT confidence FROM atoms WHERE id = ?", (old_edge,))["confidence"] < 0.3
+    assert severity(old_edge) == "known_antipattern"
+    assert severity(ids["tea"]) == "known_antipattern"
+    assert severity(fresh) == "context"
+
+
+def test_a_replaced_claim_is_named_beside_the_atoms_it_was_about(table_mem):
+    """Recall never returns claim edges, so a claim the user replaced could
+    not reach the caller at all."""
+    from smrti.retrieval.fan_out import SupersededClaim, superseded_claims
+
+    ids, old_edge = _superseded_preference(table_mem)
+    claims = superseded_claims([ids["Nico"], ids["tea"], ids["coffee"]], "t", ["s"], table_mem.db)
+
+    replaced = SupersededClaim(edge_id=old_edge, subject="Nico", predicate="prefers",
+                               old_object="tea", new_object="coffee")
+    assert claims == {ids["Nico"]: [replaced], ids["tea"]: [replaced]}

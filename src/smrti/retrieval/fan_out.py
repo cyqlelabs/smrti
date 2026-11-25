@@ -6,6 +6,7 @@ import sqlite3
 import struct
 import time
 import weakref
+from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -19,8 +20,11 @@ from smrti.core.provenance import (
     ATOM_OWN_VALENCE,
     CRITICAL_WARNING_SQL,
     SEVERE_RETAINED_SQL,
+    SUPERSEDED_BY,
     WARNING_INTENSITY,
     WARNING_VALENCE,
+    claim_current_sql,
+    forgotten_sql,
 )
 from smrti.personality.params import personality_params
 from smrti.retrieval.classify import is_critical_warning
@@ -756,3 +760,64 @@ def find_warnings(
     found.sort(key=lambda r: (-r.similarity, r.atom.id))
     return found[:limit]
 
+
+@dataclass(frozen=True)
+class SupersededClaim:
+    """A claim a later one replaced: *subject* *predicate* *old_object*,
+    replaced by the same claim about *new_object* (None when the replacing
+    claim is gone or its object forgotten)."""
+
+    edge_id: str
+    subject: str
+    predicate: str
+    old_object: str
+    new_object: str | None
+
+
+def superseded_claims(
+    atom_ids: list[str], tenant_id: str, read_spaces: list[str], db, limit: int = 3
+) -> dict[str, list[SupersededClaim]]:
+    """The superseded claims about each of *atom_ids*, keyed by the atom.
+
+    Recall never returns claim edges, so a claim the user replaced — "lives
+    in Berlin", now "lives in Paris" — could not reach the caller at all,
+    and the city it named came back looking current. This names it beside
+    the recalled atoms it was about, its subject or its old object, as an
+    annotation for the caller to render rather than a result taking a top_k
+    slot: at most *limit* per atom, newest claim first. Atoms with no
+    superseded claim are absent. A forgotten claim, subject or object is
+    never named.
+    """
+    ids = list(dict.fromkeys(atom_id for atom_id in atom_ids if atom_id))
+    read_spaces = list(dict.fromkeys(read_spaces))
+    if not ids or not read_spaces or limit <= 0:
+        return {}
+    ids_ph = ",".join("?" * len(ids))
+    spaces_ph = ",".join("?" * len(read_spaces))
+    rows = db.fetchall(
+        f"""SELECT r.id, r.source_id, r.target_id, r.relation,
+                   s.label AS subject, o.label AS old_object, n.label AS new_object
+            FROM atoms r
+            JOIN atoms s ON s.id = r.source_id
+            JOIN atoms o ON o.id = r.target_id
+            LEFT JOIN atoms e ON e.tenant_id = r.tenant_id AND e.id =
+                (CASE WHEN json_valid(r.metadata) THEN json_extract(r.metadata, '$.{SUPERSEDED_BY}') END)
+            LEFT JOIN atoms n ON n.id = e.target_id AND NOT {forgotten_sql('n')}
+            WHERE (r.source_id IN ({ids_ph}) OR r.target_id IN ({ids_ph}))
+              AND +r.type = 'relation' AND +r.tenant_id = ? AND +r.space IN ({spaces_ph})
+              AND NOT {claim_current_sql('r')}
+              AND NOT {forgotten_sql('r')} AND NOT {forgotten_sql('s')} AND NOT {forgotten_sql('o')}
+            ORDER BY r.created_at DESC, r.id""",
+        (*ids, *ids, tenant_id, *read_spaces),
+    )
+    wanted = set(ids)
+    claims: dict[str, list[SupersededClaim]] = {}
+    for row in rows:
+        claim = SupersededClaim(
+            edge_id=row["id"], subject=row["subject"], predicate=row["relation"],
+            old_object=row["old_object"], new_object=row["new_object"],
+        )
+        for atom_id in dict.fromkeys((row["source_id"], row["target_id"])):
+            if atom_id in wanted and len(claims.setdefault(atom_id, [])) < limit:
+                claims[atom_id].append(claim)
+    return claims

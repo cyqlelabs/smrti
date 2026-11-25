@@ -164,6 +164,16 @@ def vec_delete(atom_ids: list[str]) -> list[tuple]:
     ]
 
 
+# Chunk size for generated ``IN (...)`` lists, well under SQLite's variable
+# limit on spaces holding tens of thousands of atoms.
+_ID_CHUNK = 400
+
+
+def _chunks(ids: list[str]):
+    for start in range(0, len(ids), _ID_CHUNK):
+        yield ids[start : start + _ID_CHUNK]
+
+
 _SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS atoms (
     id          TEXT PRIMARY KEY,
@@ -797,6 +807,86 @@ class Database:
             except Exception:
                 self._write_conn.rollback()
                 raise
+
+    def delete_atoms(self, atom_ids: list[str], tenant_id: str) -> int:
+        """Hard-delete *tenant_id*'s atoms among *atom_ids* with everything that
+        references them, in one transaction. Returns the count of atoms removed.
+
+        The closure is read inside the transaction that deletes it. Read
+        through the pool before the write lock was taken, an edge committed
+        in between — by another thread or another process — still pointed at
+        an atom the delete then removed, and the commit failed its
+        foreign-key check.
+        """
+        with self._write_lock:
+            conn = self._write_conn
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                conn.execute("PRAGMA defer_foreign_keys = ON")
+                removed = self._cascade_delete(conn, atom_ids, tenant_id)
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return removed
+
+    def _cascade_delete(self, conn: sqlite3.Connection, atom_ids: list[str], tenant_id: str) -> int:
+        """Delete the closure of *atom_ids* within *tenant_id* on *conn*.
+
+        Runs inside the caller's write transaction, with foreign-key checks
+        deferred to its commit, so that the order of the deletes inside the
+        closure does not matter. The ids are scoped to the tenant first: the
+        caller's list is not trusted to hold only the tenant's atoms.
+
+        The set grows to closure: the relation edges on the atoms, the edges
+        on those edges (a ``contradicts`` edge between two claim edges), and
+        so on, in any space of the tenant, since a bridge space points back
+        into both parents. Evidence and aliases are filed against relation
+        atoms too, and all three references are enforced foreign keys.
+
+        The endpoint lookups name their index. Statistics gathered while a
+        graph held few edges describe ``source_id`` and ``target_id`` as
+        almost all NULL, and the planner then preferred to scan the whole
+        tenant for each one.
+        """
+        doomed: dict[str, None] = {}
+        for chunk in _chunks(list(dict.fromkeys(atom_ids))):
+            ph = ",".join("?" * len(chunk))
+            doomed.update(
+                (r["id"], None)
+                for r in conn.execute(f"SELECT id, tenant_id FROM atoms WHERE id IN ({ph})", chunk)
+                if r["tenant_id"] == tenant_id
+            )
+        frontier = list(doomed)
+        while frontier:
+            found: dict[str, None] = {}
+            for chunk in _chunks(frontier):
+                ph = ",".join("?" * len(chunk))
+                for column, index in (("source_id", "idx_atoms_source"), ("target_id", "idx_atoms_target")):
+                    found.update(
+                        (r["id"], None)
+                        for r in conn.execute(
+                            f"""SELECT id FROM atoms INDEXED BY {index}
+                                WHERE {column} IN ({ph}) AND type = 'relation' AND tenant_id = ?""",
+                            (*chunk, tenant_id),
+                        )
+                        if r["id"] not in doomed
+                    )
+            doomed.update(found)
+            frontier = list(found)
+
+        ids = list(doomed)
+        for chunk in _chunks(ids):
+            ph = ",".join("?" * len(chunk))
+            for sql, params in (
+                *vec_delete(chunk),
+                *fts_delete(self, chunk),
+                (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM atoms WHERE id IN ({ph})", tuple(chunk)),
+            ):
+                conn.execute(sql, params)
+        return len(ids)
 
     def meta_get(self, key: str) -> str | None:
         """A value from ``smrti_meta``, the database's own key-value record of

@@ -488,23 +488,8 @@ class Database:
         forgotten_count = conn.execute(
             f"SELECT COUNT(*) FROM atoms WHERE {legacy_forgotten}"
         ).fetchone()[0]
-        hub_pending = (
-            conn.execute(
-                "SELECT 1 FROM smrti_meta WHERE key = ?", (self._HUB_CLEANUP_KEY,)
-            ).fetchone()
-            is None
-        )
-        hub_edges = (
-            conn.execute(
-                "SELECT r.id, r.tenant_id FROM atoms r JOIN atoms p ON p.id = r.source_id "
-                "WHERE r.type = 'relation' AND r.relation = 'associated' "
-                "AND r.confidence <= ? AND p.entity_type = 'person'",
-                (self._HUB_EDGE_MAX_CONFIDENCE,),
-            ).fetchall()
-            if hub_pending
-            else []
-        )
-        if not (entity_count or forgotten_count or hub_pending):
+        hub_edges = self._pending_hub_edges(conn)
+        if not (entity_count or forgotten_count or hub_edges is not None):
             return
 
         if entity_count or forgotten_count or hub_edges:
@@ -521,16 +506,8 @@ class Database:
                         WHERE {legacy_entities}""",
                     (*STRUCTURAL_RELATIONS, *STRUCTURAL_RELATIONS),
                 )
-            if hub_pending:
-                by_tenant: dict[str, list[str]] = {}
-                for r in hub_edges:
-                    by_tenant.setdefault(r["tenant_id"], []).append(r["id"])
-                for tenant_id, ids in by_tenant.items():
-                    self._cascade_delete(conn, ids, tenant_id)
-                conn.execute(
-                    "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES (?, '1')",
-                    (self._HUB_CLEANUP_KEY,),
-                )
+            if hub_edges is not None:
+                self._delete_hub_edges(conn, hub_edges)
             if forgotten_count:
                 conn.execute(
                     f"""UPDATE atoms SET confidence = MIN(confidence, 0.5 * {self._FLOOR_SQL})
@@ -540,6 +517,32 @@ class Database:
         except Exception:
             conn.rollback()
             raise
+
+    def _pending_hub_edges(self, conn: sqlite3.Connection) -> list[sqlite3.Row] | None:
+        """The old healing step's hub edges, or None once their cleanup has run here."""
+        if conn.execute(
+            "SELECT 1 FROM smrti_meta WHERE key = ?", (self._HUB_CLEANUP_KEY,)
+        ).fetchone():
+            return None
+        return conn.execute(
+            "SELECT r.id, r.tenant_id FROM atoms r JOIN atoms p ON p.id = r.source_id "
+            "WHERE r.type = 'relation' AND r.relation = 'associated' "
+            "AND r.confidence <= ? AND p.entity_type = 'person'",
+            (self._HUB_EDGE_MAX_CONFIDENCE,),
+        ).fetchall()
+
+    def _delete_hub_edges(self, conn: sqlite3.Connection, hub_edges: list[sqlite3.Row]) -> None:
+        """Delete the hub edges with everything that references them, and record
+        that the cleanup has run, inside the caller's transaction."""
+        by_tenant: dict[str, list[str]] = {}
+        for r in hub_edges:
+            by_tenant.setdefault(r["tenant_id"], []).append(r["id"])
+        for tenant_id, ids in by_tenant.items():
+            self._cascade_delete(conn, ids, tenant_id)
+        conn.execute(
+            "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES (?, '1')",
+            (self._HUB_CLEANUP_KEY,),
+        )
 
     def _migrate_evidence_columns(self) -> None:
         """Add the columns that record what an observation was and who made it.

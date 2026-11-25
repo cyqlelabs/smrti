@@ -497,7 +497,7 @@ def test_a_negated_warning_is_not_injected_under_a_second_negation():
         valence=Valence(valence=-0.9, intensity=0.9), metadata={"valence_stated": True},
     )
     body = {"messages": [{"role": "user", "content": "Can I deploy today?"}]}
-    with patch.object(proxy, "_recall", AsyncMock(return_value=([RecallResult(atom=rule, salience=1, similarity=1)], [], {}))), \
+    with patch.object(proxy, "_recall", AsyncMock(return_value=[RecallResult(atom=rule, salience=1, similarity=1)])), \
             patch.object(proxy, "get_mem", return_value=MagicMock()):
         _, injection, _ = asyncio.run(proxy._inject_context(body, "t", "s", ["s"]))
 

@@ -345,6 +345,7 @@ class Database:
         self._write_lock = threading.Lock()
         self._read_pool: queue.Queue[sqlite3.Connection] = queue.Queue(maxsize=_READ_POOL_SIZE)
         self._migration_backup_done = False
+        self._closed = False
         # Whether this build of SQLite carries FTS5. Retrieval reads it to
         # decide whether the lexical half of the search exists at all.
         self.fts_enabled = False
@@ -1041,6 +1042,11 @@ class Database:
 
     @contextmanager
     def _read_conn(self):
+        # A closed database has an empty pool, and waiting on it would block
+        # the caller forever: a handle kept past close() — a server's cached
+        # instance outliving its database — must fail, not hang.
+        if self._closed:
+            raise sqlite3.ProgrammingError(f"the database {self._db_path} is closed")
         if self._in_memory:
             with self._write_lock:
                 yield self._write_conn
@@ -1062,6 +1068,7 @@ class Database:
             return cursor.fetchone()
 
     def close(self) -> None:
+        self._closed = True
         if self._write_conn:
             self._write_conn.close()
             self._write_conn = None

@@ -262,7 +262,7 @@ def _agent_result(text):
 def test_an_assistant_only_recall_still_reaches_the_prompt():
     body = {"messages": [{"role": "user", "content": "What did you recommend?"}]}
     memories = [_agent_result("I recommended sqlite-vec for the vector index")]
-    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=(memories, [], {}))):
+    with patch("smrti.servers.proxy._recall", AsyncMock(return_value=memories)):
         with patch("smrti.servers.proxy.get_mem", return_value=MagicMock()):
             result, injection, dicts = asyncio.run(_inject_context(body, "t", "s", ["s"]))
     assert "sqlite-vec" in injection

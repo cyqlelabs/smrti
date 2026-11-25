@@ -181,11 +181,20 @@ def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
     return tenant_id, write_space, read_spaces
 
 
-async def _recall(
-    query: str, tenant_id: str, write_space: str, read_spaces: list[str]
-) -> tuple[list, list, dict]:
-    """The recalled memories, the stated warnings recall did not return, and
-    the superseded claims about what it did return.
+async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: list[str]) -> list:
+    mem = get_mem(tenant_id, write_space)
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        lambda: mem.recall(query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces),
+    )
+
+
+async def _beyond_recall(
+    query: str, memories: list, tenant_id: str, write_space: str, read_spaces: list[str]
+) -> tuple[list, dict]:
+    """The stated warnings recall did not return, and the superseded claims
+    about what it did return.
 
     Warnings are found apart from recall's pool and top_k and are injected
     outside the budget: a warning cut by a small top_k, or outranked by
@@ -195,15 +204,11 @@ async def _recall(
     mem = get_mem(tenant_id, write_space)
 
     def work():
-        memories = mem.recall(
-            query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces
-        )
         shown = {r.atom.id for r in memories}
         warnings = [
             w for w in mem.find_warnings(query, read_spaces=read_spaces) if w.atom.id not in shown
         ]
-        replaced = mem.superseded_claims([r.atom.id for r in memories], read_spaces=read_spaces)
-        return memories, warnings, replaced
+        return warnings, mem.superseded_claims([r.atom.id for r in memories], read_spaces=read_spaces)
 
     return await asyncio.get_running_loop().run_in_executor(None, work)
 
@@ -471,10 +476,11 @@ async def _inject_context(
     if not query:
         return body, "", []
 
-    memories, warnings, replaced = await _recall(query, tenant_id, write_space, read_spaces)
-    memories = [*warnings, *memories]
+    memories = await _recall(query, tenant_id, write_space, read_spaces)
     if not memories:
         return body, "", []
+    warnings, replaced = await _beyond_recall(query, memories, tenant_id, write_space, read_spaces)
+    memories = [*warnings, *memories]
 
     mem = get_mem(tenant_id, write_space)
     enriched_contents = [_enrich_content(r, mem) for r in memories]

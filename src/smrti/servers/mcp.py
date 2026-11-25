@@ -13,6 +13,7 @@ from smrti import Smrti, _write_metadata
 from smrti.personality.params import PersonalityProfile, load_preset
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
+from smrti.servers.common import api_root
 from smrti.servers.tools import TOOLS
 from smrti.servers.reflect_loop import run_reflect_loop
 
@@ -348,7 +349,7 @@ def run_mcp_server() -> None:
                 from smrti.extraction.extract import extract_and_link_serialized
                 task = asyncio.create_task(
                     extract_and_link_serialized(
-                        episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
+                        episode_id, content, mem, "", cfg.EXTRACT_MODEL, api_root(cfg.EXTRACT_URL),
                         arguments.get("source", "user"), mode=cfg.EXTRACT_MODE,
                     )
                 )

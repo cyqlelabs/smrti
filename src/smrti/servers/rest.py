@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from smrti import Smrti
 from smrti.servers import config as cfg
-from smrti.servers.common import api_key_middleware, tenant_for, upstream_authorization
+from smrti.servers.common import api_key_middleware, api_root, tenant_for, upstream_authorization
 from smrti.servers.mcp import create_smrti, handle_tool
 from smrti.servers.reflect_loop import run_reflect_loop
 from smrti.servers.viz_routes import create_viz_router
@@ -278,7 +278,7 @@ async def remember(req: RememberRequest, request: Request):
             auth = upstream_authorization(request)
             task = asyncio.create_task(
                 extract_and_link_serialized(
-                    episode_id, req.content, mem, auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
+                    episode_id, req.content, mem, auth, cfg.EXTRACT_MODEL, api_root(cfg.EXTRACT_URL),
                     req.source, mode=cfg.EXTRACT_MODE,
                 )
             )

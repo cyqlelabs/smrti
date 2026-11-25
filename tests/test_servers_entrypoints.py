@@ -161,14 +161,15 @@ def _stream_client(lines, status=200):
 def _collect_stream(lines):
     async def _run():
         chunks = []
-        with patch("smrti.servers.proxy.get_http", return_value=_stream_client(lines)):
-            with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
-                gen = proxy_mod._stream_proxy(
-                    {"model": "gpt-4o"}, [{"role": "user", "content": "Hi"}],
-                    "default", "default", {}, {"kind": "chat"}, 0.0,
-                )
-                async for chunk in gen:
-                    chunks.append(chunk)
+        client = _stream_client(lines)
+        response = await client.stream().__aenter__()
+        with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
+            gen = proxy_mod._stream_proxy(
+                response, AsyncMock(), {"model": "gpt-4o"}, [{"role": "user", "content": "Hi"}],
+                "default", "default", {}, {"kind": "chat"}, 0.0,
+            )
+            async for chunk in gen:
+                chunks.append(chunk)
         return b"".join(chunks)
 
     return run(_run())
@@ -202,19 +203,15 @@ def test_stream_reraises_cancellation():
         response = MagicMock()
         response.status_code = 200
         response.aiter_lines = _aiter_lines
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=response)
-        ctx.__aexit__ = AsyncMock(return_value=None)
-        client = MagicMock()
-        client.stream = MagicMock(return_value=ctx)
+        close = AsyncMock()
 
-        with patch("smrti.servers.proxy.get_http", return_value=client):
-            gen = proxy_mod._stream_proxy(
-                {"model": "gpt-4o"}, [], "default", "default", {}, {"kind": "chat"}, 0.0,
-            )
-            with pytest.raises(asyncio.CancelledError):
-                async for _ in gen:
-                    pass
+        gen = proxy_mod._stream_proxy(
+            response, close, {"model": "gpt-4o"}, [], "default", "default", {}, {"kind": "chat"}, 0.0,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            async for _ in gen:
+                pass
+        close.assert_awaited_once()  # the upstream connection is released either way
 
     run(_run())
 

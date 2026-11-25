@@ -134,15 +134,22 @@ def test_a_malformed_api_keys_entry_stops_the_server_without_echoing_the_key():
 
 # ── T2: the Smrti key never leaves the server ────────────────────────────────
 
-def _proxy_upstream(seen, reply=None, status=200):
-    """An httpx client whose transport records each upstream request."""
+def _proxy_upstream(seen, respond):
+    """An httpx client whose transport records each upstream request and
+    answers it with ``respond[0]`` — a test swaps the responder to change the reply."""
     import httpx
 
     def handler(request):
         seen.append(request)
-        return httpx.Response(status, json=reply or {"choices": [{"index": 0, "message": {"content": "ok"}}]})
+        return respond[0](request)
 
     return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+def _ok(request):
+    import httpx
+
+    return httpx.Response(200, json={"choices": [{"index": 0, "message": {"content": "ok"}}]})
 
 
 @pytest.fixture()
@@ -151,9 +158,9 @@ def proxied(tmp_path, monkeypatch):
     from smrti.servers import config as cfg
     from smrti.servers import proxy
 
-    seen = []
+    seen, respond = [], [_ok]
     monkeypatch.setattr(cfg, "EXTRACT", False)
-    monkeypatch.setattr(proxy, "_http", _proxy_upstream(seen))
+    monkeypatch.setattr(proxy, "_http", _proxy_upstream(seen, respond))
     monkeypatch.setattr(proxy, "_UPSTREAM", "http://upstream.test")
     monkeypatch.setattr(proxy, "_default_tenant_id", None)
     monkeypatch.setattr(proxy, "_instances", type(proxy._instances)())
@@ -161,6 +168,7 @@ def proxied(tmp_path, monkeypatch):
     with patch("smrti.servers.proxy.run_reflect_loop", new=_noop_reflect):
         with TestClient(proxy.app, raise_server_exceptions=True) as client:
             client.seen = seen
+            client.respond = respond
             client.proxy = proxy
             yield client
 
@@ -294,3 +302,147 @@ def test_visualizer_and_personality_reads_write_no_personality_rows(keyed, monke
         assert keyed.get("/personality", params={"space": f"ghost{i}"}, headers=ADMIN).json() == {}
     assert preset() == "deterministic"
     assert rows() == before
+
+
+# ── T21: the proxy speaks chat completions correctly ─────────────────────────
+
+def _episodes(client):
+    """Every episode the proxy stored, once its background stores have run."""
+    import asyncio
+
+    proxy = client.proxy
+
+    async def _settle():
+        while proxy._background_tasks:
+            await asyncio.gather(*list(proxy._background_tasks), return_exceptions=True)
+
+    client.portal.call(_settle)  # the stores run on the TestClient's own loop
+    mem = proxy.get_mem(*proxy._bootstrap()[:2])
+    # Sorted: the two turns of an exchange are stored concurrently.
+    return sorted(r["content"] for r in mem.db.fetchall(
+        "SELECT content FROM atoms WHERE type = 'episode'"
+    ))
+
+
+def _sse(*chunks, done=True):
+    import json
+
+    import httpx
+
+    body = "".join(f"data: {json.dumps(c)}\n\n" for c in chunks) + ("data: [DONE]\n\n" if done else "")
+    return lambda request: httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+
+def test_a_refused_stream_passes_its_status_and_retry_after_through(proxied):
+    """An upstream 429 on a stream reached the client as a 200 with a bare JSON line."""
+    import httpx
+
+    proxied.respond[0] = lambda request: httpx.Response(
+        429, json={"error": {"message": "rate limited"}}, headers={"retry-after": "30"}
+    )
+    response = _chat(proxied, "stream please", stream=True)
+    assert response.status_code == 429
+    assert response.headers["retry-after"] == "30"
+    assert response.json()["error"]["message"] == "rate limited"
+    assert _episodes(proxied) == []
+
+
+def test_multipart_turns_are_recalled_stored_and_kept_as_parts(proxied):
+    """Content parts were ignored for recall and storage, stringified in the system
+    prompt, and a list-valued reply raised and lost both turns."""
+    import json
+
+    import httpx
+
+    proxied.respond[0] = lambda request: httpx.Response(200, json={"choices": [{"index": 0, "message": {
+        "content": [{"type": "text", "text": "A reply in parts"}]}}]})
+    messages = [
+        {"role": "system", "content": [{"type": "text", "text": "You are terse."}]},
+        {"role": "user", "content": "an earlier question"},
+        {"role": "user", "content": [
+            {"type": "text", "text": "What is in this picture?"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}},
+        ]},
+    ]
+    proxied.proxy.get_mem(*proxied.proxy._bootstrap()[:2]).remember("pictures of the harbour at dawn")
+    proxied.post("/v1/chat/completions", json={"model": "m", "messages": messages})
+
+    sent = json.loads(proxied.seen[-1].read())["messages"][0]["content"]
+    assert sent[0] == {"type": "text", "text": "You are terse."}
+    assert "harbour" in sent[1]["text"]
+    assert _episodes(proxied) == ["A reply in parts", "What is in this picture?", "pictures of the harbour at dawn"]
+
+
+def test_only_choice_zero_of_an_n2_stream_is_stored(proxied):
+    """Interleaved choices of an n=2 stream were spliced into one stored reply."""
+    proxied.respond[0] = _sse(
+        {"choices": [{"index": 0, "delta": {"content": "Alpha"}}]},
+        {"choices": [{"index": 1, "delta": {"content": "Beta"}}]},
+        {"choices": [{"index": 0, "delta": {"content": " one"}}]},
+        {"choices": [{"index": 1, "delta": {"content": " two"}}]},
+    )
+    _chat(proxied, "give me two", stream=True, n=2)
+    assert _episodes(proxied) == ["Alpha one", "give me two"]
+
+
+def test_only_a_complete_answer_is_stored(proxied):
+    """A failed request stored its user turn while a stream cut short stored nothing."""
+    import httpx
+
+    proxied.respond[0] = lambda request: httpx.Response(500, json={"error": {"message": "boom"}})
+    assert _chat(proxied, "this request failed").status_code == 500
+    proxied.respond[0] = _sse({"choices": [{"index": 0, "delta": {"content": "cut off"}}]}, done=False)
+    _chat(proxied, "this stream was cut off", stream=True)
+    assert _episodes(proxied) == []
+
+    proxied.respond[0] = _sse(
+        {"choices": [{"index": 0, "delta": {"content": "finished"}, "finish_reason": "stop"}]}, done=False
+    )
+    _chat(proxied, "this stream ended without DONE", stream=True)
+    assert _episodes(proxied) == ["finished", "this stream ended without DONE"]
+
+
+def test_models_are_passed_through_and_a_v1_upstream_is_not_doubled(proxied, monkeypatch):
+    """Only chat completions were routed, and an upstream ending in /v1 got /v1/v1/…."""
+    import httpx
+
+    monkeypatch.setattr(proxied.proxy, "_UPSTREAM", "http://upstream.test/v1/")
+    proxied.respond[0] = lambda request: httpx.Response(200, json={"data": [{"id": "m"}]})
+    models = proxied.get("/v1/models")
+    assert models.status_code == 200 and models.json()["data"] == [{"id": "m"}]
+    assert proxied.seen[-1].method == "GET"
+    assert proxied.seen[-1].url.path == "/v1/models"
+    proxied.respond[0] = _ok
+    _chat(proxied)
+    assert proxied.seen[-1].url.path == "/v1/chat/completions"
+
+
+def test_malformed_chat_bodies_are_a_400(proxied):
+    """A body that is not a JSON object with a list of messages was a 500."""
+    url = "/v1/chat/completions"
+    assert proxied.post(url, content=b"{not json", headers={"content-type": "application/json"}).status_code == 400
+    assert proxied.post(url, json=[1, 2]).status_code == 400
+    assert proxied.post(url, json={"model": "m", "messages": "hi"}).status_code == 400
+    assert proxied.post(url, json={"model": "m", "messages": ["hi"]}).status_code == 400
+
+
+def test_background_stores_wait_for_room_instead_of_growing_without_bound(monkeypatch):
+    """The set of in-flight stores and extractions grew with every request."""
+    import asyncio
+
+    from smrti.servers import proxy
+
+    async def _run():
+        monkeypatch.setattr(proxy, "_BACKGROUND_MAX", 2)
+        gates = [asyncio.Event() for _ in range(2)]
+        for gate in gates:
+            proxy._spawn(gate.wait())
+        waiting = asyncio.create_task(proxy._make_room())
+        await asyncio.sleep(0.01)
+        assert not waiting.done()
+        gates[0].set()
+        await asyncio.wait_for(waiting, timeout=1)
+        gates[1].set()
+        await asyncio.gather(*list(proxy._background_tasks))
+
+    asyncio.run(_run())

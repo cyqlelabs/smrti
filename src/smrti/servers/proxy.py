@@ -10,14 +10,14 @@ import re
 import time
 import uuid
 from collections import OrderedDict
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from smrti import Smrti
 from smrti.call_log import redact
@@ -25,7 +25,7 @@ from smrti.core.models import RecallResult
 from smrti.core.provenance import SOURCE_AGENT, claim_current_sql, forgotten_sql
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
-from smrti.servers.common import api_key_middleware, tenant_for, upstream_authorization
+from smrti.servers.common import api_key_middleware, api_root, tenant_for, upstream_authorization
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
 from smrti.servers.viz_routes import create_viz_router
@@ -52,7 +52,7 @@ if cfg.CORS_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cfg.CORS_ORIGINS,
-        allow_methods=["GET", "DELETE"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["*"],
     )
 
@@ -68,12 +68,27 @@ _http: Optional[httpx.AsyncClient] = None
 # Strong references to fire-and-forget tasks so the GC cannot cancel them mid-flight
 _background_tasks: set[asyncio.Task] = set()
 
+# The most stores and extractions the proxy keeps in flight. Each holds a
+# conversation and, with extraction on, waits on a model call; under a burst
+# the set grew without bound.
+_BACKGROUND_MAX = 64
+
 
 def _spawn(coro) -> asyncio.Task:
     task = asyncio.create_task(coro)
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return task
+
+
+async def _make_room() -> None:
+    """Wait until fewer than _BACKGROUND_MAX background tasks are in flight.
+
+    Backpressure rather than a drop: the request that would overflow the set
+    waits for a slot, so a burst slows down instead of losing memories.
+    """
+    while len(_background_tasks) >= _BACKGROUND_MAX:
+        await asyncio.wait(set(_background_tasks), return_when=asyncio.FIRST_COMPLETED)
 
 _UPSTREAM = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
 _RECALL_TOP_K = int(os.environ.get("SMRTI_RECALL_TOP_K", "5"))
@@ -247,7 +262,7 @@ async def _extract_and_link(
     # forwards, including its own default — cfg.EXTRACT_URL only sees the env var.
     await extract_and_link_serialized(
         episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model,
-        cfg.EXTRACT_URL or _UPSTREAM, source, mode=cfg.EXTRACT_MODE,
+        api_root(cfg.EXTRACT_URL or _UPSTREAM), source, mode=cfg.EXTRACT_MODE,
     )
 
 
@@ -336,26 +351,48 @@ def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, st
     return line, severity
 
 
+def _text_of(content) -> str:
+    """The text of a message's content.
+
+    OpenAI content is a string or a list of parts, and the text parts of a
+    list are what a memory can hold; images, audio and other parts are left
+    out. A multipart turn used to be neither recalled with nor stored, and a
+    list-valued reply raised and lost both turns of its exchange.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+    return ""
+
+
+def _last_user_text(messages: list[dict]) -> str:
+    """The text of the last user turn — empty when that turn has none.
+
+    The last turn and no earlier one: falling back to an earlier turn when
+    the last was an image stored a question that had already been stored.
+    """
+    last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+    return _text_of(last_user.get("content")) if last_user else ""
+
+
 def _build_query(messages: list[dict]) -> str | None:
     """Build a recall query from conversation messages based on configured mode."""
     if _QUERY_MODE == "concat":
         recent = [
-            m["content"]
+            text
             for m in messages[-_QUERY_CONTEXT_MSGS:]
-            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+            if m.get("role") in ("user", "assistant") and (text := _text_of(m.get("content")))
         ]
         if not recent:
             return None
         joined = " ".join(recent)
         return joined[-_QUERY_MAX_CHARS:]
     # "last" mode: original behavior
-    last_user = next(
-        (m["content"] for m in reversed(messages) if m.get("role") == "user"),
-        None,
-    )
-    if not last_user or not isinstance(last_user, str):
-        return None
-    return last_user
+    return _last_user_text(messages) or None
 
 
 async def _inject_context(
@@ -419,8 +456,16 @@ async def _inject_context(
     system_idx = next((i for i, m in enumerate(messages) if m.get("role") == "system"), None)
 
     if system_idx is not None:
-        existing = messages[system_idx]["content"]
-        messages[system_idx] = {**messages[system_idx], "content": f"{existing}\n\n{injection}"}
+        existing = messages[system_idx].get("content")
+        if isinstance(existing, list):
+            # Parts stay parts: formatting the list into a string sent the
+            # client's system prompt upstream as "[{'type': 'text', ...}]".
+            content = [*existing, {"type": "text", "text": injection}]
+        elif existing:
+            content = f"{existing}\n\n{injection}"
+        else:
+            content = injection
+        messages[system_idx] = {**messages[system_idx], "content": content}
     else:
         messages.insert(0, {"role": "system", "content": injection})
 
@@ -492,11 +537,7 @@ async def _store_exchange(
     request (the full history is passed in messages on every turn). ``tone`` is the valence
     the client stated for the user message (see ``_stated_tone``); the reply never takes it.
     """
-    last_user = next(
-        (m["content"] for m in reversed(messages)
-         if m.get("role") == "user" and isinstance(m.get("content"), str)),
-        None,
-    )
+    last_user = _last_user_text(messages)
     clean_assistant = ""
     if assistant_text:
         clean = _scrub_injected_memory(assistant_text).strip()
@@ -527,17 +568,27 @@ async def _store_exchange(
                     logger.warning("extraction failed for episode %s", eid, exc_info=True)
 
 
-def _first_choice(payload: dict) -> dict:
-    """The first choice of a completion or chunk, or nothing.
+def _first_choice(payload) -> dict:
+    """Choice 0 of a completion or chunk, or nothing.
 
     A stream's final usage chunk carries ``choices: []``; indexing it raised,
     the client got an error frame instead of ``[DONE]``, and the exchange
-    was never stored.
+    was never stored. With ``n`` > 1 the chunks of every choice arrive
+    interleaved, each naming its index, and joining them all stored one
+    reply spliced from several; choice 0 is the reply remembered. A choice
+    without an index is choice 0, since a single-choice upstream may omit it.
     """
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        return choices[0]
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, dict) and choice.get("index", 0) == 0:
+                return choice
     return {}
+
+
+def _upstream_url(route: str) -> str:
+    """The upstream URL of an OpenAI route such as ``/chat/completions``."""
+    return f"{api_root(_UPSTREAM)}/v1{route}"
 
 
 def _upstream_headers(request: Request) -> dict:
@@ -549,6 +600,11 @@ def _upstream_headers(request: Request) -> dict:
 
 
 _DROP_RESPONSE_HEADERS = {"content-encoding", "transfer-encoding", "content-length"}
+
+
+def _passthrough_headers(response: httpx.Response) -> dict:
+    return {k: v for k, v in response.headers.items() if k.lower() not in _DROP_RESPONSE_HEADERS}
+
 
 # Allowlist: only structurally-interesting headers are logged verbatim; every
 # other header value (cookies, API keys, custom auth schemes, …) is masked.
@@ -562,11 +618,61 @@ def _sanitize_headers(headers: dict) -> dict:
     }
 
 
+async def _chat_body(request: Request) -> dict:
+    """The request body, or a 400 for one no chat completion can be made of.
+
+    A body that was not JSON, not an object, or whose messages were not a
+    list of objects failed further in and came back as a 500.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "The request body must be a JSON object")
+    messages = body.get("messages", []) if isinstance(body, dict) else None
+    if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
+        raise HTTPException(400, "The request body must be a JSON object with a list of message objects")
+    return body
+
+
+def _upstream_failure(log_entry: dict, t0: float, message: str, code: str) -> JSONResponse:
+    """A 502 for an upstream that could not be reached or answered nonsense."""
+    from smrti.call_log import update as _update_log
+
+    log_entry["status"] = 502
+    log_entry["error"] = message
+    log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+    _update_log(log_entry)
+    return JSONResponse(
+        status_code=502,
+        content={"error": {"message": message, "type": "upstream_error", "code": code}},
+    )
+
+
+@app.get("/v1/models", response_model=None)
+async def list_models(request: Request) -> Response:
+    """The upstream's model list, passed through: clients list models before
+    they chat, and a 404 here stopped them before the first message."""
+    try:
+        response = await get_http().get(_upstream_url("/models"), headers=_upstream_headers(request))
+    except httpx.HTTPError as exc:
+        return JSONResponse(
+            status_code=502,
+            content={"error": {
+                "message": f"upstream request failed: {redact(str(exc))}",
+                "type": "upstream_error", "code": "upstream_unreachable",
+            }},
+        )
+    return Response(
+        content=response.content, status_code=response.status_code,
+        headers=_passthrough_headers(response),
+    )
+
+
 @app.post("/v1/chat/completions", response_model=None)
-async def chat_completions(request: Request) -> StreamingResponse | JSONResponse:
+async def chat_completions(request: Request) -> Response:
     from smrti.call_log import append as _log
 
-    raw_body: dict = await request.json()
+    raw_body = await _chat_body(request)
     tenant_id, write_space, read_spaces = _parse_request_identity(request)
     tone = _stated_tone(request)
 
@@ -601,12 +707,8 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
     _log(log_entry)
 
     if body.get("stream", False):
-        return StreamingResponse(
-            _stream_proxy(body, post_inject_messages, tenant_id, write_space,
-                          upstream_hdrs, log_entry, t0, tone),
-            media_type="text/event-stream",
-            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-        )
+        return await _open_stream(body, post_inject_messages, tenant_id, write_space,
+                                  upstream_hdrs, log_entry, t0, tone)
 
     return await _non_stream_proxy(body, post_inject_messages, tenant_id, write_space,
                                    upstream_hdrs, log_entry, t0, tone)
@@ -624,48 +726,101 @@ async def _non_stream_proxy(
 ) -> JSONResponse:
     from smrti.call_log import update as _update_log
 
-    def _upstream_error(message: str, code: str) -> JSONResponse:
-        log_entry["status"] = 502
-        log_entry["error"] = message
-        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
-        _update_log(log_entry)
-        return JSONResponse(
-            status_code=502,
-            content={"error": {"message": message, "type": "upstream_error", "code": code}},
-        )
-
     try:
         response = await get_http().post(
-            f"{_UPSTREAM}/v1/chat/completions",
+            _upstream_url("/chat/completions"),
             headers=headers,
             json=body,
         )
     except httpx.HTTPError as exc:
-        return _upstream_error(f"upstream request failed: {redact(str(exc))}", "upstream_unreachable")
+        return _upstream_failure(
+            log_entry, t0, f"upstream request failed: {redact(str(exc))}", "upstream_unreachable"
+        )
     try:
         data = response.json()
     except ValueError as exc:
-        return _upstream_error(f"upstream returned non-JSON body: {exc}", "upstream_invalid_response")
+        return _upstream_failure(
+            log_entry, t0, f"upstream returned non-JSON body: {exc}", "upstream_invalid_response"
+        )
 
-    assistant_text = _first_choice(data).get("message", {}).get("content", "")
+    assistant_text = _text_of((_first_choice(data).get("message") or {}).get("content"))
     log_entry["status"] = response.status_code
-    log_entry["response_snippet"] = (assistant_text or "")[:500]
+    log_entry["response_snippet"] = assistant_text[:500]
     log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
     _update_log(log_entry)
 
-    auth = headers.get("Authorization", "")
-    model = body.get("model", "")
-    _spawn(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model, tone))
+    # Only an answered exchange is remembered. A refused or failed request
+    # used to store its user turn — a question nobody answered — while a
+    # stream cut short stored nothing; neither stores anything now.
+    if response.is_success:
+        auth = headers.get("Authorization", "")
+        model = body.get("model", "")
+        await _make_room()
+        _spawn(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model, tone))
 
-    passthrough_headers = {
-        k: v
-        for k, v in response.headers.items()
-        if k.lower() not in _DROP_RESPONSE_HEADERS
-    }
-    return JSONResponse(content=data, status_code=response.status_code, headers=passthrough_headers)
+    return JSONResponse(
+        content=data, status_code=response.status_code, headers=_passthrough_headers(response)
+    )
+
+
+async def _open_stream(
+    body: dict,
+    original_messages: list[dict],
+    tenant_id: str,
+    write_space: str,
+    headers: dict,
+    log_entry: dict,
+    t0: float,
+    tone: tuple[float, float | None] | None = None,
+) -> Response:
+    """Open the upstream stream, and answer with its status before relaying it.
+
+    The status line leaves with the first byte of the response, so it is
+    settled here, before any: an upstream 401 or 429 used to reach the
+    client as a 200 carrying a bare JSON line, with no Retry-After to back
+    off by. A refusal is now passed through as it came — status, headers
+    and body — and only a 2xx stream is relayed.
+    """
+    from smrti.call_log import update as _update_log
+
+    stack = AsyncExitStack()
+    try:
+        upstream = await stack.enter_async_context(
+            get_http().stream("POST", _upstream_url("/chat/completions"), headers=headers, json=body)
+        )
+    except httpx.HTTPError as exc:
+        await stack.aclose()
+        return _upstream_failure(
+            log_entry, t0, f"upstream request failed: {redact(str(exc))}", "upstream_unreachable"
+        )
+    if not upstream.is_success:
+        try:
+            content = await upstream.aread()
+        except httpx.HTTPError as exc:
+            return _upstream_failure(
+                log_entry, t0, f"upstream request failed: {redact(str(exc))}", "upstream_unreachable"
+            )
+        finally:
+            await stack.aclose()
+        log_entry["status"] = upstream.status_code
+        log_entry["response_snippet"] = content[:500].decode(errors="replace")
+        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _update_log(log_entry)
+        return Response(
+            content=content, status_code=upstream.status_code,
+            headers=_passthrough_headers(upstream),
+        )
+    return StreamingResponse(
+        _stream_proxy(upstream, stack.aclose, body, original_messages, tenant_id, write_space,
+                      headers, log_entry, t0, tone),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
 
 
 async def _stream_proxy(
+    upstream,
+    close,
     body: dict,
     original_messages: list[dict],
     tenant_id: str,
@@ -675,62 +830,77 @@ async def _stream_proxy(
     t0: float,
     tone: tuple[float, float | None] | None = None,
 ) -> AsyncIterator[bytes]:
+    """Relay an open 2xx upstream stream, then remember the exchange.
+
+    ``close`` releases the upstream connection and runs however the relay
+    ends. The exchange is stored once the reply is complete: at ``[DONE]``,
+    or at the end of a stream that omits it once choice 0 has reported a
+    ``finish_reason``. A stream cut off before either is not stored, as a
+    failed request is not.
+    """
+    from smrti.call_log import update as _update_log
+
     accumulated: list[str] = []
+    finished = False
     auth = headers.get("Authorization", "")
     model = body.get("model", "")
+
+    async def _complete() -> None:
+        full_text = "".join(accumulated)
+        log_entry["response_snippet"] = full_text[:500]
+        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _update_log(log_entry)
+        await _make_room()
+        _spawn(_store_exchange(original_messages, full_text, tenant_id, write_space, auth, model, tone))
+
     try:
-        async with get_http().stream(
-            "POST", f"{_UPSTREAM}/v1/chat/completions", headers=headers, json=body
-        ) as upstream:
-            log_entry["status"] = upstream.status_code
-            async for line in upstream.aiter_lines():
-                if not line:
-                    yield b"\n"
-                    continue
+        log_entry["status"] = upstream.status_code
+        async for line in upstream.aiter_lines():
+            if not line:
+                yield b"\n"
+                continue
 
-                if line.startswith(":"):
-                    yield f"{line}\n\n".encode()
-                    continue
+            if line.startswith(":"):
+                yield f"{line}\n\n".encode()
+                continue
 
-                if not line.startswith("data: "):
-                    yield f"{line}\n\n".encode()
-                    continue
+            if not line.startswith("data: "):
+                yield f"{line}\n\n".encode()
+                continue
 
-                payload = line[6:]
+            payload = line[6:]
 
-                if payload.strip() == "[DONE]":
-                    full_text = "".join(accumulated)
-                    log_entry["response_snippet"] = full_text[:500]
-                    log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
-                    from smrti.call_log import update as _update_log
-                    _update_log(log_entry)
-                    _spawn(
-                        _store_exchange(original_messages, full_text, tenant_id, write_space, auth, model, tone)
-                    )
-                    yield b"data: [DONE]\n\n"
-                    return
+            if payload.strip() == "[DONE]":
+                await _complete()
+                yield b"data: [DONE]\n\n"
+                return
 
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    yield f"data: {payload}\n\n".encode()
-                    continue
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                yield f"data: {payload}\n\n".encode()
+                continue
 
-                piece = _first_choice(chunk).get("delta", {}).get("content", "")
-                if piece:
-                    accumulated.append(piece)
+            choice = _first_choice(chunk)
+            piece = (choice.get("delta") or {}).get("content")
+            if isinstance(piece, str) and piece:
+                accumulated.append(piece)
+            finished = finished or bool(choice.get("finish_reason"))
 
-                yield f"data: {json.dumps(chunk)}\n\n".encode()
+            yield f"data: {json.dumps(chunk)}\n\n".encode()
+        if finished:
+            await _complete()
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         log_entry["status"] = 500
         log_entry["error"] = redact(str(exc))
         log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
-        from smrti.call_log import update as _update_log
         _update_log(log_entry)
         err = {"error": {"message": log_entry["error"], "type": "proxy_error"}}
         yield f"data: {json.dumps(err)}\n\ndata: [DONE]\n\n".encode()
+    finally:
+        await close()
 
 
 def run_proxy_server(host: str = "0.0.0.0", port: int = 8421) -> None:

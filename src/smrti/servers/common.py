@@ -119,6 +119,17 @@ def upstream_authorization(request: Request) -> str:
     return request.headers.get("authorization", "")
 
 
+def api_root(url: str) -> str:
+    """*url* without a trailing ``/v1``: every caller appends ``/v1/<route>``.
+
+    OpenAI-compatible servers document their base URL with the ``/v1`` on —
+    the README's Docker example names ``…:11434/v1`` — and joining another
+    one onto it requested ``/v1/v1/chat/completions``.
+    """
+    root = url.rstrip("/")
+    return root[: -len("/v1")] if root.endswith("/v1") else root
+
+
 def tenant_for(request: Request, named: Optional[str], default: str) -> str:
     """The tenant a request acts on.
 

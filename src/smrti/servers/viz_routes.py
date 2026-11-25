@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json as _json
 import os
+import threading
 from typing import Callable, Optional
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -19,8 +20,11 @@ _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
 # Type alias: callable that returns (or lazily creates) a Smrti instance.
 GetMemFn = Callable[[str, str], Smrti]
 
-# Cache of read handles keyed by resolved absolute DB path.
+# Cache of read handles keyed by resolved absolute DB path. Handles are
+# resolved in the executor, so the lock keeps one thread's eviction from
+# dropping the entry another has just stored and is about to return.
 _db_cache: dict[str, "_Reader"] = {}
+_db_cache_lock = threading.Lock()
 _DB_CACHE_MAX = 20
 
 # The most atoms one /graph request returns.
@@ -158,14 +162,16 @@ def _db_mem(db_path: str) -> _Reader:
                     "but it does not exist."
                 ),
             )
-    cached = _db_cache.get(resolved)
-    if cached is not None and cached.db is not registered:
-        _db_cache.pop(resolved)  # path was closed and re-registered — drop stale wrapper
-    if resolved not in _db_cache:
-        if len(_db_cache) >= _DB_CACHE_MAX:
-            _db_cache.pop(next(iter(_db_cache)))
-        _db_cache[resolved] = _Reader(get_database(resolved))
-    return _db_cache[resolved]
+    with _db_cache_lock:
+        cached = _db_cache.get(resolved)
+        if cached is not None and cached.db is not registered:
+            cached = None  # path was closed and re-registered — drop stale wrapper
+        if cached is None:
+            _db_cache.pop(resolved, None)
+            if len(_db_cache) >= _DB_CACHE_MAX:
+                _db_cache.pop(next(iter(_db_cache)))
+            cached = _db_cache[resolved] = _Reader(get_database(resolved))
+        return cached
 
 
 def create_viz_router(get_mem: GetMemFn) -> APIRouter:
@@ -200,8 +206,9 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
 
     @router.get("/tenants")
     async def list_tenants(request: Request, db: str | None = Query(None)):
+        reader = await _off_loop(_reader, db)
         rows = await _off_loop(
-            _reader(db).db.fetchall, "SELECT DISTINCT tenant_id FROM atoms ORDER BY tenant_id"
+            reader.db.fetchall, "SELECT DISTINCT tenant_id FROM atoms ORDER BY tenant_id"
         )
         return [r["tenant_id"] for r in rows if visible(request, r["tenant_id"])]
 
@@ -209,7 +216,8 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
     async def list_spaces(
         request: Request, tenant_id: str | None = Query(None), db: str | None = Query(None)
     ):
-        return await _off_loop(_reader(db).list_spaces, tenant_for(request, tenant_id, cfg.TENANT_ID))
+        reader = await _off_loop(_reader, db)
+        return await _off_loop(reader.list_spaces, tenant_for(request, tenant_id, cfg.TENANT_ID))
 
     @router.get("/graph")
     async def get_graph(
@@ -233,7 +241,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         # unbounded read of a large space held a worker for seconds and
         # shipped the whole graph to a browser that cannot draw it.
         limit = min(limit or _GRAPH_LIMIT_MAX, _GRAPH_LIMIT_MAX)
-        reader = _reader(db)
+        reader = await _off_loop(_reader, db)
         # Encoded in the executor as well: returned as a dict, thousands of
         # rows were serialized on the loop after the query had left it.
         return await _off_loop(
@@ -247,9 +255,9 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         # names the space this server writes to when a request does not say —
         # a client whose own config disagrees would otherwise route writes away
         # from the graph it has been building.
-        home = _configured_mem()
+        home = await _off_loop(_configured_mem)
         tenant = tenant_for(request, None, home.tenant_id)
-        mem = _reader(db)
+        mem = await _off_loop(_reader, db)
         result = await _off_loop(mem.status, tenant, home.write_space)
         result["spaces"] = await _off_loop(mem.list_spaces, tenant)
         result["space"] = home.write_space
@@ -265,7 +273,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
     ):
         tenant = tenant_for(request, tenant_id, cfg.TENANT_ID)
         spc = space or cfg.SPACE
-        mem = _configured_mem()
+        mem = await _off_loop(_configured_mem)
         atom = await _off_loop(mem.atomspace.get_atom, atom_id, tenant, spc)
         if not atom:
             raise HTTPException(status_code=404, detail="Atom not found")
@@ -339,9 +347,10 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
             """Escape a Prometheus label value: backslash, quote, newline."""
             return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
-        home = _configured_mem()
+        home = await _off_loop(_configured_mem)
         tenant_id = tenant_for(request, None, home.tenant_id)
-        s = await _off_loop(_reader(db).status, tenant_id, home.write_space)
+        reader = await _off_loop(_reader, db)
+        s = await _off_loop(reader.status, tenant_id, home.write_space)
         labels = f'tenant="{_esc(tenant_id)}",space="{_esc(home.write_space)}"'
 
         lines: list[str] = []

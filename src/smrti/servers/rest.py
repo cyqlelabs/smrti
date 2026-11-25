@@ -384,7 +384,7 @@ async def get_personality(request: Request, space: Optional[SpaceName] = Query(N
     instance: minting one writes its personality row, so asking about three
     unused spaces used to create three rows.
     """
-    home = get_mem()
+    home = await _run_sync(get_mem)
     tenant = tenant_for(request, None, cfg.TENANT_ID)
     row = await _run_sync(
         home.db.fetchone,

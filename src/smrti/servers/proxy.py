@@ -331,7 +331,7 @@ async def _extract_and_link(
     source: str = "user",
 ) -> None:
     from smrti.extraction.extract import extract_and_link_serialized
-    mem = get_mem(tenant_id, write_space)
+    mem = await asyncio.get_running_loop().run_in_executor(None, get_mem, tenant_id, write_space)
     # Falling back to _UPSTREAM keeps extraction pointed wherever this proxy
     # forwards, including its own default — cfg.EXTRACT_URL only sees the env var.
     await extract_and_link_serialized(
@@ -550,10 +550,14 @@ async def _inject_context(
     if not memories:
         return body, "", []
 
-    mem = get_mem(tenant_id, write_space)
-    enriched_contents = await asyncio.get_running_loop().run_in_executor(
-        None, lambda: [_enrich_content(r, mem) for r in memories]
-    )
+    # The instance is resolved in the executor with the enrichment: on a
+    # cache miss resolving it mints one, which writes a personality row, and
+    # on the loop that stalled every request the proxy held.
+    def enrich() -> list[str]:
+        mem = get_mem(tenant_id, write_space)
+        return [_enrich_content(r, mem) for r in memories]
+
+    enriched_contents = await asyncio.get_running_loop().run_in_executor(None, enrich)
     formatted = [_format_memory(r, c) for r, c in zip(memories, enriched_contents)]
     memory_dicts = [
         _memory_record(r, c, sev) for r, c, (_, sev) in zip(memories, enriched_contents, formatted)

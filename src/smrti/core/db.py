@@ -206,8 +206,28 @@ CREATE INDEX IF NOT EXISTS idx_atoms_entity_type ON atoms(entity_type);
 CREATE INDEX IF NOT EXISTS idx_atoms_source ON atoms(source_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_target ON atoms(target_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_label ON atoms(label);
-CREATE INDEX IF NOT EXISTS idx_atoms_sti ON atoms(sti DESC);
 CREATE INDEX IF NOT EXISTS idx_atoms_content_hash ON atoms(tenant_id, space, content_hash);
+
+-- Edge walks inside one space. Without these the planner served
+-- ``source_id = ? AND tenant_id = ? AND space = ?`` from a (tenant_id, space)
+-- index and scanned the whole space per lookup, which made the epoch's
+-- propagation quadratic: 116 s at twenty thousand atoms. The outgoing index
+-- runs on to the target and relation so that link_atoms' existence check is
+-- a point lookup rather than a walk over a hub's edges. The single-column
+-- source and target indexes stay: the foreign-key check on every parent
+-- delete and the tenant-wide delete closure look edges up by endpoint alone.
+CREATE INDEX IF NOT EXISTS idx_atoms_edge_out ON atoms(tenant_id, space, source_id, target_id, relation);
+CREATE INDEX IF NOT EXISTS idx_atoms_edge_in ON atoms(tenant_id, space, target_id);
+
+-- Nothing filters or orders by sti alone, and every boost and decay rewrote it.
+DROP INDEX IF EXISTS idx_atoms_sti;
+
+-- The forgotten atoms, which every open counts: the lexical index check
+-- leaves them out, and the repair of the old forget() looks for them. The
+-- stamp lives in metadata, stored after an atom's whole text, so counting
+-- without this index read every atom's content: 45 ms per count at 250 MiB.
+CREATE INDEX IF NOT EXISTS idx_atoms_forgotten ON atoms(tenant_id, space, type, confidence)
+    WHERE {ATOM_FORGOTTEN};
 
 {_VEC_SCHEMA_SQL};
 
@@ -340,6 +360,35 @@ class Database:
             self._migrate_evidence_columns()
             self._init_atoms_fts()
             self._repair_legacy_rows()
+        self.optimize()
+
+    def optimize(self) -> None:
+        """Refresh the query planner's statistics where they have gone stale.
+
+        Without statistics the planner assumes ``tenant_id = ? AND space = ?``
+        picks out a handful of rows, and answers ``id IN (...)`` within a space
+        by scanning the space rather than probing the primary key — 10 ms
+        against 0.1 ms at twenty thousand atoms. ``PRAGMA optimize`` analyzes
+        only the tables whose size has moved enough to matter, so it is cheap
+        enough to run on every open and every few epochs. The 0x10000 bit
+        makes it consider every table, not only those this connection has
+        already queried, which on a connection just opened may be none.
+
+        A connection reads the statistics when it loads the schema, and an
+        ANALYZE does not make the others reload theirs, so the pooled readers
+        — which serve recall — are replaced afterwards. Draining the pool
+        waits for readers in use to come back, so this must not be called by
+        a thread holding one; the write lock is held throughout so that two
+        callers cannot each drain half the pool and wait on the other.
+        """
+        with self._write_lock:
+            self._write_conn.execute("PRAGMA optimize=0x10002")
+            if self._in_memory:
+                return
+            stale = [self._read_pool.get() for _ in range(_READ_POOL_SIZE)]
+            for conn in stale:
+                conn.close()
+                self._read_pool.put(_make_connection(self._db_path))
 
     _EVIDENCE_COLUMNS = ("text", "source")
 
@@ -351,9 +400,12 @@ class Database:
     )
 
     # The strongest negative claim an entity is the object of, which is the
-    # tone the extractor would give it today.
+    # tone the extractor would give it today. The claim may sit in any space
+    # of the tenant, so the lookup is by target alone, on the index named for
+    # the reason given in ``_cascade_delete``.
     _CLAIM_TONE_SQL = (
-        "(SELECT MIN(r.valence) FROM atoms r WHERE r.type = 'relation' "
+        "(SELECT MIN(r.valence) FROM atoms r INDEXED BY idx_atoms_target "
+        "WHERE r.type = 'relation' "
         "AND r.target_id = atoms.id AND r.tenant_id = atoms.tenant_id "
         "AND r.valence < -0.3 AND r.relation NOT IN ({placeholders}))"
     )
@@ -519,10 +571,15 @@ class Database:
                 conn.commit()
             return
         # Forgotten atoms are out of the index on purpose — ``forget()`` drops
-        # their rows — so they are not counted as missing from it.
-        indexed = conn.execute("SELECT COUNT(*) AS n FROM atoms_fts").fetchone()["n"]
+        # their rows — so they are not counted as missing from it. Both counts
+        # are read from indexes: the FTS5 docsize table holds one small row
+        # per indexed atom, where counting the table itself read every text,
+        # and the stored count is the type index less the forgotten index.
+        indexed = conn.execute("SELECT COUNT(*) AS n FROM atoms_fts_docsize").fetchone()["n"]
         stored = conn.execute(
-            f"SELECT COUNT(*) AS n FROM atoms WHERE type != 'relation' AND NOT {ATOM_FORGOTTEN}"
+            f"""SELECT (SELECT COUNT(*) FROM atoms WHERE type != 'relation')
+                     - (SELECT COUNT(*) FROM atoms WHERE {ATOM_FORGOTTEN} AND type != 'relation')
+                       AS n"""
         ).fetchone()["n"]
         if indexed >= stored and current_format:
             return

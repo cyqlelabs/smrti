@@ -213,6 +213,16 @@ def test_the_proxy_forwards_an_upstream_key_but_never_the_smrti_key(proxied, mon
     assert proxied.seen[-1].headers["authorization"] == "Bearer sk-upstream"
 
 
+def test_a_lowercase_bearer_scheme_is_the_same_credential(proxied, monkeypatch):
+    """The scheme is case-insensitive, and "bearer <smrti key>" beside an
+    X-Api-Key was still forwarded upstream."""
+    from smrti.servers import config as cfg
+
+    monkeypatch.setattr(cfg, "API_KEY", "smrti-key")
+    _chat(proxied, headers={"X-Api-Key": "smrti-key", "Authorization": "bearer smrti-key"})
+    assert "authorization" not in proxied.seen[-1].headers
+
+
 def test_rest_extraction_never_receives_the_smrti_key(keyed, monkeypatch):
     """REST /remember handed the client's Authorization — the Smrti key — to extraction."""
     from smrti.servers import config as cfg
@@ -700,3 +710,27 @@ def test_servers_without_auth_warn_on_any_exposed_bind(monkeypatch, tmp_path, ca
     monkeypatch.setenv("SMRTI_API_KEYS", "k:acme")
     cli._warn_if_exposed("0.0.0.0")  # a bound key turns authentication on too
     assert capsys.readouterr().err == ""
+
+
+def test_serve_viz_opens_the_visualizer_with_its_key(monkeypatch, tmp_path):
+    """A bare /viz is refused when a key is set, so the browser has to arrive
+    with ?key= once to get its session cookie."""
+    from smrti import cli
+
+    opened = []
+    monkeypatch.setenv("SMRTI_API_KEY", "k/1")
+    monkeypatch.setenv("SMRTI_RUN_DIR", str(tmp_path))
+    monkeypatch.setattr("webbrowser.open", opened.append)
+    monkeypatch.setattr("time.sleep", lambda _s: None)
+
+    class _Thread:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr("threading.Thread", _Thread)
+    monkeypatch.setattr("smrti.servers.rest.run_rest_server", lambda **_kw: None)
+    cli.serve_viz(host="127.0.0.1", port=18999, no_browser=False)
+    assert opened == ["http://127.0.0.1:18999/viz?key=k%2F1"]

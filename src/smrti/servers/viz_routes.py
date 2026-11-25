@@ -318,8 +318,7 @@ def create_viz_router(get_mem: GetMemFn) -> APIRouter:
         first, with the mode it ran under and whether it was applied — the
         record shadow mode exists to produce."""
         from smrti.decisions import audit
-        tenants = _decision_tenants(request)
-        return [r for r in audit.get_all() if tenants is None or r.get("tenant_id") in tenants]
+        return audit.records(_decision_tenants(request))
 
     @router.delete("/decisions")
     async def clear_decisions_log():

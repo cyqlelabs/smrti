@@ -54,8 +54,10 @@ def _tenants_of(supplied: str):
 
 
 def _bearer(request: Request) -> str:
+    # The scheme is case-insensitive (RFC 9110), so "bearer <key>" is the
+    # same credential and must be recognised — and stripped — the same way.
     auth = request.headers.get("authorization", "")
-    return auth[7:] if auth.startswith("Bearer ") else ""
+    return auth[7:] if auth[:7].lower() == "bearer " else ""
 
 
 def _error(status: int, message: str, kind: str, code: str) -> JSONResponse:

@@ -275,11 +275,18 @@ def serve_viz(
     _warn_if_exposed(host)
     url = f"http://{host}:{port}/viz"
     typer.echo(f"Starting Smrti visualizer on {url}")
+    # With a key set, a bare /viz is refused: the browser has no way to send
+    # the header. The first visit trades ?key= for a session cookie.
+    browser_url = url
+    if os.environ.get("SMRTI_API_KEY"):
+        from urllib.parse import quote
+
+        browser_url = f"{url}?key={quote(os.environ['SMRTI_API_KEY'], safe='')}"
 
     if not no_browser:
         def _open():
             time.sleep(1.2)
-            webbrowser.open(url)
+            webbrowser.open(browser_url)
 
         threading.Thread(target=_open, daemon=True).start()
 

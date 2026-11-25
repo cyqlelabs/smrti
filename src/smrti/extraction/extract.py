@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import hmac
 import json
 import logging
@@ -48,37 +49,69 @@ _EXTRACT_API_KEY: str = os.environ.get("SMRTI_EXTRACT_API_KEY", "")
 _http_clients: dict[int, tuple[asyncio.AbstractEventLoop, httpx.AsyncClient]] = {}
 
 
+# How many session locks a loop keeps before the idle ones are dropped. One
+# lock per (tenant, space) ever seen grew without bound, and the proxy takes
+# its tenant from a request header.
+_MAX_SESSION_LOCKS = 256
+
+
 class _PerLoopLocks:
     """Session locks keyed by (event loop, session key).
 
     An asyncio.Lock is bound to the loop that created it — awaiting one from
     another loop hangs. Lock dicts are therefore kept per loop, and entries
     for closed loops are evicted lazily so the registry stays bounded.
+    Within a loop, once more than ``_MAX_SESSION_LOCKS`` locks are kept, the
+    ones nobody holds or waits for are dropped as a ``session`` ends; the
+    count ``session`` keeps is what tells them apart, since a lock dropped
+    while a caller waited on it would let the next caller run beside it.
     Dict-style access (``in``, ``[]``, ``clear``) spans all loops.
     """
 
     def __init__(self) -> None:
-        self._entries: dict[int, tuple[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]]] = {}
+        self._entries: dict[
+            int, tuple[asyncio.AbstractEventLoop, dict[str, asyncio.Lock], dict[str, int]]
+        ] = {}
 
-    def get_lock(self, key: str) -> asyncio.Lock:
+    def _loop_entry(self) -> tuple[asyncio.AbstractEventLoop, dict[str, asyncio.Lock], dict[str, int]]:
         loop = asyncio.get_running_loop()
-        for loop_id, (cached_loop, _) in list(self._entries.items()):
+        for loop_id, (cached_loop, _, _) in list(self._entries.items()):
             if cached_loop.is_closed():
                 self._entries.pop(loop_id, None)
         entry = self._entries.get(id(loop))
         if entry is None:
-            entry = (loop, {})
+            entry = (loop, {}, {})
             self._entries[id(loop)] = entry
-        locks = entry[1]
+        return entry
+
+    def get_lock(self, key: str) -> asyncio.Lock:
+        locks = self._loop_entry()[1]
         if key not in locks:
             locks[key] = asyncio.Lock()
         return locks[key]
 
+    @contextlib.asynccontextmanager
+    async def session(self, key: str):
+        """Hold *key*'s lock for the body, counted as its user from before it waits."""
+        _, locks, users = self._loop_entry()
+        lock = self.get_lock(key)
+        users[key] = users.get(key, 0) + 1
+        try:
+            async with lock:
+                yield
+        finally:
+            users[key] -= 1
+            if not users[key]:
+                del users[key]
+            if len(locks) > _MAX_SESSION_LOCKS:
+                for idle in [k for k in locks if k not in users]:
+                    del locks[idle]
+
     def __contains__(self, key: str) -> bool:
-        return any(key in locks for _, locks in self._entries.values())
+        return any(key in locks for _, locks, _ in self._entries.values())
 
     def __getitem__(self, key: str) -> asyncio.Lock:
-        for _, locks in self._entries.values():
+        for _, locks, _ in self._entries.values():
             if key in locks:
                 return locks[key]
         raise KeyError(key)
@@ -1346,7 +1379,7 @@ async def extract_and_link_serialized(
     Cross-session concurrency is preserved (different keys = different locks).
     """
     key = f"{mem.tenant_id}:{mem.write_space}"
-    async with _session_locks.get_lock(key):
+    async with _session_locks.session(key):
         await extract_and_link_hybrid(
             episode_id, content, mem, auth, model, upstream, source, mode
         )

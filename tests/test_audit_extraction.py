@@ -368,3 +368,21 @@ def test_a_pronoun_is_typed_from_the_tagger_in_context_not_a_word_list():
     people = [{"name": "Mia", "type": "person", "aliases": []}, {"name": "Ella", "type": "person", "aliases": []}]
     assert merge_pronoun_entities_in_batch(people) == people
 
+
+# ── the session locks ────────────────────────────────────────────────────────
+
+
+def test_idle_session_locks_are_dropped_but_a_held_one_is_kept():
+    """One lock per (tenant, space) ever seen was kept forever."""
+    locks = extract._PerLoopLocks()
+
+    async def flood():
+        async with locks.session("held"):
+            held = locks.get_lock("held")
+            for n in range(extract._MAX_SESSION_LOCKS * 2):
+                async with locks.session(f"tenant-{n}:space"):
+                    pass
+            assert locks.get_lock("held") is held
+        return len(locks._loop_entry()[1])
+
+    assert asyncio.run(flood()) <= extract._MAX_SESSION_LOCKS

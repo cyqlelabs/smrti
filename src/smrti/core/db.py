@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import queue
 import sqlite3
@@ -11,8 +12,10 @@ from typing import Any
 import sqlite_vec
 
 from smrti.core.models import STRUCTURAL_RELATIONS
-from smrti.core.provenance import ATOM_FORGOTTEN
+from smrti.core.provenance import ATOM_FORGOTTEN, CRITICAL_WARNING_SQL
 from smrti.retrieval.text import lexical_text
+
+logger = logging.getLogger(__name__)
 
 _registry: dict[str, "Database"] = {}
 _registry_lock = threading.Lock()
@@ -164,6 +167,16 @@ def vec_delete(atom_ids: list[str]) -> list[tuple]:
     ]
 
 
+# Chunk size for generated ``IN (...)`` lists, well under SQLite's variable
+# limit on spaces holding tens of thousands of atoms.
+_ID_CHUNK = 400
+
+
+def _chunks(ids: list[str]):
+    for start in range(0, len(ids), _ID_CHUNK):
+        yield ids[start : start + _ID_CHUNK]
+
+
 _SCHEMA_SQL = f"""
 CREATE TABLE IF NOT EXISTS atoms (
     id          TEXT PRIMARY KEY,
@@ -196,8 +209,28 @@ CREATE INDEX IF NOT EXISTS idx_atoms_entity_type ON atoms(entity_type);
 CREATE INDEX IF NOT EXISTS idx_atoms_source ON atoms(source_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_target ON atoms(target_id);
 CREATE INDEX IF NOT EXISTS idx_atoms_label ON atoms(label);
-CREATE INDEX IF NOT EXISTS idx_atoms_sti ON atoms(sti DESC);
 CREATE INDEX IF NOT EXISTS idx_atoms_content_hash ON atoms(tenant_id, space, content_hash);
+
+-- Edge walks inside one space. Without these the planner served
+-- ``source_id = ? AND tenant_id = ? AND space = ?`` from a (tenant_id, space)
+-- index and scanned the whole space per lookup, which made the epoch's
+-- propagation quadratic: 116 s at twenty thousand atoms. The outgoing index
+-- runs on to the target and relation so that link_atoms' existence check is
+-- a point lookup rather than a walk over a hub's edges. The single-column
+-- source and target indexes stay: the foreign-key check on every parent
+-- delete and the tenant-wide delete closure look edges up by endpoint alone.
+CREATE INDEX IF NOT EXISTS idx_atoms_edge_out ON atoms(tenant_id, space, source_id, target_id, relation);
+CREATE INDEX IF NOT EXISTS idx_atoms_edge_in ON atoms(tenant_id, space, target_id);
+
+-- Nothing filters or orders by sti alone, and every boost and decay rewrote it.
+DROP INDEX IF EXISTS idx_atoms_sti;
+
+-- The forgotten atoms, which every open counts: the lexical index check
+-- leaves them out, and the repair of the old forget() looks for them. The
+-- stamp lives in metadata, stored after an atom's whole text, so counting
+-- without this index read every atom's content: 45 ms per count at 250 MiB.
+CREATE INDEX IF NOT EXISTS idx_atoms_forgotten ON atoms(tenant_id, space, type, confidence)
+    WHERE {ATOM_FORGOTTEN};
 
 {_VEC_SCHEMA_SQL};
 
@@ -257,6 +290,24 @@ CREATE INDEX IF NOT EXISTS idx_aliases_atom ON aliases(atom_id);
 
 CREATE INDEX IF NOT EXISTS idx_atoms_label_norm ON atoms(tenant_id, u_lower(label));
 CREATE INDEX IF NOT EXISTS idx_aliases_alias_norm ON aliases(tenant_id, u_lower(alias));
+
+CREATE TABLE IF NOT EXISTS smrti_meta (key TEXT PRIMARY KEY, value TEXT);
+
+-- The stated warnings, which recall looks for on every turn apart from its
+-- candidate pool: a partial index keeps that a scan of the warnings alone,
+-- not of the whole partition.
+CREATE INDEX IF NOT EXISTS idx_atoms_warning ON atoms(tenant_id, space)
+    WHERE {CRITICAL_WARNING_SQL};
+
+CREATE TABLE IF NOT EXISTS epoch_lease (
+    tenant_id       TEXT NOT NULL,
+    space           TEXT NOT NULL,
+    owner           TEXT,
+    expires_at      REAL NOT NULL DEFAULT 0,
+    completed_epoch INTEGER NOT NULL DEFAULT 0,
+    completed_at    TEXT,
+    PRIMARY KEY (tenant_id, space)
+);
 """
 
 _READ_POOL_SIZE = 4
@@ -280,6 +331,9 @@ def _make_connection(db_path: str) -> sqlite3.Connection:
     conn = sqlite3.connect(db_path, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
+    # Under WAL, NORMAL cannot corrupt the file: a power cut can lose the
+    # last commits, never the database. FULL syncs the log on every commit.
+    conn.execute("PRAGMA synchronous=NORMAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.execute("PRAGMA busy_timeout=5000")
     conn.execute("PRAGMA cache_size=-64000")
@@ -297,14 +351,23 @@ class Database:
         self._write_lock = threading.Lock()
         self._read_pool: queue.Queue[sqlite3.Connection] = queue.Queue(maxsize=_READ_POOL_SIZE)
         self._migration_backup_done = False
+        self._closed = False
+        self._transaction_thread: int | None = None
         # Whether this build of SQLite carries FTS5. Retrieval reads it to
         # decide whether the lexical half of the search exists at all.
         self.fts_enabled = False
 
+    @property
+    def _in_memory(self) -> bool:
+        """A private in-memory database exists only on the connection that
+        opened it, so it gets no read pool: reads share the write connection."""
+        return self._db_path == ":memory:"
+
     def initialize(self) -> None:
         self._write_conn = _make_connection(self._db_path)
-        for _ in range(_READ_POOL_SIZE):
-            self._read_pool.put(_make_connection(self._db_path))
+        if not self._in_memory:
+            for _ in range(_READ_POOL_SIZE):
+                self._read_pool.put(_make_connection(self._db_path))
         with self._write_lock:
             self._migrate_vec_atoms()
             self._migrate_content_hash()
@@ -318,6 +381,48 @@ class Database:
             self._migrate_evidence_columns()
             self._init_atoms_fts()
             self._repair_legacy_rows()
+        self.optimize()
+
+    def optimize(self) -> None:
+        """Refresh the query planner's statistics where they have gone stale.
+
+        Without statistics the planner assumes ``tenant_id = ? AND space = ?``
+        picks out a handful of rows, and answers ``id IN (...)`` within a space
+        by scanning the space rather than probing the primary key — 10 ms
+        against 0.1 ms at twenty thousand atoms. ``PRAGMA optimize`` analyzes
+        only the tables whose size has moved enough to matter, so it is cheap
+        enough to run on every open and every few epochs. The 0x10000 bit
+        makes it consider every table, not only those this connection has
+        already queried, which on a connection just opened may be none. The
+        analysis limit samples each index instead of reading all of it, so
+        the cost stops growing with the graph and the plans come out the same.
+
+        ANALYZE needs the write lock. When another process holds it past the
+        busy timeout the statistics are left as they are, with a warning,
+        rather than failing the open: they are an optimization, and the next
+        call gathers them.
+
+        A connection reads the statistics when it loads the schema, and an
+        ANALYZE does not make the others reload theirs, so the pooled readers
+        — which serve recall — are replaced afterwards. Draining the pool
+        waits for readers in use to come back, so this must not be called by
+        a thread holding one; the write lock is held throughout so that two
+        callers cannot each drain half the pool and wait on the other.
+        """
+        with self._write_lock:
+            try:
+                self._write_conn.execute("PRAGMA analysis_limit=1000")
+                self._write_conn.execute("PRAGMA optimize=0x10002")
+            except sqlite3.OperationalError as exc:
+                self._write_conn.rollback()
+                logger.warning("planner statistics for %s not refreshed: %s", self._db_path, exc)
+                return
+            if self._in_memory:
+                return
+            stale = [self._read_pool.get() for _ in range(_READ_POOL_SIZE)]
+            for conn in stale:
+                conn.close()
+                self._read_pool.put(_make_connection(self._db_path))
 
     _EVIDENCE_COLUMNS = ("text", "source")
 
@@ -329,25 +434,34 @@ class Database:
     )
 
     # The strongest negative claim an entity is the object of, which is the
-    # tone the extractor would give it today.
+    # tone the extractor would give it today. The claim may sit in any space
+    # of the tenant, so the lookup is by target alone, on the index named for
+    # the reason given in ``_cascade_delete``.
     _CLAIM_TONE_SQL = (
-        "(SELECT MIN(r.valence) FROM atoms r WHERE r.type = 'relation' "
+        "(SELECT MIN(r.valence) FROM atoms r INDEXED BY idx_atoms_target "
+        "WHERE r.type = 'relation' "
         "AND r.target_id = atoms.id AND r.tenant_id = atoms.tenant_id "
         "AND r.valence < -0.3 AND r.relation NOT IN ({placeholders}))"
     )
 
     # Healing used to draw person -> associated -> concept placeholders at
-    # confidence 0.2; association discovery's own edges start at 0.1. Both
-    # are below this line, and discovery redraws its own on the next tenth
-    # epoch if they are still warranted.
+    # confidence 0.2. Association discovery still draws ``associated`` edges
+    # at 0.1, out of a person as readily as out of anything else, so no row
+    # tells the two apart: the cleanup runs once per database, and this key
+    # records that it has. Run on every open, it deleted discovery's live
+    # edges each time. Discovery redraws its own on the next tenth epoch if
+    # they are still warranted.
     _HUB_EDGE_MAX_CONFIDENCE = 0.2
+    _HUB_CLEANUP_KEY = "repair_hub_edges"
 
     def _repair_legacy_rows(self) -> None:
         """Bring rows written by earlier releases in line with the current code.
 
-        Three repairs. Each touches only rows that still carry the legacy
-        shape, so it is idempotent: safe on every open, and it also mends
-        whatever a process running older code writes in the meantime.
+        Two repairs run on every open. Each touches only rows in a shape the
+        current code never writes, so it is idempotent: safe on every open,
+        and it also mends whatever a process running older code writes in
+        the meantime. The third runs once per database, because the shape it
+        removes is one the current code writes too.
 
         * Extracted entities written before every creation path set the
           intrinsic valence pair (resolver-made, so no ``content``) have it
@@ -359,15 +473,16 @@ class Database:
           — which is exactly what ``_lower_tone`` writes today. Episodes
           written before the split are left alone: nothing records the tone
           they were stored with.
-        * The placeholder ``associated`` edges the old healing step drew out
-          of every person atom are removed. They made the person a hub joined
-          to everything in the space.
         * Atoms forgotten by the old ``forget()``, which left them at the
           surfacing floor rather than under it, are sunk below it so the
           pruner can take them, as the current ``forget()`` does.
+        * Once: the placeholder ``associated`` edges the old healing step
+          drew out of every person atom are removed, with everything that
+          references them. They made the person a hub joined to everything
+          in the space.
 
-        The file is snapshotted first, like a schema migration, whenever any
-        row is going to change.
+        The file is snapshotted first whenever a row is going to change,
+        unless a snapshot is already there (see ``_backup_before_migration``).
         """
         conn = self._write_conn
         if (
@@ -383,27 +498,24 @@ class Database:
         legacy_entities = (
             "intrinsic_valence IS NULL AND content IS NULL AND type != 'relation'"
         )
-        hub_edges = (
-            "SELECT r.id FROM atoms r JOIN atoms p ON p.id = r.source_id "
-            "WHERE r.type = 'relation' AND r.relation = 'associated' "
-            "AND r.confidence <= ? AND p.entity_type = 'person'"
-        )
         legacy_forgotten = f"{ATOM_FORGOTTEN} AND confidence >= {self._FLOOR_SQL}"
 
         entity_count = conn.execute(
             f"SELECT COUNT(*) FROM atoms WHERE {legacy_entities}"
         ).fetchone()[0]
-        hub_ids = [r[0] for r in conn.execute(hub_edges, (self._HUB_EDGE_MAX_CONFIDENCE,))]
         forgotten_count = conn.execute(
             f"SELECT COUNT(*) FROM atoms WHERE {legacy_forgotten}"
         ).fetchone()[0]
-        if not (entity_count or hub_ids or forgotten_count):
+        hub_edges = self._pending_hub_edges(conn)
+        if not (entity_count or forgotten_count or hub_edges is not None):
             return
 
-        self._backup_before_migration()
+        if entity_count or forgotten_count or hub_edges:
+            self._backup_before_migration(replace=False)
         try:
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
+            conn.execute("PRAGMA defer_foreign_keys = ON")
             if entity_count:
                 conn.execute(
                     f"""UPDATE atoms SET
@@ -412,12 +524,8 @@ class Database:
                         WHERE {legacy_entities}""",
                     (*STRUCTURAL_RELATIONS, *STRUCTURAL_RELATIONS),
                 )
-            for start in range(0, len(hub_ids), 400):
-                chunk = hub_ids[start : start + 400]
-                ph = ",".join("?" * len(chunk))
-                conn.execute(f"DELETE FROM evidence WHERE atom_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM aliases WHERE atom_id IN ({ph})", chunk)
-                conn.execute(f"DELETE FROM atoms WHERE id IN ({ph})", chunk)
+            if hub_edges is not None:
+                self._delete_hub_edges(conn, hub_edges)
             if forgotten_count:
                 conn.execute(
                     f"""UPDATE atoms SET confidence = MIN(confidence, 0.5 * {self._FLOOR_SQL})
@@ -427,6 +535,32 @@ class Database:
         except Exception:
             conn.rollback()
             raise
+
+    def _pending_hub_edges(self, conn: sqlite3.Connection) -> list[sqlite3.Row] | None:
+        """The old healing step's hub edges, or None once their cleanup has run here."""
+        if conn.execute(
+            "SELECT 1 FROM smrti_meta WHERE key = ?", (self._HUB_CLEANUP_KEY,)
+        ).fetchone():
+            return None
+        return conn.execute(
+            "SELECT r.id, r.tenant_id FROM atoms r JOIN atoms p ON p.id = r.source_id "
+            "WHERE r.type = 'relation' AND r.relation = 'associated' "
+            "AND r.confidence <= ? AND p.entity_type = 'person'",
+            (self._HUB_EDGE_MAX_CONFIDENCE,),
+        ).fetchall()
+
+    def _delete_hub_edges(self, conn: sqlite3.Connection, hub_edges: list[sqlite3.Row]) -> None:
+        """Delete the hub edges with everything that references them, and record
+        that the cleanup has run, inside the caller's transaction."""
+        by_tenant: dict[str, list[str]] = {}
+        for r in hub_edges:
+            by_tenant.setdefault(r["tenant_id"], []).append(r["id"])
+        for tenant_id, ids in by_tenant.items():
+            self._cascade_delete(conn, ids, tenant_id)
+        conn.execute(
+            "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES (?, '1')",
+            (self._HUB_CLEANUP_KEY,),
+        )
 
     def _migrate_evidence_columns(self) -> None:
         """Add the columns that record what an observation was and who made it.
@@ -497,10 +631,15 @@ class Database:
                 conn.commit()
             return
         # Forgotten atoms are out of the index on purpose — ``forget()`` drops
-        # their rows — so they are not counted as missing from it.
-        indexed = conn.execute("SELECT COUNT(*) AS n FROM atoms_fts").fetchone()["n"]
+        # their rows — so they are not counted as missing from it. Both counts
+        # are read from indexes: the FTS5 docsize table holds one small row
+        # per indexed atom, where counting the table itself read every text,
+        # and the stored count is the type index less the forgotten index.
+        indexed = conn.execute("SELECT COUNT(*) AS n FROM atoms_fts_docsize").fetchone()["n"]
         stored = conn.execute(
-            f"SELECT COUNT(*) AS n FROM atoms WHERE type != 'relation' AND NOT {ATOM_FORGOTTEN}"
+            f"""SELECT (SELECT COUNT(*) FROM atoms WHERE type != 'relation')
+                     - (SELECT COUNT(*) FROM atoms WHERE {ATOM_FORGOTTEN} AND type != 'relation')
+                       AS n"""
         ).fetchone()["n"]
         if indexed >= stored and current_format:
             return
@@ -594,7 +733,7 @@ class Database:
             conn.rollback()
             raise
 
-    def _backup_before_migration(self) -> None:
+    def _backup_before_migration(self, replace: bool = True) -> None:
         """Snapshot the whole DB file before the first schema-altering migration.
 
         Each migration is transactional, but a file-level copy is the only
@@ -605,10 +744,18 @@ class Database:
         checkpointed into the main file. At most one snapshot per open; a
         later release's migration overwrites it, by which point this
         snapshot's state has already been validated by a successful upgrade.
+
+        A data repair passes ``replace=False`` and only writes a snapshot
+        where there is none. Repairs can find work on any open — beside a
+        process running older code, on every one — and replacing the file
+        each time overwrote the snapshot a downgrade needs with a copy of a
+        file the new release had already changed.
         """
-        if self._migration_backup_done or self._db_path == ":memory:":
+        if self._migration_backup_done or self._in_memory:
             return
         backup_path = self._db_path + ".pre-migration.bak"
+        if not replace and os.path.exists(backup_path):
+            return
         try:
             # A stale or corrupt leftover is not a valid backup destination.
             os.remove(backup_path)
@@ -786,8 +933,136 @@ class Database:
                 self._write_conn.rollback()
                 raise
 
+    def delete_atoms(self, atom_ids: list[str], tenant_id: str) -> int:
+        """Hard-delete *tenant_id*'s atoms among *atom_ids* with everything that
+        references them, in one transaction. Returns the count of atoms removed.
+
+        The closure is read inside the transaction that deletes it. Read
+        through the pool before the write lock was taken, an edge committed
+        in between — by another thread or another process — still pointed at
+        an atom the delete then removed, and the commit failed its
+        foreign-key check.
+        """
+        with self.transaction() as conn:
+            return self.delete_atoms_in(conn, atom_ids, tenant_id)
+
+    def delete_atoms_in(self, conn: sqlite3.Connection, atom_ids: list[str], tenant_id: str) -> int:
+        """:meth:`delete_atoms` inside a :meth:`transaction` the caller holds, so
+        the delete commits or rolls back with the rest of the caller's writes."""
+        conn.execute("PRAGMA defer_foreign_keys = ON")
+        return self._cascade_delete(conn, atom_ids, tenant_id)
+
+    def _cascade_delete(self, conn: sqlite3.Connection, atom_ids: list[str], tenant_id: str) -> int:
+        """Delete the closure of *atom_ids* within *tenant_id* on *conn*.
+
+        Runs inside the caller's write transaction, with foreign-key checks
+        deferred to its commit, so that the order of the deletes inside the
+        closure does not matter. The ids are scoped to the tenant first: the
+        caller's list is not trusted to hold only the tenant's atoms.
+
+        The set grows to closure: the relation edges on the atoms, the edges
+        on those edges (a ``contradicts`` edge between two claim edges), and
+        so on, in any space of the tenant, since a bridge space points back
+        into both parents. Evidence and aliases are filed against relation
+        atoms too, and all three references are enforced foreign keys.
+
+        The endpoint lookups name their index. Statistics gathered while a
+        graph held few edges describe ``source_id`` and ``target_id`` as
+        almost all NULL, and the planner then preferred to scan the whole
+        tenant for each one.
+        """
+        doomed: dict[str, None] = {}
+        for chunk in _chunks(list(dict.fromkeys(atom_ids))):
+            ph = ",".join("?" * len(chunk))
+            doomed.update(
+                (r["id"], None)
+                for r in conn.execute(f"SELECT id, tenant_id FROM atoms WHERE id IN ({ph})", chunk)
+                if r["tenant_id"] == tenant_id
+            )
+        frontier = list(doomed)
+        while frontier:
+            found: dict[str, None] = {}
+            for chunk in _chunks(frontier):
+                ph = ",".join("?" * len(chunk))
+                for column, index in (("source_id", "idx_atoms_source"), ("target_id", "idx_atoms_target")):
+                    found.update(
+                        (r["id"], None)
+                        for r in conn.execute(
+                            f"""SELECT id FROM atoms INDEXED BY {index}
+                                WHERE {column} IN ({ph}) AND type = 'relation' AND tenant_id = ?""",
+                            (*chunk, tenant_id),
+                        )
+                        if r["id"] not in doomed
+                    )
+            doomed.update(found)
+            frontier = list(found)
+
+        ids = list(doomed)
+        for chunk in _chunks(ids):
+            ph = ",".join("?" * len(chunk))
+            for sql, params in (
+                *vec_delete(chunk),
+                *fts_delete(self, chunk),
+                (f"DELETE FROM evidence WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM aliases WHERE atom_id IN ({ph})", tuple(chunk)),
+                (f"DELETE FROM atoms WHERE id IN ({ph})", tuple(chunk)),
+            ):
+                conn.execute(sql, params)
+        return len(ids)
+
+    def meta_get(self, key: str) -> str | None:
+        """A value from ``smrti_meta``, the database's own key-value record of
+        which formats and one-time changes it has been through."""
+        row = self.fetchone("SELECT value FROM smrti_meta WHERE key = ?", (key,))
+        return row["value"] if row else None
+
+    def meta_set(self, key: str, value: str) -> None:
+        self.execute(
+            "INSERT OR REPLACE INTO smrti_meta (key, value) VALUES (?, ?)", (key, value)
+        )
+
+    @contextmanager
+    def transaction(self):
+        """One ``BEGIN IMMEDIATE`` transaction on the write connection.
+
+        Reads inside it see the rows its writes change, and no other
+        connection, in this process or another, can write until it commits.
+        ``execute`` commits per call and ``fetchall`` reads on a pooled
+        connection, so a read there and a write there are two transactions
+        with a gap between them — two processes reading the same pending
+        evidence in that gap each applied it. Inside, use only the connection
+        yielded: ``execute`` would wait on the lock held here.
+        """
+        with self._write_lock:
+            conn = self._write_conn
+            conn.commit()
+            conn.execute("BEGIN IMMEDIATE")
+            self._transaction_thread = threading.get_ident()
+            try:
+                yield conn
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+            finally:
+                self._transaction_thread = None
+
     @contextmanager
     def _read_conn(self):
+        # A closed database has an empty pool, and waiting on it would block
+        # the caller forever: a handle kept past close() — a server's cached
+        # instance outliving its database — must fail, not hang.
+        if self._closed:
+            raise sqlite3.ProgrammingError(f"the database {self._db_path} is closed")
+        if self._in_memory:
+            # Reads share the write connection here, under its lock — except
+            # inside this thread's own transaction, which already holds it.
+            if self._transaction_thread == threading.get_ident():
+                yield self._write_conn
+                return
+            with self._write_lock:
+                yield self._write_conn
+            return
         conn = self._read_pool.get()
         try:
             yield conn
@@ -805,6 +1080,7 @@ class Database:
             return cursor.fetchone()
 
     def close(self) -> None:
+        self._closed = True
         if self._write_conn:
             self._write_conn.close()
             self._write_conn = None

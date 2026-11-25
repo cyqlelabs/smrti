@@ -25,12 +25,17 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import queue
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
-from typing import Any, Mapping
+from concurrent.futures import Future, TimeoutError as FutureTimeout
+from typing import Any, Callable, Mapping
 
 from .provider import (
+    DecisionBusy,
+    DecisionInvalid,
+    DecisionNotReady,
+    DecisionTimeout,
     DecisionUnavailable,
     Decisions,
     Question,
@@ -54,6 +59,67 @@ def _tokens(usage: Mapping[str, Any], name: str) -> int:
         return 0
 
 
+class _Worker:
+    """One daemon thread that runs the calls submitted to it in turn.
+
+    A ``ThreadPoolExecutor`` would serialize them as well, but its workers
+    are not daemons: the interpreter joins them at exit, so one inference
+    that hangs held the process open for fifteen seconds after the decision
+    that started it had already given up. Nothing a decision is doing is
+    worth keeping a process alive for.
+    """
+
+    def __init__(self, name: str) -> None:
+        self._name = name
+        self._queue: queue.SimpleQueue = queue.SimpleQueue()
+        self._lock = threading.Lock()
+        self._thread: threading.Thread | None = None
+        self._closed = False
+
+    def submit(self, fn: Callable[..., Any], *args: Any) -> Future:
+        future: Future = Future()
+        with self._lock:
+            if self._closed:
+                raise DecisionUnavailable("the decision provider has been closed")
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name=self._name, daemon=True)
+                self._thread.start()
+            self._queue.put((future, fn, args))
+        return future
+
+    def _run(self) -> None:
+        while True:
+            item = self._queue.get()
+            if item is None:
+                return
+            future, fn, args = item
+            # False when the caller cancelled it while it waited: skip it.
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                result = fn(*args)
+            except BaseException as exc:
+                future.set_exception(exc)
+            else:
+                future.set_result(result)
+
+    def close(self) -> None:
+        """Cancel what is still queued and let the thread end; a call already
+        running cannot be interrupted and finishes on its own."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+        while True:
+            try:
+                item = self._queue.get_nowait()
+            except queue.Empty:
+                break
+            if item is not None:
+                item[0].cancel()
+        self._queue.put(None)
+
+
 class LocalProvider:
     """A lazy, process-local model with bounded, serialized calls."""
 
@@ -66,21 +132,22 @@ class LocalProvider:
     def __init__(self, model: str = "") -> None:
         self.model = model
         self._agent: Any | None = None
-        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"smrti-{self.name}")
+        self._worker = _Worker(f"smrti-{self.name}")
         # When the one worker is running a prediction, this is when it
         # started; 0.0 while it is idle. Read by ``_refuse_if_overrun`` to
         # tell a busy model from one that has stopped answering.
         self._running_since = 0.0
         self._accounting_lock = threading.Lock()
+        # Calls submitted to the worker and not yet settled. A call that
+        # found another ahead of it shares the worker, and a deadline it
+        # spends waiting is its own budget, not the model failing.
+        self._inflight = 0
         self.input_tokens = 0
         self.output_tokens = 0
         self.requests = 0
-        # Load state, guarded by ``_load_lock``. The loader runs on a daemon
-        # thread rather than on ``_executor``: a checkpoint download must not
-        # sit in front of the inference queue, and a non-daemon worker stuck
-        # in a download keeps the interpreter from exiting at all — the
-        # ThreadPoolExecutor atexit hook joins it, which is how a stopped
-        # engine leaves a process that will not die.
+        # Load state, guarded by ``_load_lock``. The loader runs on its own
+        # daemon thread rather than on the inference worker: a checkpoint
+        # download must not sit in front of the inference queue.
         self._load_lock = threading.Lock()
         self._loader: threading.Thread | None = None
         self._load_error: str | None = None
@@ -140,7 +207,9 @@ class LocalProvider:
         A decision is worth a few milliseconds of a recall and nothing like
         the minutes a first load can take, so the caller is never made to
         wait for it: it is told the model is not ready and takes the path it
-        had before decisions existed.
+        had before decisions existed. A load still running is
+        ``DecisionNotReady``, which the engine does not hold against the
+        provider; a load that failed is ``DecisionUnavailable``, which it does.
         """
         agent = self._agent
         if agent is not None:
@@ -148,13 +217,9 @@ class LocalProvider:
         self._begin_load()
         with self._load_lock:
             error, loading = self._load_error, self._loader is not None
-        if error is not None:
+        if error is not None and not loading:
             raise DecisionUnavailable(f"the decision model is not available: {error}")
-        raise DecisionUnavailable(
-            "the decision model is still loading"
-            if loading
-            else "the decision model is not loaded"
-        )
+        raise DecisionNotReady("the decision model is still loading")
 
     @property
     def ready(self) -> bool:
@@ -200,7 +265,7 @@ class LocalProvider:
                     # nothing here worth salvaging — and the whole point of
                     # stopping is to not spend the next chunk's memory and
                     # cores on an answer that will never be read.
-                    raise DecisionUnavailable(
+                    raise DecisionTimeout(
                         f"the decision model answered {len(answers)} of {len(items)} "
                         "questions before the deadline"
                     )
@@ -210,9 +275,9 @@ class LocalProvider:
                 except DecisionUnavailable:
                     raise
                 except Exception as exc:
-                    raise DecisionUnavailable(f"decision inference failed: {exc}") from exc
+                    raise DecisionInvalid(f"decision inference failed: {exc}") from exc
                 if not isinstance(piece, Mapping):
-                    raise DecisionUnavailable("reply is not an object")
+                    raise DecisionInvalid("reply is not an object")
                 part = piece.get("answers")
                 if isinstance(part, Mapping):
                     answers.update(part)
@@ -235,16 +300,48 @@ class LocalProvider:
 
         Inference is serialized on one worker and a running call cannot be
         cancelled — ``Future.cancel`` does nothing once the work has started.
-        So a caller that queues behind one which has already outrun its own
-        deadline spends its whole deadline in a wait that cannot succeed, and
-        so does every caller behind it. The deterministic path is right there
-        and costs nothing.
+        So a caller that queues behind one which has already run longer than
+        this caller's whole deadline spends that deadline in a wait that
+        cannot succeed, and so does every caller behind it. The deterministic
+        path is right there and costs nothing. The refusal is ``DecisionBusy``:
+        another call holds the worker, which is this caller's budget and not
+        an outage — a model that has stopped answering is found by the call
+        that had the worker to itself and still ran out of time.
         """
         started = self._running_since
         if started and time.monotonic() - started >= deadline:
-            raise DecisionUnavailable(
+            raise DecisionBusy(
                 "the decision model is busy with a call that outran its deadline"
             )
+
+    def _submit(self, state: State, questions: Mapping[str, Question], stop_at: float) -> tuple[Future, bool]:
+        """Queue a prediction; return it and whether another call was ahead."""
+        with self._accounting_lock:
+            contended = self._inflight > 0
+            self._inflight += 1
+        try:
+            future = self._worker.submit(self._predict, state, questions, stop_at)
+        except BaseException:
+            self._settled(None)
+            raise
+        future.add_done_callback(self._settled)
+        return future, contended
+
+    def _settled(self, _future: Future | None) -> None:
+        with self._accounting_lock:
+            self._inflight -= 1
+
+    @staticmethod
+    def _late(deadline: float, contended: bool) -> DecisionTimeout:
+        """What a deadline that ran out means. A call that shared the worker
+        spent some of it waiting for another caller's inference, which is its
+        own budget; a call that had the worker to itself and still ran out is
+        the model failing to answer in time."""
+        if contended:
+            return DecisionBusy(
+                f"no answer within {deadline:.1f}s: the decision model was busy with other callers"
+            )
+        return DecisionTimeout(f"no answer from the decision model within {deadline:.1f}s")
 
     def _read(
         self,
@@ -272,7 +369,7 @@ class LocalProvider:
         except (TypeError, ValueError) as exc:
             raise ValueError(f"decision timeout must be a number, got {timeout!r}") from exc
         if deadline <= 0:
-            raise DecisionUnavailable("decision deadline has already expired")
+            raise DecisionTimeout("decision deadline has already expired")
         return deadline
 
     def ask(
@@ -286,14 +383,14 @@ class LocalProvider:
         self._require_ready()
         self._refuse_if_overrun(deadline)
         started = time.monotonic()
-        future = self._executor.submit(self._predict, state, questions, started + deadline)
+        future, contended = self._submit(state, questions, started + deadline)
         try:
             result = future.result(timeout=deadline)
-        except FutureTimeout as exc:
+        except (FutureTimeout, DecisionTimeout) as exc:
             # Cancelling only helps while the work is still queued; one that
             # has started stops at its next question, on ``stop_at``.
             future.cancel()
-            raise DecisionUnavailable(f"no answer from the decision model within {deadline:.1f}s") from exc
+            raise self._late(deadline, contended) from exc
         return self._read(result, questions, started)
 
     async def ask_async(
@@ -307,19 +404,19 @@ class LocalProvider:
         self._require_ready()
         self._refuse_if_overrun(deadline)
         started = time.monotonic()
-        future = self._executor.submit(self._predict, state, questions, started + deadline)
+        future, contended = self._submit(state, questions, started + deadline)
         wrapped = asyncio.wrap_future(future)
         try:
             result = await asyncio.wait_for(asyncio.shield(wrapped), timeout=deadline)
-        except asyncio.TimeoutError as exc:
+        except (asyncio.TimeoutError, DecisionTimeout) as exc:
             # Cancelling only helps while the work is still queued; one that
             # has started stops at its next question, on ``stop_at``.
             future.cancel()
-            raise DecisionUnavailable(f"no answer from the decision model within {deadline:.1f}s") from exc
+            raise self._late(deadline, contended) from exc
         return self._read(result, questions, started)
 
     def close(self) -> None:
-        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._worker.close()
 
     async def aclose(self) -> None:
         self.close()

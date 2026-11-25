@@ -19,6 +19,7 @@ import struct
 from smrti.core.atomspace import AtomSpace
 from smrti.core.db import stable_rowid
 from smrti.core.models import TruthValue
+from smrti.core.provenance import ATOM_FORGOTTEN
 
 # Cosine distance ceiling for a pair to be linked (similarity >= 0.6).
 _MAX_DISTANCE = 0.4
@@ -26,6 +27,20 @@ _MAX_DISTANCE = 0.4
 # An association is the weakest edge the graph draws: an extracted relation
 # or a healed mention should always outrank it.
 _ASSOCIATION_TRUTH = TruthValue(probability=0.5, confidence=0.1)
+
+
+def _forgotten_among(db, atom_ids: list[str]) -> set[str]:
+    """Which of *atom_ids* were forgotten. A legacy forgotten atom may still
+    have its vector row, so the nearest-neighbour probe can return one."""
+    if not atom_ids:
+        return set()
+    ph = ",".join("?" * len(atom_ids))
+    return {
+        r["id"]
+        for r in db.fetchall(
+            f"SELECT id FROM atoms WHERE id IN ({ph}) AND {ATOM_FORGOTTEN}", tuple(atom_ids)
+        )
+    }
 
 
 def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
@@ -36,11 +51,17 @@ def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
     are not yet directly linked. Creates a weak 'associated' relation atom for
     each new pair within cosine distance 0.4.
 
+    Forgotten atoms take no part on either end. forget() drops an atom's
+    vector, so one that still had LTI was re-embedded here and linked back
+    to its paraphrases — an edge that leads expansion straight to what the
+    caller asked to be rid of.
+
     Returns the count of new relation atoms created.
     """
     high_lti = db.fetchall(
-        """SELECT id, label, content FROM atoms
+        f"""SELECT id, label, content FROM atoms
            WHERE tenant_id = ? AND space = ? AND lti > 0.3 AND type != 'relation'
+             AND NOT {ATOM_FORGOTTEN}
            ORDER BY lti DESC LIMIT 50""",
         (tenant_id, space),
     )
@@ -75,6 +96,7 @@ def discover_connections(tenant_id: str, space: str, db, embed_engine) -> int:
             (atom["id"], tenant_id, space, atom["id"], tenant_id, space),
         )
         existing_ids = {r["neighbor"] for r in existing_rows if r["neighbor"]}
+        existing_ids |= _forgotten_among(db, [c["atom_id"] for c in knn])
 
         for candidate in knn:
             cid = candidate["atom_id"]

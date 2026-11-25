@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>smrti — memory engine for AI agents | Bayesian knowledge graphs</title>
-  <meta name="description" content="AtomSpace-inspired memory engine for AI agents with Bayesian truth values, emotional valence, and attention-weighted salience. Single SQLite file. Python 3.10+.">
-  <meta name="keywords" content="AI memory, agent memory, AtomSpace, Bayesian truth values, emotional valence, attention-weighted salience, SQLite, Python, MCP, knowledge graph, AI agents, LLM memory, probabilistic logic networks">
+  <title>smrti — memory engine for AI agents | PLN-style evidence revision</title>
+  <meta name="description" content="AtomSpace-inspired memory engine for AI agents with truth values revised from evidence (PLN-style), emotional valence, and attention-weighted salience. Single SQLite file. Python 3.10+.">
+  <meta name="keywords" content="AI memory, agent memory, AtomSpace, PLN truth values, evidence revision, emotional valence, attention-weighted salience, SQLite, Python, MCP, knowledge graph, AI agents, LLM memory, probabilistic logic networks">
   <meta name="author" content="cyqlelabs">
   <meta name="robots" content="index, follow">
   <meta name="theme-color" content="#1a1412">
@@ -14,22 +14,22 @@
   <!-- Open Graph -->
   <meta property="og:type" content="website">
   <meta property="og:url" content="https://smrti.im/">
-  <meta property="og:title" content="smrti — memory engine for AI agents | Bayesian knowledge graphs">
-  <meta property="og:description" content="AtomSpace-inspired memory engine with Bayesian truth values, emotional valence, and attention-weighted salience. Single SQLite file. Python 3.10+.">
+  <meta property="og:title" content="smrti — memory engine for AI agents | PLN-style evidence revision">
+  <meta property="og:description" content="AtomSpace-inspired memory engine with truth values revised from evidence (PLN-style), emotional valence, and attention-weighted salience. Single SQLite file. Python 3.10+.">
   <meta property="og:image" content="https://smrti.im/og-image.png">
   <meta property="og:image:type" content="image/png">
   <meta property="og:image:width" content="1200">
   <meta property="og:image:height" content="630">
-  <meta property="og:image:alt" content="smrti — Memory Engine for AI Agents. Bayesian truth values, emotional valence, attention-weighted salience. pip install smrti">
+  <meta property="og:image:alt" content="smrti — Memory Engine for AI Agents. PLN-style evidence revision, emotional valence, attention-weighted salience. pip install smrti">
   <meta property="og:site_name" content="smrti">
   <meta property="og:locale" content="en_US">
 
   <!-- Twitter Card -->
   <meta name="twitter:card" content="summary_large_image">
-  <meta name="twitter:title" content="smrti — memory engine for AI agents | Bayesian knowledge graphs">
-  <meta name="twitter:description" content="AtomSpace-inspired memory engine with Bayesian truth values, emotional valence, and attention-weighted salience. Single SQLite file. Python 3.10+.">
+  <meta name="twitter:title" content="smrti — memory engine for AI agents | PLN-style evidence revision">
+  <meta name="twitter:description" content="AtomSpace-inspired memory engine with truth values revised from evidence (PLN-style), emotional valence, and attention-weighted salience. Single SQLite file. Python 3.10+.">
   <meta name="twitter:image" content="https://smrti.im/og-image.png">
-  <meta name="twitter:image:alt" content="smrti — Memory Engine for AI Agents. Bayesian truth values, emotional valence, attention-weighted salience. pip install smrti">
+  <meta name="twitter:image:alt" content="smrti — Memory Engine for AI Agents. PLN-style evidence revision, emotional valence, attention-weighted salience. pip install smrti">
 
   <!-- JSON-LD structured data -->
   <script type="application/ld+json">
@@ -37,7 +37,7 @@
     "@context": "https://schema.org",
     "@type": "SoftwareApplication",
     "name": "smrti",
-    "description": "AtomSpace-inspired memory engine for AI agents with Bayesian truth values, emotional valence, and attention-weighted salience.",
+    "description": "AtomSpace-inspired memory engine for AI agents with truth values revised from evidence (PLN-style), emotional valence, and attention-weighted salience.",
     "url": "https://smrti.im/",
     "applicationCategory": "DeveloperApplication",
     "operatingSystem": "Cross-platform",
@@ -881,7 +881,7 @@
         <h1 class="hero-title">smrti</h1>
       </div>
       <p class="hero-sub">Memory engine for AI agents.</p>
-      <p class="hero-prop">Bayesian beliefs. Emotional valence. Attention-weighted salience. Spaces that evolve apart. A single SQLite file.</p>
+      <p class="hero-prop">Beliefs revised from evidence. Emotional valence. Attention-weighted salience. Spaces that evolve apart. A single SQLite file.</p>
       <div class="hero-actions">
         <code class="install-cmd"><span class="dollar">$ </span>pip install smrti</code>
         <a class="gh-link" href="https://github.com/cyqlelabs/smrti" target="_blank" rel="noopener">
@@ -948,7 +948,7 @@
       <div class="wrap">
         <p class="section-label">What it is</p>
         <h2 class="section-title">Knowledge stored as atoms</h2>
-        <p class="section-text">smrti is an <a href="https://github.com/opencog/atomspace" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;border-bottom:1px solid var(--border)">AtomSpace</a>-inspired graph database for agent memory. Each node&mdash;an atom&mdash;carries a Bayesian truth value, an emotional valence, and an attention weight. Retrieval ranks by salience, relevance scaled by standing, not by timestamp. Your agent remembers what matters, not just what happened last.</p>
+        <p class="section-text">smrti is an <a href="https://github.com/opencog/atomspace" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;border-bottom:1px solid var(--border)">AtomSpace</a>-inspired graph database for agent memory. Each node&mdash;an atom&mdash;carries a truth value (a probability, and a confidence that grows with the evidence count), an emotional valence, and an attention weight. Retrieval ranks by salience, relevance scaled by standing, not by timestamp. Your agent remembers what matters, not just what happened last.</p>
         <p class="section-text">Evidence is append-only. Observations are logged and revised into truth values during consolidation epochs via PLN (Probabilistic Logic Networks); a superseded claim loses, and a report that a memory was used counts as evidence too. Multi-tenant isolation keeps agent memories separate by tenant and space.</p>
 
         <div class="atom-model">
@@ -985,14 +985,14 @@
       <div class="wrap">
         <p class="section-label">Architecture</p>
         <h2 class="section-title">Eight layers, one SQLite file</h2>
-        <p class="section-text">Vector indexing via sqlite-vec (multilingual-MiniLM-L12-v2, 384 dimensions, 50+ languages) and lexical indexing via FTS5, both in the one file. Entity resolution cascades through exact match, cross-type label match, alias lookup, fuzzy matching (RapidFuzz), and embedding similarity before creating new nodes.</p>
+        <p class="section-text">Vector indexing via sqlite-vec (multilingual-MiniLM-L12-v2, 384 dimensions, 50+ languages) and lexical indexing via FTS5, both in the one file. Entity resolution merges a mention on an exact label, a compatible-type label, a stored alias, or a case- and accent-folded label. A fuzzy (RapidFuzz) or embedding match only proposes candidates; without a confident <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">entity</code> decision the mention becomes a new node.</p>
 
         <div class="arch-container" id="archDiagram">
           <div class="arch-facade">smrti facade</div>
           <div class="arch-layers">
             <div class="arch-layer">
               <span class="arch-layer-name">servers</span>
-              <span class="arch-layer-files">config.py &middot; mcp.py &middot; rest.py &middot; proxy.py &middot; viz_routes.py &middot; reflect_loop.py &middot; tools.py</span>
+              <span class="arch-layer-files">config.py &middot; common.py (auth, limits, shutdown) &middot; mcp.py &middot; rest.py &middot; proxy.py &middot; viz_routes.py &middot; reflect_loop.py &middot; tools.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -1002,7 +1002,7 @@
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
               <span class="arch-layer-name">evolution</span>
-              <span class="arch-layer-files">epoch.py &middot; truth.py (PLN revision) &middot; reinforcement.py &middot; attention.py &middot; valence.py &middot; healing.py &middot; connections.py</span>
+              <span class="arch-layer-files">epoch.py &middot; truth.py (PLN revision) &middot; reinforcement.py &middot; attention.py &middot; valence.py &middot; healing.py &middot; connections.py &middot; forgetting.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -1017,7 +1017,7 @@
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
               <span class="arch-layer-name">extraction</span>
-              <span class="arch-layer-files">extract.py (hybrid GLiNER + LLM extraction) &middot; ner.py (16-type zero-shot NER) &middot; resolve.py (5-tier entity resolution) &middot; pronouns.py &middot; sentiment.py &middot; temporal.py (relative dates resolved at write time) &middot; aliases.py</span>
+              <span class="arch-layer-files">extract.py (hybrid GLiNER + LLM extraction) &middot; ner.py (16-type zero-shot NER) &middot; resolve.py (tiered entity resolution; near matches only propose) &middot; pronouns.py &middot; sentiment.py &middot; temporal.py (relative dates resolved at write time) &middot; aliases.py</span>
             </div>
             <div class="arch-layer-arrow">&darr;</div>
             <div class="arch-layer">
@@ -1132,7 +1132,9 @@ forgotten = engine.<span class="fn">forget</span>(<span class="st">"Friday deplo
 
 <span class="cm"># Confidence sinks below the surfacing floor and the atoms</span>
 <span class="cm"># are stamped: excluded from every recall, never lifted back</span>
-<span class="cm"># by consolidation, and removed by a later epoch.</span></pre></div>
+<span class="cm"># by consolidation, and removed by a later epoch.</span>
+<span class="cm"># cascade=True also forgets the concepts and claims</span>
+<span class="cm"># that only the forgotten episodes held.</span></pre></div>
 
         <div class="code-panel" role="tabpanel" id="tab-personality"><pre><span class="cm"># Switch preset at runtime</span>
 engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</span>)
@@ -1149,7 +1151,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
       <div class="wrap">
         <p class="section-label">Retrieval</p>
         <h2 class="section-title">Salience scoring</h2>
-        <p class="section-text">Candidates come from a vector KNN and a BM25 search fused by reciprocal rank fusion, then one hop out through the graph. Relevance gates standing: similarity multiplies the standing terms, so a memory that is not about the question cannot outrank one that is. Personality hyperparameters set the weights, and a diversity cap keeps one moment from filling more than a sixth of the answer.</p>
+        <p class="section-text">Candidates come from a vector KNN and a BM25 search fused by reciprocal rank fusion, then one hop out through the graph. Relevance gates standing: similarity multiplies the standing terms, so a memory unrelated to the question (cosine at or below zero) never ranks, and standing only reorders the related ones. Personality hyperparameters set the weights, and a diversity cap keeps one moment from filling more than a sixth of the answer.</p>
 
         <div class="formula-block">
           <div class="formula">
@@ -1166,14 +1168,14 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
         <div class="salience-detail">
           <div>
             <p class="salience-card-title">Dynamic weight shifting</p>
-            <p class="salience-card-text">When valence drops below &minus;0.5, weight shifts from STI to valence. Severe negative-valence atoms (errors, failures) get an LTI floor of 0.5 on creation, preventing epoch pruning. Critical errors outrank recent trivia. Ranking reads the tone a memory was written with, not the mood it has absorbed from its neighbours.</p>
+            <p class="salience-card-text">When valence drops below &minus;0.5, weight shifts from STI to valence, so an old error keeps its standing against recent trivia. A stated warning, or a failure the user reported at valence under &minus;0.7 and intensity over 0.7, keeps an LTI floor of 0.5 and is never pruned. An estimated tone on the agent's own words gets no floor. Ranking reads the tone a memory was written with, not the mood it has absorbed from its neighbours.</p>
           </div>
           <div>
             <p class="salience-card-title">Severity classification</p>
-            <p class="salience-card-text">Each recall result carries a severity tag. The proxy injects memories as plain imperative instructions into the system prompt: <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">YOU MUST NOT</code>, <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">AVOID</code>, or <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">Note:</code></p>
+            <p class="salience-card-text">Each recall result carries a severity tag. The proxy injects memories into the system prompt as labelled lines, <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">Constraint:</code>, <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">Outdated:</code>, or <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">Note:</code>, and states the <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">YOU MUST NOT</code> and <code style="font-family:var(--font-mono);font-size:0.935em;color:var(--accent-warm)">AVOID</code> rules once above them. A stated warning that bears on the question is injected even when it falls outside top_k.</p>
             <ul class="severity-list">
               <li class="sev-crit">critical_warning &mdash; caller-stated valence &lt; &minus;0.5, intensity &gt; 0.5, on anything but a bare concept</li>
-              <li class="sev-anti">known_antipattern &mdash; probability &lt; 0.3, confidence &gt; 0.3; where a superseded preference lands</li>
+              <li class="sev-anti">known_antipattern &mdash; a belief or claim a later claim replaced, or one at probability &lt; 0.3 with confidence &gt; 0.3</li>
               <li class="sev-ctx">context &mdash; neutral background</li>
             </ul>
           </div>
@@ -1185,37 +1187,33 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
     <section>
       <div class="wrap">
         <p class="section-label">Decisions</p>
-        <h2 class="section-title">Four judgements a rule cannot make</h2>
-        <p class="section-text">Is this message worth an extraction call? Does this memory answer the question? Does this claim replace the older one? Does this mention name someone already in the graph? A local multilingual model answers each as a typed question — a probability, a choice among options, a score — and never writes prose. It runs as an int8 ONNX graph on CPU, and every task is active by default.</p>
+        <h2 class="section-title">Five judgements a rule cannot make</h2>
+        <p class="section-text">Is this message worth an extraction call? Does this memory answer the question? Does this claim replace the older one? Does this mention name someone already in the graph? Is this negative tone about a failure or about the speaker's mood? A local multilingual model answers each as a typed question — a probability, a choice among options, a score — and never writes prose. It runs as an int8 ONNX graph on CPU. Each task's default follows its measurement: only tone is on, and the other four stay off until a measurement shows they help.</p>
 
         <div class="usecase-grid">
           <div class="usecase-card">
-            <div class="usecase-title">routing</div>
-            <div class="usecase-desc">Whether an episode needs the LLM claim extraction. Chatter skips it; a durable fact that names no entity &mdash; "never deploy on Fridays" &mdash; forces it.</div>
+            <div class="usecase-title">routing &middot; off</div>
+            <div class="usecase-desc">Whether an episode needs the LLM claim extraction: chatter skips it, a durable fact that names no entity can force it. On the gate set it avoided 1 of 11 skippable calls and skipped claim extraction for 2 of 11 durable facts.</div>
           </div>
           <div class="usecase-card">
-            <div class="usecase-title">rerank</div>
-            <div class="usecase-desc">Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise. Blended with salience.</div>
+            <div class="usecase-title">rerank &middot; off</div>
+            <div class="usecase-desc">Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise, blended with salience. On LongMemEval-S at top_k 5 it retrieved 0.650 against 0.675 without it, and added about 4.5 s to an uncached recall.</div>
           </div>
           <div class="usecase-card">
-            <div class="usecase-title">supersession</div>
-            <div class="usecase-desc">Whether a new claim replaces an older one. Ambiguity keeps both.</div>
+            <div class="usecase-title">supersession &middot; off</div>
+            <div class="usecase-desc">Whether a new claim replaces an older one; ambiguity keeps both. On 25 English and Spanish pairs it blocked 12 of 13 wrong cuts of a current fact, let one through, and also blocked 7 of 8 real updates.</div>
           </div>
           <div class="usecase-card">
-            <div class="usecase-title">entity</div>
-            <div class="usecase-desc">Which existing atom an uncertain mention names. Under the confidence line, a duplicate is made rather than a wrong merge.</div>
-            <div class="usecase-card">
-            <div class="usecase-title">tone</div>
-            <div class="usecase-desc">Whose an estimated negative valence is: about the thing the memory describes, or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned.</div>
+            <div class="usecase-title">entity &middot; off</div>
+            <div class="usecase-desc">Which existing atom an uncertain mention names; under the confidence line a duplicate is made rather than a wrong merge. On 17 cases no answer reached the 0.6 line, so it merged nothing.</div>
           </div>
-        </div>
           <div class="usecase-card">
-            <div class="usecase-title">tone</div>
-            <div class="usecase-desc">Whose an estimated negative valence is: about the thing the memory describes, or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned.</div>
+            <div class="usecase-title">tone &middot; on</div>
+            <div class="usecase-desc">Whether an estimated negative valence is about the thing the memory describes or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned. It damped 2 of 14 speaker-toned sentences and none of 15 about a failure or rule.</div>
           </div>
         </div>
 
-        <p class="section-text" style="margin-top:2.5rem">Any failure or timeout falls back to the deterministic path, so a model that is missing or still loading costs precision and never availability. A decision may not restore a forgotten atom, confer permanence, cross a tenant, or mint a critical warning, and its confidence is logged rather than written into a truth value. Run a task in <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">shadow</code> to record what it would have decided, or turn it <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">off</code>. <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">GET /decisions</code> lists every one of them.</p>
+        <p class="section-text" style="margin-top:2.5rem">Any failure or timeout falls back to the deterministic path, so a model that is missing or still loading costs precision and never availability. A decision may not restore a forgotten atom, confer permanence, cross a tenant, or mint a critical warning, and its confidence is logged rather than written into a truth value. Turn a task on with <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">SMRTI_DECISIONS_RERANK=active</code> (and likewise for the others), run it in <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">shadow</code> to record what it would have decided, or turn it <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">off</code>. <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">GET /decisions</code> lists every one of them.</p>
       </div>
     </section>
 
@@ -1241,7 +1239,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           <div class="agent-card">
             <div class="agent-card-name" style="color:var(--accent-warm)">deployer</div>
             <div class="agent-card-preset">personality: deterministic</div>
-            <div class="agent-card-desc">Fast learning, slow decay. Holds onto critical failures. Never forgets an outage.</div>
+            <div class="agent-card-desc">Fast learning, slow decay. Holds onto critical failures. Keeps a stated outage warning through every pruning pass.</div>
             <div class="agent-reads">
               <div class="agent-read-label">reads</div>
               <div class="agent-read"><span class="agent-dot" style="background:var(--accent-warm);color:var(--accent-warm)"></span> deployer</div>
@@ -1278,7 +1276,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           </div>
         </div>
 
-        <p class="section-text" style="margin-top:2.5rem">Spaces also support <strong>set theory operations</strong>: <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_overlap</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_intersection</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_difference</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_union</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_symmetric_difference</code>. Matching uses a three-signal contextual score (embedding + entity-type + graph neighborhood) that correctly separates homonyms like "Java" the language from "Java" the island. When two spaces overlap significantly, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_merge()</code> materialises a <em>bridge space</em> — new atoms with PLN-merged truth values and blended valence, linked back to both parents. Bridges are built only on request, through <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_merge</code> as an MCP tool, a REST route, or the facade; the consolidation epoch never grows one.</p>
+        <p class="section-text" style="margin-top:2.5rem">Spaces also support <strong>set theory operations</strong>: <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_overlap</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_intersection</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_difference</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_union</code>, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_symmetric_difference</code>. Matching uses a three-signal contextual score (embedding + entity-type + graph neighborhood), which separates homonyms like "Java" the language from "Java" the island when their entity types or graph neighbours differ. When two spaces overlap significantly, <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_merge()</code> materialises a <em>bridge space</em> — new atoms with PLN-merged truth values and blended valence, linked back to both parents. Bridges are built only on request, through <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">space_merge</code> as an MCP tool, a REST route, or the facade; the consolidation epoch never grows one.</p>
       </div>
     </section>
 
@@ -1292,7 +1290,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
         <div class="preset-grid" id="presetGrid">
           <div class="preset">
             <div class="preset-name">balanced</div>
-            <div class="preset-desc">Default. Equal weight distribution across all dimensions.</div>
+            <div class="preset-desc">Default. Ranks on similarity 0.35, attention 0.25, confidence 0.20, LTI 0.10, valence 0.10.</div>
             <div class="preset-bars">
               <div class="preset-bar"><span class="preset-bar-label">learn</span><div class="preset-bar-track"><div class="preset-bar-fill fill-accent" data-width="60%"></div></div><span class="preset-bar-value">0.30</span></div>
               <div class="preset-bar"><span class="preset-bar-label">decay</span><div class="preset-bar-track"><div class="preset-bar-fill fill-warm" data-width="50%"></div></div><span class="preset-bar-value">0.10</span></div>
@@ -1336,7 +1334,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
 
           <div class="preset">
             <div class="preset-name">maverick</div>
-            <div class="preset-desc">Low decay. Broad connections. Eclectic, exploratory recall.</div>
+            <div class="preset-desc">Confidence decays slowly (0.005), attention fast (STI 0.15, LTI 0.02). Broad propagation, slow learning.</div>
             <div class="preset-bars">
               <div class="preset-bar"><span class="preset-bar-label">learn</span><div class="preset-bar-track"><div class="preset-bar-fill fill-accent" data-width="20%"></div></div><span class="preset-bar-value">0.10</span></div>
               <div class="preset-bar"><span class="preset-bar-label">decay</span><div class="preset-bar-track"><div class="preset-bar-fill fill-warm" data-width="75%"></div></div><span class="preset-bar-value">0.15</span></div>
@@ -1364,7 +1362,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
       <div class="wrap">
         <p class="section-label">Serve</p>
         <h2 class="section-title">Five modes, same engine</h2>
-        <p class="section-text">All server modes run entity extraction after every <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">remember()</code> call, building concept nodes and relation edges from stored episodes (GLiNER locally, an LLM for the claims), and resolve relative dates against the write time. Disable with <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">SMRTI_EXTRACT=0</code> and <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">SMRTI_TEMPORAL=0</code>. Set <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">SMRTI_API_KEY</code> to require a key on every HTTP request; REST and proxy expose Prometheus metrics at <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">/metrics</code>. <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">smrti stop</code> ends whatever <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">smrti serve</code> started.</p>
+        <p class="section-text">All server modes run entity extraction after every <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">remember()</code> call, building concept nodes and relation edges from stored episodes (GLiNER locally, an LLM for the claims), and resolve relative dates against the write time. Disable with <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">SMRTI_EXTRACT=0</code> and <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">SMRTI_TEMPORAL=0</code>. Set <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">SMRTI_API_KEY</code> to require a key on every HTTP request, or <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">SMRTI_API_KEYS</code> to bind keys to tenants; REST and proxy expose Prometheus metrics at <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">/metrics</code>. <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">smrti stop</code> ends whatever <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">smrti serve</code> started.</p>
 
         <div class="serve-grid" style="margin-top:2rem">
           <div class="serve-mode">
@@ -1379,7 +1377,7 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
           </div>
           <div class="serve-mode">
             <div class="serve-mode-name">Proxy</div>
-            <div class="serve-mode-desc">OpenAI-compatible on port 8421. Injects relevant memories as plain imperative instructions (<code style="font-family:var(--font-mono);font-size:0.935em">YOU MUST NOT</code>, <code style="font-family:var(--font-mono);font-size:0.935em">AVOID</code>, <code style="font-family:var(--font-mono);font-size:0.935em">Note:</code>) into the system prompt.</div>
+            <div class="serve-mode-desc">OpenAI-compatible on port 8421. Injects relevant memories into the system prompt as labelled lines (<code style="font-family:var(--font-mono);font-size:0.935em">Constraint:</code>, <code style="font-family:var(--font-mono);font-size:0.935em">Outdated:</code>, <code style="font-family:var(--font-mono);font-size:0.935em">Note:</code>) and passes <code style="font-family:var(--font-mono);font-size:0.935em">/v1/models</code> through.</div>
             <div class="serve-mode-cmd">smrti serve proxy</div>
           </div>
           <div class="serve-mode">
@@ -1410,18 +1408,18 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
       <div class="wrap">
         <p class="section-label">Benchmarks</p>
         <h2 class="section-title">Retrieval scored apart from answering</h2>
-        <p class="section-text">Two harnesses ingest a published dataset as episodes and answer its questions through <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">recall</code>. Retrieval and answering are scored separately, so a strong answering model cannot hide a retrieval regression. Config as of 2026-08-26: extraction off, no consolidation epochs, top_k 50, the deterministic preset, one model answering and judging. That measures retrieval alone, and it predates the current ranking formula.</p>
+        <p class="section-text">Two harnesses ingest a published dataset as episodes and answer its questions through <code style="font-family:var(--font-mono);font-size:0.99em;color:var(--accent-warm)">recall</code>. Retrieval and answering are scored separately, so a strong answering model cannot hide a retrieval regression. Retrieval was re-run on 2026-11-25 with extraction off, no consolidation epochs, decisions off unless stated, and the deterministic preset.</p>
         <div class="usecase-grid" style="margin-top:2rem">
           <div class="usecase-card">
             <div class="usecase-title">LongMemEval-S</div>
-            <div class="usecase-desc">40 questions, one per ability in turn. Retrieval hit 0.975, evidence recall 0.912, answers 0.900. Five of six abilities retrieve without a miss.</div>
+            <div class="usecase-desc">40 questions, one per ability in turn. Retrieval hit 0.675 at top_k 5, 0.775 at 10 (the proxy default), 0.975 at 50; evidence recall 0.533, 0.653, 0.952. With every decision task on, top_k 5 retrieves 0.650. Answers scored 0.900 at top_k 50 in the August run.</div>
           </div>
           <div class="usecase-card">
             <div class="usecase-title">HaluMem</div>
-            <div class="usecase-desc">3 personas, 180 questions. Correct 0.517, hallucination 0.394, omission 0.089. Strong on what the user never said (2.9% invented), weak on synthesis.</div>
+            <div class="usecase-desc">August run, 3 personas, 180 questions. Correct 0.517, hallucination 0.394, omission 0.089. Strong on what the user never said (2.9% invented), weak on synthesis.</div>
           </div>
         </div>
-        <p style="font-size:0.88rem;color:var(--text-dim);margin-top:0.75rem">Small subsets and a single judge, so not comparable to published leaderboards. How to run them, and what each measures, is in the <a href="https://github.com/cyqlelabs/smrti#benchmarks" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;border-bottom:1px solid var(--border)">README</a>.</p>
+        <p style="font-size:0.88rem;color:var(--text-dim);margin-top:0.75rem">Small subsets and a single judge, so not comparable to published leaderboards, which report answer accuracy on all 500 LongMemEval questions. How to run them, and what each measures, is in the <a href="https://github.com/cyqlelabs/smrti#benchmarks" target="_blank" rel="noopener" style="color:var(--accent);text-decoration:none;border-bottom:1px solid var(--border)">README</a>.</p>
       </div>
     </section>
   </main>
@@ -1535,10 +1533,10 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
         {
           id: 'store', num: '③', label: 'Store',
           accent: '#06b6d4', bg: '#14303d', text: '#a5f3fc',
-          desc: 'Each entity and claim becomes an atom in the graph with a Bayesian truth value, an attention weight, an emotional valence, and typed relation edges.',
+          desc: 'Each entity and claim becomes an atom in the graph with a PLN-style truth value, an attention weight, an emotional valence, and typed relation edges.',
           nodes: [
             { name: 'Atom Graph',       tip: 'Every entity and claim becomes a typed node' },
-            { name: 'Truth Value',      tip: 'Bayesian PLN merging of probability \u00d7 confidence' },
+            { name: 'Truth Value',      tip: 'A probability, and a confidence n/(n+1) from the evidence count n' },
             { name: 'Attention Value',  tip: 'STI/LTI importance weights for ranking' },
             { name: 'Emotional Valence',tip: 'Positive / Negative / Neutral with intensity' },
             { name: 'Relation Edges',   tip: 'Directional typed links between all entities' },
@@ -1562,24 +1560,24 @@ engine.<span class="fn">set_personality</span>(<span class="st">"analytical"</sp
         {
           id: 'recall', num: '⑤', label: 'Recall',
           accent: '#a855f7', bg: '#2d1b4e', text: '#e9d5ff',
-          desc: 'A vector KNN and a BM25 search are fused by reciprocal rank fusion. Graph expansion follows relation edges outward. Salience ranks by relevance times standing, the local decision model judges the shortlist as evidence for the question, and a diversity cap keeps one moment from filling the answer.',
+          desc: 'A vector KNN and a BM25 search are fused by reciprocal rank fusion. Graph expansion follows relation edges outward. Salience ranks by relevance times standing, the local decision model can judge the shortlist as evidence for the question (off by default), and a diversity cap keeps one moment from filling the answer.',
           nodes: [
             { name: 'Semantic Search', tip: 'KNN vector similarity across all memories' },
             { name: 'Lexical Search',  tip: 'BM25 over the words themselves, in any language' },
             { name: 'Rank Fusion',     tip: 'Reciprocal rank fusion picks the candidate pool' },
             { name: 'Graph Expansion', tip: 'Follow relation edges to related concepts' },
             { name: 'Salience Ranking',tip: 'similarity \u00d7 (attention + confidence + LTI + valence weights)' },
-            { name: 'Evidence Judgement', tip: 'A typed judgement of the shortlist: answers, links, superseded, contradicts' },
+            { name: 'Evidence Judgement', tip: 'Off by default: a typed judgement of the shortlist (answers, links, superseded, contradicts)' },
             { name: 'Diversity Cap',   tip: 'One moment cannot fill more than a sixth of the answer' },
           ]
         },
         {
           id: 'classify', num: '⑥', label: 'Classify',
           accent: '#e879f9', bg: '#2a1040', text: '#f5d0fe',
-          desc: 'Retrieved memories are classified by severity. Critical failures become hard behavioral constraints. Known antipatterns become avoidance signals. Context is woven into the response.',
+          desc: 'Retrieved memories are classified by severity. Warnings the caller stated become constraints, found even outside top_k. Replaced or disproven claims are marked outdated. Context is woven into the response.',
           nodes: [
-            { name: '\uD83D\uDEA8 Critical Warning',  tip: 'Must-not-repeat failures \u2014 injected as hard constraints', accent:'#ef4444', bg:'#3b1515', text:'#fca5a5' },
-            { name: '\u26A0\uFE0F Known Antipattern', tip: 'Low-probability beliefs \u2014 injected as avoidance signals',  accent:'#f59e0b', bg:'#3b2c00', text:'#fde68a' },
+            { name: '\uD83D\uDEA8 Critical Warning',  tip: 'Failures the caller stated \u2014 injected as Constraint lines', accent:'#ef4444', bg:'#3b1515', text:'#fca5a5' },
+            { name: '\u26A0\uFE0F Known Antipattern', tip: 'Replaced or disproven claims \u2014 injected as Outdated lines', accent:'#f59e0b', bg:'#3b2c00', text:'#fde68a' },
             { name: '\uD83D\uDCA1 Background Context',tip: 'Relevant facts and goals woven into the response',           accent:'#10b981', bg:'#1a2e1a', text:'#a7f3d0' },
           ]
         },

@@ -13,6 +13,7 @@ from smrti import Smrti, _write_metadata
 from smrti.personality.params import PersonalityProfile, load_preset
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
+from smrti.servers.common import api_root, drain
 from smrti.servers.tools import TOOLS
 from smrti.servers.reflect_loop import run_reflect_loop
 
@@ -42,6 +43,54 @@ def _coverage(overlap) -> dict:
         "complete": overlap.complete,
     }
 
+
+
+def _memory_json(r) -> dict:
+    """One recalled memory as the recall tool and route return it."""
+    return {
+        "id": r.atom.id,
+        "label": r.atom.label,
+        "content": r.atom.content,
+        "type": r.atom.type.value,
+        "probability": r.atom.truth.probability,
+        "confidence": r.atom.truth.confidence,
+        "sti": r.atom.attention.sti,
+        "lti": r.atom.attention.lti,
+        "valence": r.atom.valence.valence,
+        "intensity": r.atom.valence.intensity,
+        "severity": classify_memory(r),
+        "salience": r.salience,
+        "similarity": r.similarity,
+        # How useful the memory was judged as evidence for the
+        # query when the rerank decision task ran; null when
+        # it did not.
+        "evidence": r.evidence,
+        "space": r.atom.space,
+        # Dates the extraction model pinned down for relative
+        # expressions in this memory. They live in metadata rather
+        # than in the text, which was embedded before the model
+        # ever saw it, so this is where the reader meets them.
+        "temporal": r.atom.metadata.get("temporal") or [],
+    }
+
+
+def _superseded_json(replaced: dict) -> list[dict]:
+    """The superseded claims about the recalled memories, each once."""
+    seen: set[str] = set()
+    out: list[dict] = []
+    for atom_id, claims in replaced.items():
+        for claim in claims:
+            if claim.edge_id in seen:
+                continue
+            seen.add(claim.edge_id)
+            out.append({
+                "about": atom_id,
+                "subject": claim.subject,
+                "predicate": claim.predicate,
+                "old_object": claim.old_object,
+                "new_object": claim.new_object,
+            })
+    return out
 
 def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     if name == "smrti_remember":
@@ -94,35 +143,21 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
             boost=args.get("boost", True),
             rerank=args.get("rerank", True),
         )
+        shown = {r.atom.id for r in results}
+        # Stated warnings the recall did not return — outranked in the
+        # candidate pool or cut by top_k — come back apart from it, so a
+        # warning reaches the caller whatever top_k it asked for.
+        warnings = [
+            w for w in mem.find_warnings(args["query"], read_spaces=args.get("read_spaces") or None)
+            if w.atom.id not in shown
+        ]
+        replaced = mem.superseded_claims(
+            [r.atom.id for r in results], read_spaces=args.get("read_spaces") or None
+        )
         return {
-            "memories": [
-                {
-                    "id": r.atom.id,
-                    "label": r.atom.label,
-                    "content": r.atom.content,
-                    "type": r.atom.type.value,
-                    "probability": r.atom.truth.probability,
-                    "confidence": r.atom.truth.confidence,
-                    "sti": r.atom.attention.sti,
-                    "lti": r.atom.attention.lti,
-                    "valence": r.atom.valence.valence,
-                    "intensity": r.atom.valence.intensity,
-                    "severity": classify_memory(r),
-                    "salience": r.salience,
-                    "similarity": r.similarity,
-                    # How useful the memory was judged as evidence for the
-                    # query when the rerank decision task ran; null when
-                    # it did not.
-                    "evidence": r.evidence,
-                    "space": r.atom.space,
-                    # Dates the extraction model pinned down for relative
-                    # expressions in this memory. They live in metadata rather
-                    # than in the text, which was embedded before the model
-                    # ever saw it, so this is where the reader meets them.
-                    "temporal": r.atom.metadata.get("temporal") or [],
-                }
-                for r in results
-            ]
+            "memories": [_memory_json(r) for r in results],
+            "warnings": [_memory_json(w) for w in warnings],
+            "superseded": _superseded_json(replaced),
         }
 
     elif name == "smrti_attend":
@@ -159,10 +194,11 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
     elif name == "smrti_forget":
         atom_ids = args.get("atom_ids")
         query = args.get("query")
+        cascade = args.get("cascade") is True
         if atom_ids:
-            forgotten = mem.forget(atom_ids=list(atom_ids))
+            forgotten = mem.forget(atom_ids=list(atom_ids), cascade=cascade)
         elif query and query.strip():
-            forgotten = mem.forget(query=query, top_k=5)
+            forgotten = mem.forget(query=query, top_k=5, cascade=cascade)
         else:
             return {"error": "smrti_forget needs a non-empty query or atom_ids"}
         result = {"status": "ok", "softened": forgotten}
@@ -191,7 +227,10 @@ def handle_tool(mem: Smrti, name: str, args: dict) -> dict:
                 return {"status": "ok", "preset": preset or "custom"}
             if not preset:
                 return {"error": "action requires a 'preset' or 'params' argument"}
-            mem.set_personality(preset)
+            try:
+                mem.set_personality(preset)
+            except ValueError as exc:  # an unknown preset name
+                return {"error": str(exc)}
             return {"status": "ok", "preset": preset}
         return {"error": f"Unknown action: {action}"}
 
@@ -333,6 +372,11 @@ def run_mcp_server() -> None:
     async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
         loop = asyncio.get_running_loop()
         result = await loop.run_in_executor(None, handle_tool, mem, name, arguments)
+        if "error" in result:
+            # The SDK reports a raised error as a tool error (isError), which
+            # is how a client tells a refused call from a result: returned as
+            # a plain dict, a refused personality change read as a success.
+            raise ValueError(result["error"])
         if name == "smrti_remember" and cfg.EXTRACT:
             episode_id = result.get("atom_id", "")
             content = arguments.get("content", "")
@@ -340,7 +384,7 @@ def run_mcp_server() -> None:
                 from smrti.extraction.extract import extract_and_link_serialized
                 task = asyncio.create_task(
                     extract_and_link_serialized(
-                        episode_id, content, mem, "", cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
+                        episode_id, content, mem, "", cfg.EXTRACT_MODEL, api_root(cfg.EXTRACT_URL),
                         arguments.get("source", "user"), mode=cfg.EXTRACT_MODE,
                     )
                 )
@@ -359,5 +403,8 @@ def run_mcp_server() -> None:
                 )
         finally:
             task.cancel()
+            # Extractions still running are graphs for memories the client
+            # was already told it stored; they used to be dropped here.
+            await drain(_background_tasks)
 
     asyncio.run(_main())

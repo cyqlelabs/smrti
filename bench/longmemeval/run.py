@@ -25,7 +25,9 @@ from ..harness import (
     consolidate,
     finish,
     load_json,
+    measured_config,
     require_dataset,
+    require_decisions,
     resolve_answering,
     resolve_extraction,
 )
@@ -111,7 +113,7 @@ def run(config: dict, dataset: str, db_path: str, answering: dict | None = None,
             if judged
             else None
         ),
-        "config_hash": config_hash(config),
+        "config_hash": config_hash(measured_config(config, extraction)),
         "recorded_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "rows": rows,
     }
@@ -135,6 +137,7 @@ def main(argv: list[str] | None = None) -> int:
     extraction = resolve_extraction(args)
     config["extraction"] = bool(extraction)
     apply_run_modes(args, config)
+    require_decisions(args.decisions)
     db_path, scratch = args.db, None
     if db_path is None:
         scratch = tempfile.TemporaryDirectory()

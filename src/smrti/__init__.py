@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -39,10 +40,17 @@ from smrti.decisions.extraction import TONE_DECISION, judge_tone
 from smrti.decisions.retrieval import make_judge
 from smrti.extraction.sentiment import estimate_valence
 from smrti.extraction.resolve import EntityResolver
-from smrti.retrieval.fan_out import boost_attention, rank_candidates, retrieve
-from smrti.evolution.epoch import run_epoch
+from smrti.retrieval.fan_out import (
+    boost_attention,
+    find_warnings,
+    rank_candidates,
+    retrieve,
+    superseded_claims,
+)
+from smrti.evolution.epoch import LeaseLost, empty_result, try_epoch
+from smrti.evolution.forgetting import derived_only_from
 from smrti.evolution.reinforcement import DEFAULT_WEIGHT as _REINFORCE_WEIGHT, reinforce_atoms
-from smrti.personality.params import PersonalityProfile, load_preset
+from smrti.personality.params import PersonalityProfile, load_preset, param_value
 from smrti.spaces.set_ops import (
     space_overlap as _space_overlap,
     space_intersection as _space_intersection,
@@ -52,8 +60,8 @@ from smrti.spaces.set_ops import (
 )
 from smrti.spaces.emergence import materialize_bridge as _materialize_bridge
 
-# Per-(tenant_id, space) locks so concurrent reflect() calls (background loop +
-# REST /reflect) cannot interleave epochs on the same space.
+logger = logging.getLogger(__name__)
+
 # What forget() takes a query match to be. Forgetting is final, so a result
 # is dropped only when it is about the query in its own right (an absolute
 # cosine floor under which this encoder pairs unrelated sentences) and about
@@ -62,6 +70,9 @@ from smrti.spaces.emergence import materialize_bridge as _materialize_bridge
 FORGET_MIN_SIMILARITY = 0.35
 FORGET_RELATIVE_MARGIN = 0.85
 
+# Per-(tenant_id, space) locks so concurrent reflect() calls (background loop +
+# REST /reflect) in one process wait for each other rather than find the space
+# leased and skip; the epoch's lease keeps other processes out.
 _reflect_locks: dict[tuple[str, str], threading.Lock] = {}
 _reflect_locks_guard = threading.Lock()
 
@@ -124,8 +135,9 @@ class Smrti:
         self._temporal = temporal
         # The semantic decision engine (see ``smrti.decisions``): the shared
         # one built from the environment unless the caller hands in its own,
-        # which tests and the bench do. The local model is enabled by default;
-        # SMRTI_DECISIONS=off restores the deterministic-only path.
+        # which tests and the bench do. Each task runs under the default its
+        # measurement earned (see ``smrti.decisions.policies``), and the model
+        # is loaded only when a task that is on first asks.
         self.decisions = decisions if decisions is not None else get_decisions()
         # Memory operations since the last consolidation. The reflect loop
         # reads it to skip a space nobody used: an epoch is a unit of the
@@ -331,7 +343,7 @@ class Smrti:
             "SELECT min_confidence_to_surface AS f FROM personality WHERE tenant_id = ? AND space = ?",
             (self.tenant_id, self.write_space),
         )
-        return 0.1 if row is None or row["f"] is None else float(row["f"])
+        return param_value("min_confidence_to_surface", row["f"] if row else None, 0.1)
 
     def recall(
         self,
@@ -368,6 +380,31 @@ class Smrti:
             judge=judge,
         )
 
+    def find_warnings(
+        self, query: str, limit: int = 3, read_spaces: list[str] | None = None
+    ) -> list:
+        """The stated warnings in the read spaces that bear on *query*, most
+        similar first.
+
+        Found apart from :meth:`recall`'s candidate pool and its ``top_k``: a
+        warning outranked by seventy more similar memories, or cut by a small
+        ``top_k``, is still the memory the agent must not act against, so a
+        caller that injects memories asks for these separately and keeps them
+        outside its budget. Reads only; no access boost.
+        """
+        spaces = read_spaces if read_spaces is not None else self.read_spaces
+        return find_warnings(query, self.tenant_id, spaces, self.db, self.embed, limit=limit)
+
+    def superseded_claims(
+        self, atom_ids: list[str], read_spaces: list[str] | None = None, limit: int = 3
+    ) -> dict:
+        """The claims a later one replaced about each of *atom_ids* — "lives
+        in Berlin", now "lives in Paris" — keyed by the atom. Recall never
+        returns claim edges, so this is how a caller learns that what a
+        recalled memory names is no longer current."""
+        spaces = read_spaces if read_spaces is not None else self.read_spaces
+        return superseded_claims(list(atom_ids), self.tenant_id, spaces, self.db, limit=limit)
+
     def attend(self, atom_ids: list[str]) -> int:
         """Give these memories the access boost, as if recall had returned them.
 
@@ -384,7 +421,7 @@ class Smrti:
             "SELECT sti_boost_on_access AS b FROM personality WHERE tenant_id = ? AND space = ?",
             (self.tenant_id, self.write_space),
         )
-        sti_boost = 0.5 if row is None or row["b"] is None else float(row["b"])
+        sti_boost = param_value("sti_boost_on_access", row["b"] if row else None, 0.5)
         return boost_attention(self.db, list(atom_ids), self.tenant_id, self.write_space, sti_boost)
 
     def believe(
@@ -434,9 +471,14 @@ class Smrti:
         )
         atom_id = self.atomspace.add_atom(atom)
         if evidence:
+            # The row records why, at no weight: the assertion it explains is
+            # already the atom's truth value, and filing it at full weight
+            # counted the one observation twice — giving a reason raised a
+            # new belief's confidence from 0.3 to 0.42 at the next epoch.
             ev = Evidence(
                 atom_id=atom_id,
                 observed_probability=probability,
+                weight=0.0,
                 text=evidence,
                 source=source,
                 tenant_id=self.tenant_id,
@@ -470,8 +512,25 @@ class Smrti:
         )
 
     def reflect(self) -> EpochResult:
+        """Consolidate the write space once.
+
+        Another process consolidating the same space holds its lease, and then
+        this call changes nothing and returns an empty result; one that takes
+        the space over mid-epoch ends this run the same way. The activity
+        count is kept in both cases, so the reflect loop tries again next
+        interval; it is reset only when an epoch ran to the end.
+        """
         with _get_reflect_lock(self.tenant_id, self.write_space):
-            result = run_epoch(self.tenant_id, self.write_space, self.db, self.embed)
+            try:
+                result = try_epoch(self.tenant_id, self.write_space, self.db, self.embed)
+            except LeaseLost:
+                # Another process took the space over mid-epoch: its run does
+                # the work, and what this one wrote before the takeover stands.
+                logger.warning("epoch on %s/%s was taken over by another process",
+                               self.tenant_id, self.write_space)
+                return empty_result()
+            if result is None:
+                return empty_result()
             self._ops_since_reflect = 0
             return result
 
@@ -482,23 +541,34 @@ class Smrti:
         *,
         atom_ids: list[str] | None = None,
         min_similarity: float = FORGET_MIN_SIMILARITY,
+        cascade: bool = False,
     ) -> list[str]:
         """Stop the memories matching *query*, or exactly *atom_ids*, from surfacing.
 
-        Three things happen to each match in the write space. Its confidence
+        Four things happen to each match in the write space. Its confidence
         is sunk below the surfacing floor, so no floor a caller might pass
         finds it. It is stamped ``$.forgotten``, which excludes it from every
         recall outright, keeps the epoch from lifting it back (a drowned
         permanent belief is normally restored to its asserted confidence),
-        keeps reinforcement from lifting it, and drops the long-term floors
-        that exempt user testimony from pruning — so the next consolidation
-        may remove it. Its rows in the vector and lexical indexes are
-        removed too: a forgotten atom is never a candidate, so leaving it in
-        the indexes only let it take a slot in every bounded probe from a
-        memory that could surface. And nothing else: the retrieval that finds
-        the matches runs without the access boost, because forgetting a
-        memory must not make it more prominent, which is what it did when
-        this method called the ordinary recall.
+        keeps reinforcement, pending evidence, propagation and association
+        discovery from lifting or relinking it, and drops the long-term
+        floors that exempt user testimony from pruning — so the next
+        consolidation may remove it. Its attention is zeroed and the
+        evidence still pending against it is retired unapplied: either one
+        would otherwise lift it back over the floor or spend expansion budget
+        on it before the pruner got to it. Its rows in the vector and lexical
+        indexes are removed too: a forgotten atom is never a candidate, so
+        leaving it in the indexes only let it take a slot in every bounded
+        probe from a memory that could surface. And nothing else: the
+        retrieval that finds the matches runs without the access boost,
+        because forgetting a memory must not make it more prominent, which
+        is what it did when this method called the ordinary recall.
+
+        ``cascade=True`` also forgets what extraction derived from the
+        forgotten episodes and from nothing still remembered — see
+        :mod:`smrti.evolution.forgetting`. Left off, the concepts and claims an
+        episode gave rise to stay: they are other atoms, and may be facts the
+        caller still holds.
 
         Forgetting is final, so a query match has to be a match. ``top_k``
         is an upper bound, not a quota: a recall always returns its nearest
@@ -524,7 +594,7 @@ class Smrti:
                 (*ids, self.tenant_id, self.write_space),
             )
             by_id = {row["id"]: row["label"] for row in rows}
-            return self._sink([(i, by_id[i]) for i in ids if i in by_id])
+            return self._forget([(i, by_id[i]) for i in ids if i in by_id], cascade)
 
         if not query or not query.strip():
             raise ValueError("forget() needs a non-empty query or atom_ids")
@@ -544,30 +614,71 @@ class Smrti:
         if not local:
             return []
         line = max(min_similarity, local[0].similarity * FORGET_RELATIVE_MARGIN)
-        return self._sink([(r.atom.id, r.atom.label) for r in local if r.similarity >= line])
+        return self._forget(
+            [(r.atom.id, r.atom.label) for r in local if r.similarity >= line], cascade
+        )
 
-    def _sink(self, matches: list[tuple[str, str]]) -> list[str]:
-        """Sink, stamp and unindex each ``(id, label)`` in the write space."""
+    def _forget(self, matches: list[tuple[str, str]], cascade: bool) -> list[str]:
+        """Sink and stamp *matches* and, with *cascade*, what only they gave
+        rise to — decided first, then written in one transaction, so a forget
+        never lands half done."""
+        if not matches:
+            return []
+        concepts, claims = (
+            derived_only_from([atom_id for atom_id, _ in matches], self.tenant_id, self.write_space, self.db)
+            if cascade
+            else ([], [])
+        )
+        # Built before the transaction: it reads the surfacing floor, and a
+        # read inside the write transaction waits on its own lock in memory.
+        statements = self._sink_statements(matches + concepts)
+        with self.db.transaction() as conn:
+            for statement, params in statements:
+                conn.execute(statement, params)
+            # A claim edge is deleted rather than stamped: the readers that
+            # render an entity's facts test the atoms an edge joins, not the
+            # edge, so a stamped claim between two live atoms would still be
+            # stated as fact.
+            if claims:
+                self.db.delete_atoms_in(conn, [atom_id for atom_id, _ in claims], self.tenant_id)
+        return (
+            [label for _, label in matches]
+            + [label for _, label in claims]
+            + [label for _, label in concepts]
+        )
+
+    def _sink_statements(self, matches: list[tuple[str, str]]) -> list[tuple]:
+        """Sink, stamp and unindex each ``(id, label)`` in the write space, zero
+        its attention and retire its pending evidence. Chunked: SQLite before
+        3.32 binds at most 999 variables per statement."""
         # Below the floor by a margin, never merely at it: the decay floor
         # holds an atom that is still at or above the line.
         sunk_to = self._surfacing_floor() * 0.5
-        forgotten = []
-        for atom_id, label in matches:
-            self.db.execute_batch([
+        ids = [atom_id for atom_id, _ in matches]
+        statements: list[tuple] = []
+        for start in range(0, len(ids), 400):
+            chunk = ids[start : start + 400]
+            ph = ", ".join("?" for _ in chunk)
+            statements += [
                 (
                     f"""UPDATE atoms SET
                             confidence = MIN(confidence * 0.3, ?),
+                            sti = 0.0,
                             metadata = json_set({ATOM_METADATA_JSON},
                                                 '$.forgotten', json('true')),
                             updated_at = datetime('now')
-                        WHERE id = ? AND tenant_id = ? AND space = ?""",
-                    (sunk_to, atom_id, self.tenant_id, self.write_space),
+                        WHERE id IN ({ph}) AND tenant_id = ? AND space = ?""",
+                    (sunk_to, *chunk, self.tenant_id, self.write_space),
                 ),
-                *vec_delete([atom_id]),
-                *fts_delete(self.db, [atom_id]),
-            ])
-            forgotten.append(label)
-        return forgotten
+                (
+                    f"""UPDATE evidence SET processed = 1
+                        WHERE atom_id IN ({ph}) AND tenant_id = ? AND processed = 0""",
+                    (*chunk, self.tenant_id),
+                ),
+                *vec_delete(chunk),
+                *fts_delete(self.db, chunk),
+            ]
+        return statements
 
     def set_personality(self, preset_name: str) -> None:
         profile = load_preset(preset_name)
@@ -631,20 +742,26 @@ class Smrti:
 
     def clear_space(self) -> int:
         """Hard-delete all atoms, evidence, and aliases in write_space. Returns deleted atom count."""
-        ids = [
-            row["id"]
-            for row in self.db.fetchall(
-                "SELECT id FROM atoms WHERE tenant_id=? AND space=?",
-                (self.tenant_id, self.write_space),
-            )
-        ]
-        count = len(ids)
-
         # Rows outside this space can still reference its atoms — a bridge
         # space links back to both parents — and the cascade that handles
         # them lives with the pruner's, in ``AtomSpace.delete_atoms``. It stays
         # inside this tenant: another tenant can never hold a reference.
-        self.atomspace.delete_atoms(ids, self.tenant_id)
+        # Every atom goes through it, including one a concurrent writer added
+        # after the ids were read: a bare DELETE swept those up without their
+        # vectors, index rows or edges.
+        count = 0
+        while True:
+            ids = [
+                row["id"]
+                for row in self.db.fetchall(
+                    "SELECT id FROM atoms WHERE tenant_id=? AND space=?",
+                    (self.tenant_id, self.write_space),
+                )
+            ]
+            if not ids:
+                break
+            self.atomspace.delete_atoms(ids, self.tenant_id)
+            count += len(ids)
 
         # Rows filed against the space rather than against a surviving atom
         # still need sweeping.
@@ -654,10 +771,6 @@ class Smrti:
         )
         self.db.execute(
             "DELETE FROM aliases WHERE tenant_id=? AND space=?",
-            (self.tenant_id, self.write_space),
-        )
-        self.db.execute(
-            "DELETE FROM atoms WHERE tenant_id=? AND space=?",
             (self.tenant_id, self.write_space),
         )
         return count

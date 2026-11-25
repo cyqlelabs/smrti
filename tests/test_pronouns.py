@@ -27,19 +27,21 @@ def _mock_ner(pronoun_names=None):
 
 
 # ── Batch merge tests ────────────────────────────────────────────────────────
+#
+# A pronoun is what the tagger typed ``pronoun`` in context; no word list is
+# consulted, so a name like "Mia" typed person stays a person.
 
 
 def test_batch_merge_single_person_absorbs_pronoun():
     """1 named person + 1 pronoun → pronoun merged into named person."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
-    ner = _mock_ner(["I", "my"])
     entities = [
         {"name": "Elara", "type": "person", "aliases": []},
-        {"name": "I", "type": "person", "aliases": ["my"]},
+        {"name": "I", "type": "pronoun", "aliases": ["my"]},
         {"name": "systems strategist", "type": "concept", "aliases": []},
     ]
-    result = merge_pronoun_entities_in_batch(entities, ner)
+    result = merge_pronoun_entities_in_batch(entities)
 
     names = [e["name"] for e in result]
     assert "Elara" in names
@@ -51,35 +53,32 @@ def test_batch_merge_single_person_absorbs_pronoun():
     assert "my" in elara["aliases"]
 
 
-def test_batch_merge_multi_person_skips():
-    """2 named persons + pronoun → pronoun kept (ambiguous)."""
+def test_batch_merge_multi_person_drops_the_pronoun():
+    """2 named persons + pronoun → who it means is ambiguous, so it is dropped."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
-    ner = _mock_ner(["I"])
     entities = [
         {"name": "Elara", "type": "person", "aliases": []},
         {"name": "Dave", "type": "person", "aliases": []},
-        {"name": "I", "type": "person", "aliases": []},
+        {"name": "I", "type": "pronoun", "aliases": []},
     ]
-    result = merge_pronoun_entities_in_batch(entities, ner)
+    result = merge_pronoun_entities_in_batch(entities)
 
     names = [e["name"] for e in result]
-    assert "Elara" in names
-    assert "Dave" in names
-    assert "I" in names  # kept because ambiguous
+    assert names == ["Elara", "Dave"]
+    assert all("I" not in e["aliases"] for e in result)
 
 
 def test_batch_merge_no_named_removes_pronoun():
-    """Only pronoun persons → all removed, no orphan atoms."""
+    """Only pronouns → all removed, no orphan atoms."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
-    ner = _mock_ner(["I", "me"])
     entities = [
-        {"name": "I", "type": "person", "aliases": []},
-        {"name": "me", "type": "person", "aliases": []},
+        {"name": "I", "type": "pronoun", "aliases": []},
+        {"name": "me", "type": "pronoun", "aliases": []},
         {"name": "Python", "type": "tool", "aliases": []},
     ]
-    result = merge_pronoun_entities_in_batch(entities, ner)
+    result = merge_pronoun_entities_in_batch(entities)
 
     names = [e["name"] for e in result]
     assert "I" not in names
@@ -91,44 +90,37 @@ def test_batch_merge_nonperson_untouched():
     """Non-person entities (concepts, tools) are never merged."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
-    ner = _mock_ner(["I"])
     entities = [
         {"name": "Python", "type": "tool", "aliases": []},
         {"name": "Django", "type": "tool", "aliases": []},
     ]
-    result = merge_pronoun_entities_in_batch(entities, ner)
+    result = merge_pronoun_entities_in_batch(entities)
     assert len(result) == 2
 
 
-def test_batch_merge_pronoun_type_from_gliner():
-    """Entities with type='pronoun' from GLiNER2 are treated as pronouns."""
+def test_batch_merge_keeps_names_a_word_list_took_for_pronouns():
+    """"Mia" and "Ella" are Italian and Spanish pronouns too; typed person by
+    the tagger, they are people."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
-    ner = _mock_ner()  # classify_pronoun returns False for everything
     entities = [
-        {"name": "Elara", "type": "person", "aliases": []},
-        {"name": "I", "type": "pronoun", "aliases": ["my"]},
+        {"name": "Mia", "type": "person", "aliases": []},
+        {"name": "Ella", "type": "person", "aliases": []},
+        {"name": "Alps", "type": "location", "aliases": []},
     ]
-    result = merge_pronoun_entities_in_batch(entities, ner)
-
-    names = [e["name"] for e in result]
-    assert "Elara" in names
-    assert "I" not in names
-    elara = next(e for e in result if e["name"] == "Elara")
-    assert "I" in elara["aliases"]
+    assert merge_pronoun_entities_in_batch(entities) == entities
 
 
 def test_batch_merge_dual_typed_pronoun():
-    """When GLiNER emits same name as both person and pronoun, treat as pronoun."""
+    """When the same name is typed both person and pronoun, treat it as a pronoun."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
-    ner = _mock_ner()  # classify_pronoun returns False for everything
     entities = [
         {"name": "I", "type": "person", "aliases": []},
         {"name": "I", "type": "pronoun", "aliases": []},
         {"name": "slow productivity", "type": "preference", "aliases": []},
     ]
-    result = merge_pronoun_entities_in_batch(entities, ner)
+    result = merge_pronoun_entities_in_batch(entities)
 
     names = [e["name"] for e in result]
     # "I" should be removed (no named person to merge into, all pronoun)
@@ -137,17 +129,16 @@ def test_batch_merge_dual_typed_pronoun():
 
 
 def test_batch_merge_dual_typed_with_named_person():
-    """When GLiNER emits 'I' as both person and pronoun alongside a real name, merge into named."""
+    """'I' typed both person and pronoun alongside a real name merges into the name."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
-    ner = _mock_ner()  # classify_pronoun returns False for everything
     entities = [
         {"name": "Elias", "type": "person", "aliases": []},
         {"name": "I", "type": "person", "aliases": []},
         {"name": "I", "type": "pronoun", "aliases": []},
         {"name": "Python", "type": "tool", "aliases": []},
     ]
-    result = merge_pronoun_entities_in_batch(entities, ner)
+    result = merge_pronoun_entities_in_batch(entities)
 
     names = [e["name"] for e in result]
     assert "Elias" in names
@@ -157,154 +148,27 @@ def test_batch_merge_dual_typed_with_named_person():
     assert "I" in elias["aliases"]
 
 
-# ── Alias-based pronoun resolution tests ─────────────────────────────────────
-
-
-def test_batch_merge_resolves_pronoun_via_alias(mem):
-    """When only pronouns in batch but 'I' is alias of existing person, resolve to that person."""
+def test_a_lone_pronoun_is_dropped_even_when_an_old_alias_names_someone(mem):
+    """The alias table used to resolve a lone pronoun, and another text's
+    "she" stored as Bob's made "She moved to Berlin." Bob's move."""
     from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
 
-    # Create Elias as a person atom with "I" as alias
     import uuid
-    elias_id = str(uuid.uuid4())
+    bob_id = str(uuid.uuid4())
     mem.db.execute(
         "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
-        (elias_id, "concept", "Elias", "person", "test", "default"),
+        (bob_id, "concept", "Bob", "person", "test", "default"),
     )
     mem.db.execute(
         "INSERT OR IGNORE INTO aliases (alias, atom_id, tenant_id, space) VALUES (?, ?, ?, ?)",
-        ("I", elias_id, "test", "default"),
+        ("she", bob_id, "test", "default"),
     )
 
-    ner = _mock_ner(["I", "my"])
     entities = [
-        {"name": "I", "type": "person", "aliases": ["my"]},
-        {"name": "intellectual humility", "type": "preference", "aliases": []},
+        {"name": "She", "type": "pronoun", "aliases": []},
+        {"name": "Berlin", "type": "location", "aliases": []},
     ]
-    result = merge_pronoun_entities_in_batch(
-        entities, ner, db=mem.db, tenant_id="test", spaces=["default"],
-    )
-
-    names = [e["name"] for e in result]
-    assert "Elias" in names
-    assert "I" not in names
-    assert "intellectual humility" in names
-    # "I" and "my" should be in Elias's aliases
-    elias = next(e for e in result if e["name"] == "Elias")
-    assert "I" in elias["aliases"]
-    assert "my" in elias["aliases"]
-
-
-def test_batch_merge_no_alias_removes_pronoun(mem):
-    """When only pronouns in batch and no alias exists, remove them."""
-    from smrti.extraction.pronouns import merge_pronoun_entities_in_batch
-
-    ner = _mock_ner(["I"])
-    entities = [
-        {"name": "I", "type": "person", "aliases": []},
-        {"name": "Python", "type": "tool", "aliases": []},
-    ]
-    result = merge_pronoun_entities_in_batch(
-        entities, ner, db=mem.db, tenant_id="test", spaces=["default"],
-    )
-
-    names = [e["name"] for e in result]
-    assert "I" not in names
-    assert "Python" in names
-
-
-# ── Retroactive merge tests ──────────────────────────────────────────────────
-
-
-def test_retroactive_merge_same_episode(mem):
-    """Pronoun atom co-mentioned with named person in same episode → merged."""
-    from smrti.extraction.pronouns import find_and_merge_pronoun_atoms
-
-    # Create an episode
-    episode_id = mem.remember("I am Elara", type="episode")
-
-    # Create a pronoun atom and a named atom
-    import uuid
-    pronoun_id = str(uuid.uuid4())
-    named_id = str(uuid.uuid4())
-
-    mem.db.execute(
-        "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
-        (pronoun_id, "concept", "I", "person", "test", "default"),
-    )
-    mem.db.execute(
-        "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
-        (named_id, "concept", "Elara", "person", "test", "default"),
-    )
-
-    # Create mentions edges: episode → pronoun, episode → named
-    mem.atomspace.link_atoms(episode_id, pronoun_id, "mentions", "test", "default")
-    mem.atomspace.link_atoms(episode_id, named_id, "mentions", "test", "default")
-
-    # Create a target atom and relation edge from pronoun
-    target_id = str(uuid.uuid4())
-    mem.db.execute(
-        "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
-        (target_id, "concept", "strategist", "concept", "test", "default"),
-    )
-    mem.atomspace.link_atoms(pronoun_id, target_id, "is", "test", "default")
-
-    ner = _mock_ner(["I"])
-
-    find_and_merge_pronoun_atoms(named_id, episode_id, mem.db, ner, "test", "default")
-
-    # Pronoun atom should be deleted
-    row = mem.db.fetchone("SELECT id FROM atoms WHERE id = ?", (pronoun_id,))
-    assert row is None
-
-    # "I" must NOT be persisted as an alias — pronoun labels would poison
-    # tier-1 resolution for every later speaker
-    alias_row = mem.db.fetchone(
-        "SELECT atom_id FROM aliases WHERE alias = 'I' AND tenant_id = 'test'",
-        (),
-    )
-    assert alias_row is None
-
-    # Relation edge should be reassigned to the named atom
-    rel_row = mem.db.fetchone(
-        "SELECT id FROM atoms WHERE type = 'relation' AND source_id = ? AND target_id = ?",
-        (named_id, target_id),
-    )
-    assert rel_row is not None
-
-
-def test_retroactive_merge_different_episode_skipped(mem):
-    """Pronoun from different episode → NOT merged."""
-    from smrti.extraction.pronouns import find_and_merge_pronoun_atoms
-
-    episode1_id = mem.remember("first episode", type="episode")
-    episode2_id = mem.remember("second episode", type="episode")
-
-    import uuid
-    pronoun_id = str(uuid.uuid4())
-    named_id = str(uuid.uuid4())
-
-    mem.db.execute(
-        "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
-        (pronoun_id, "concept", "I", "person", "test", "default"),
-    )
-    mem.db.execute(
-        "INSERT INTO atoms (id, type, label, entity_type, tenant_id, space, probability, confidence, sti, lti) VALUES (?, ?, ?, ?, ?, ?, 0.8, 0.6, 1.0, 0.3)",
-        (named_id, "concept", "Elara", "person", "test", "default"),
-    )
-
-    # Pronoun mentioned in episode1, named in episode2
-    mem.atomspace.link_atoms(episode1_id, pronoun_id, "mentions", "test", "default")
-    mem.atomspace.link_atoms(episode2_id, named_id, "mentions", "test", "default")
-
-    ner = _mock_ner(["I"])
-
-    # Looking from episode2's perspective — pronoun not co-mentioned
-    find_and_merge_pronoun_atoms(named_id, episode2_id, mem.db, ner, "test", "default")
-
-    # Pronoun atom should still exist
-    row = mem.db.fetchone("SELECT id FROM atoms WHERE id = ?", (pronoun_id,))
-    assert row is not None
+    assert merge_pronoun_entities_in_batch(entities) == [entities[1]]
 
 
 # ── Pronoun gate in resolve loop ─────────────────────────────────────────────

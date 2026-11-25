@@ -199,6 +199,8 @@ def test_old_healing_hub_edges_are_removed_and_real_claims_kept(tmp_path):
     get_database(path)
     close_database(path)
     conn = _make_connection(path)
+    # A file an older release wrote carries no record of the one-time cleanup.
+    conn.execute("DELETE FROM smrti_meta WHERE key = ?", (Database._HUB_CLEANUP_KEY,))
     _legacy_entity(conn, "alice", "Alice", entity_type="person")
     _legacy_entity(conn, "python", "Python")
     _legacy_entity(conn, "chess", "chess")
@@ -371,7 +373,9 @@ def test_superseding_a_place_with_no_claim_edge_changes_nothing(mem):
     assert _contradictions(mem) == []
 
 
-def test_supersession_finds_the_old_claim_under_a_different_predicate(mem):
+def test_supersession_never_cuts_a_claim_under_a_different_predicate(mem):
+    """The graph cannot tell a rewording ("resides_in") from a different fact
+    ("born_in"), and the fallback that took either cut true facts."""
     alice, amsterdam = _alice_in(mem, "Amsterdam", predicate="resides_in")
     old_edge = mem.db.fetchone(
         "SELECT id FROM atoms WHERE type = 'relation' AND relation = 'resides_in'"
@@ -379,9 +383,8 @@ def test_supersession_finds_the_old_claim_under_a_different_predicate(mem):
 
     _move(mem, alice, "Berlin", "Amsterdam", {"Alice": alice, "Amsterdam": amsterdam})
 
-    [edge] = _contradictions(mem)
-    assert edge["target_id"] == old_edge
-    assert json.loads(_row(mem, old_edge)["metadata"])["superseded_by"] == edge["source_id"]
+    assert _contradictions(mem) == []
+    assert "superseded_by" not in json.loads(_row(mem, old_edge)["metadata"] or "{}")
 
 
 # ── the resolver's unknown type ───────────────────────────────────────────────

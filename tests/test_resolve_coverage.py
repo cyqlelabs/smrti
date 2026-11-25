@@ -37,12 +37,13 @@ def test_cross_type_exact_match(resolver):
     assert id_tech == id_concept
 
 
-def test_fuzzy_match_with_suffix(resolver):
-    """Tier 2: near-duplicate name should merge via RapidFuzz, not exact match."""
+def test_fuzzy_match_with_suffix_is_only_a_proposal(resolver):
+    """Tier 2: a near-duplicate name is proposed, not merged — with no entity
+    task to confirm it, the mention becomes a provisional atom of its own."""
     id_original = resolver.resolve("Tensorflow", "technology", "test", "default", ["default"])
     # "Tensorflow2" — LOWER() can't exact-match "Tensorflow"; fuzzy score is ~95%
     id_fuzzy = resolver.resolve("Tensorflow2", "technology", "test", "default", ["default"])
-    assert id_original == id_fuzzy
+    assert id_original != id_fuzzy
 
 
 def test_embedding_exception_in_create_atom_does_not_raise(resolver):

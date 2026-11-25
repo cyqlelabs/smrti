@@ -23,6 +23,7 @@ import json
 from smrti.core.models import TruthValue
 from smrti.core.provenance import ATOM_METADATA_JSON, SOURCE_AGENT
 from smrti.evolution.truth import update_truth
+from smrti.personality.params import personality_params
 
 # Deliberately an order of magnitude below the weight of a stated fact: being
 # used is weak evidence, and the point is to hold a memory above the surfacing
@@ -57,7 +58,7 @@ def reinforce_atoms(
         "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
         (tenant_id, space),
     )
-    p = dict(personality) if personality else {}
+    p = personality_params(personality)
     lr = _param(p, "confidence_update_lr", 0.3)
     agent_trust = _param(p, "agent_source_trust", 0.5)
     epoch = int(_param(p, "epoch_count", 0))

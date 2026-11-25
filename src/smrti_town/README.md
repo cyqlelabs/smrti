@@ -2,7 +2,7 @@
 
 A city-builder where every citizen has a real memory graph.
 
-Each citizen carries a [Smrti](../../README.md) memory engine — beliefs stored as graph nodes with Bayesian truth values, emotional valence, and salience weights. Citizens decide what to do based on what they remember. A mayor and council debate what to build, citizens petition for what they need, and newcomers arrive when the town gives them a reason to.
+Each citizen carries a [Smrti](../../README.md) memory engine — beliefs stored as graph nodes with truth values revised from evidence, emotional valence, and salience weights. Citizens decide what to do based on what they remember. A mayor and council debate what to build, citizens petition for what they need, and newcomers arrive when the town gives them a reason to.
 
 Point it at a local LLM and it generates the people. Watch it run in an isometric Phaser canvas. Query any citizen's memories over REST.
 

@@ -1,5 +1,71 @@
 """PersonalityProfile dataclass and preset loading."""
+import logging
 from dataclasses import dataclass, field
+
+logger = logging.getLogger(__name__)
+
+# The range in which each hyperparameter means something. A profile holding a
+# value outside it — a string, a negative decay rate, a surfacing floor of 7 —
+# is refused when it is built, and a stored row holding one reads as that
+# field's default: one bad write through ``/personality`` used to make every
+# later recall in the space fail, across restarts.
+PARAM_RANGES: dict[str, tuple[float, float]] = {
+    "confidence_decay_rate": (0.0, 1.0),
+    "confidence_update_lr": (0.0, 1.0),
+    "min_confidence_to_surface": (0.0, 1.0),
+    "sti_decay_rate": (0.0, 1.0),
+    "sti_boost_on_access": (0.0, 3.0),
+    "sti_propagation_factor": (0.0, 1.0),
+    "lti_promotion_threshold": (0.0, 3.0),
+    "lti_decay_rate": (0.0, 1.0),
+    "agent_source_trust": (0.0, 1.0),
+    "valence_weight": (0.0, 1.0),
+    "valence_propagation": (0.0, 1.0),
+    "mood_inertia": (0.0, 1.0),
+    "w_similarity": (0.0, 1.0),
+    "w_sti": (0.0, 1.0),
+    "w_confidence": (0.0, 1.0),
+    "w_lti": (0.0, 1.0),
+    "w_valence": (0.0, 1.0),
+}
+
+
+def _checked(name: str, value) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{name} must be a number, got {value!r}")
+    low, high = PARAM_RANGES[name]
+    # Written as a positive test so NaN, which compares false to everything,
+    # is refused too.
+    if not low <= value <= high:
+        raise ValueError(f"{name} must be within [{low}, {high}], got {value!r}")
+    return float(value)
+
+
+_warned: set[tuple[str, str]] = set()
+
+
+def param_value(name: str, value, default: float) -> float:
+    """A stored hyperparameter, or *default* when it is missing or unusable."""
+    if value is None:
+        return default
+    try:
+        return _checked(name, value)
+    except ValueError as exc:
+        if (name, repr(value)) not in _warned:
+            _warned.add((name, repr(value)))
+            logger.warning("ignoring stored personality value: %s; using %s", exc, default)
+        return default
+
+
+def personality_params(row) -> dict:
+    """A stored personality row with every unusable hyperparameter set to
+    None, which every reader already maps to that field's default."""
+    params = dict(row) if row else {}
+    for name in PARAM_RANGES:
+        if params.get(name) is not None:
+            checked = param_value(name, params[name], None)
+            params[name] = checked
+    return params
 
 
 @dataclass
@@ -31,6 +97,10 @@ class PersonalityProfile:
     w_valence: float = 0.10
     # Meta
     preset_name: str = "balanced"
+
+    def __post_init__(self) -> None:
+        for name in PARAM_RANGES:
+            setattr(self, name, _checked(name, getattr(self, name)))
 
 
 PRESETS = {

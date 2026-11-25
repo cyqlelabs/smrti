@@ -8,9 +8,10 @@ message holds anything worth extracting (``routing``), which retrieved
 memories are evidence for a question (``rerank``), whether a new claim
 really replaces an older one (``supersession``), whether an uncertain
 name match is the same entity (``entity``), and whether an estimated
-valence is the memory's own or the speaker's mood (``tone``). Each is active by default, can be
-put in shadow or disabled independently, and falls back to the deterministic
-path on any failure.
+valence is the memory's own or the speaker's mood (``tone``). Each can be
+put in shadow, made active or disabled independently, is on by default only
+where it was measured to help (``policies.DEFAULT_MODES``), and falls back
+to the deterministic path on any failure.
 
 The provider is the local multilingual Laya model
 (``smrti.decisions.laya``), the distilled student where the machine cannot

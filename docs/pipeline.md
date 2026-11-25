@@ -29,7 +29,7 @@ flowchart TD
 
     subgraph UNDERSTAND ["  ② Understand  "]
         NER["🔍 Named Entity Recognition\n16 types: person · organization · project\nrole · technology · skill · topic\nmedia · health · location · event & more"]
-        RESOLVE["🔗 Entity Resolution\nLink to known entities\nor create new ones"]
+        RESOLVE["🔗 Entity Resolution\nMerge on exact or folded labels\na near match makes a new entity"]
         PRONOUNS["👥 Pronoun Disambiguation\n'she' → Alice\n'we' → Acme"]
         CLAIMS["🧠 Claim Extraction\nRelations · Beliefs · Goals\nConstraints · Preferences"]
         CONTEXT["📚 Memory Context Injection\nKnown entities from graph\nfed back into extraction"]
@@ -37,7 +37,7 @@ flowchart TD
 
     subgraph STORE ["  ③ Remember  "]
         ATOMS["⚛️ Atom Graph\nEvery entity & claim becomes\na node with rich metadata"]
-        TV["📊 Truth Value\nProbability × Confidence\nvia Bayesian PLN merging"]
+        TV["📊 Truth Value\nProbability × Confidence\nrevised from evidence (PLN)"]
         AV["⚡ Attention Value\nShort-term · Long-term\nImportance weights"]
         VAL["❤️ Emotional Valence\nPositive / Negative / Neutral\nwith Intensity"]
         EDGES["🕸️ Relation Edges\nDirectional typed links\nbetween all entities"]
@@ -59,13 +59,13 @@ flowchart TD
         FUSE["⚖️ Rank Fusion\nReciprocal Rank Fusion\npicks the candidate pool"]
         EXPAND["🌐 Graph Expansion\nFollow relation edges\nto related concepts"]
         SALIENCE["🏆 Salience Ranking\nSimilarity · Attention\nConfidence · Valence"]
-        JUDGE["⚖️ Evidence Judgement\nlocal model · typed decisions\nanswers? links? superseded? contradicts?"]
+        JUDGE["⚖️ Evidence Judgement\nlocal model · off by default\nanswers? links? superseded? contradicts?"]
         DIVERSE["🎛️ Diversity Cap\nOne moment cannot fill\nmore than a sixth of the answer"]
     end
 
     subgraph CLASSIFY ["  ⑥ Classify  "]
-        CRITICAL["🚨 Critical Warning\nFailures the caller flagged\nas never to repeat"]
-        ANTIPATTERN["⚠️ Known Antipattern\nLow-probability beliefs\nfirmly established"]
+        CRITICAL["🚨 Critical Warning\nFailures the caller flagged\nfound even outside top_k"]
+        ANTIPATTERN["⚠️ Known Antipattern\nClaims a later claim replaced\nor evidence disproved"]
         CONTEXT_OUT["💡 Background Context\nRelevant facts &\ngoals for the response"]
     end
 

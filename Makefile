@@ -2,7 +2,7 @@ DATASET ?= data/longmemeval_s.json
 HALUMEM ?= data/HaluMem-Medium.jsonl
 BENCH_ARGS ?=
 
-.PHONY: test datasets bench bench-baseline bench-halumem bench-decisions bench-tone bench-all distill distill-env distill-corpus distill-label distill-train distill-export distill-evaluate
+.PHONY: test datasets bench bench-baseline bench-halumem bench-decisions bench-tone bench-supersession bench-entity bench-all distill distill-env distill-corpus distill-label distill-train distill-export distill-evaluate
 
 test:
 	pytest tests/ -q
@@ -36,6 +36,12 @@ bench-decisions:
 
 bench-tone:
 	PYTHONPATH=. python -m bench.decisions.tone $(BENCH_ARGS)
+
+bench-supersession:
+	PYTHONPATH=. python -m bench.decisions.supersession $(BENCH_ARGS)
+
+bench-entity:
+	PYTHONPATH=. python -m bench.decisions.entity $(BENCH_ARGS)
 
 bench-all: bench bench-halumem
 

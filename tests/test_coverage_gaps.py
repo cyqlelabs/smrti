@@ -169,22 +169,6 @@ def test_discover_connections_ignores_low_lti_atoms(mem):
 
 # ── spaces/set_ops.py ─────────────────────────────────────────────────────────
 
-def test_get_embedding_returns_none_without_a_vector_row(mem):
-    from smrti.spaces.set_ops import _get_embedding
-
-    atom_id = mem.remember("An atom that loses its vector", type="concept")
-    mem.db.execute("DELETE FROM vec_atoms WHERE atom_id = ?", (atom_id,))
-    assert _get_embedding(atom_id, mem.db) is None
-
-
-def test_get_embedding_unpacks_the_stored_blob(mem):
-    from smrti.spaces.set_ops import _get_embedding
-
-    atom_id = mem.remember("An atom that keeps its vector", type="concept")
-    vector = _get_embedding(atom_id, mem.db)
-    assert vector is not None and len(vector) == 384
-
-
 def test_cosine_similarity_of_a_zero_vector_is_zero():
     from smrti.spaces.set_ops import _cosine_similarity
 

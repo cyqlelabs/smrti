@@ -1,6 +1,7 @@
 """Tests for personality presets."""
 import pytest
 
+from smrti import Smrti
 from smrti.personality.params import PRESETS, PersonalityProfile, load_preset
 
 
@@ -26,3 +27,28 @@ def test_weights_sum_to_one():
 def test_unknown_preset_raises():
     with pytest.raises(ValueError):
         load_preset("nonexistent")
+
+
+@pytest.mark.parametrize(
+    "params",
+    [{"w_sti": "abc"}, {"min_confidence_to_surface": 7}, {"sti_decay_rate": -0.1},
+     {"w_lti": float("nan")}, {"mood_inertia": True}],
+)
+def test_a_profile_refuses_a_value_outside_its_range(params):
+    with pytest.raises(ValueError):
+        PersonalityProfile(**params)
+
+
+def test_a_stored_value_outside_its_range_reads_as_the_default(tmp_path):
+    """One bad write through /personality used to make every later recall in
+    the space fail, across restarts."""
+    mem = Smrti(db_path=str(tmp_path / "p.db"))
+    mem.remember("The billing service runs on Postgres")
+    mem.db.execute(
+        "UPDATE personality SET w_sti = 'abc', min_confidence_to_surface = 7 "
+        "WHERE tenant_id = ? AND space = ?",
+        (mem.tenant_id, mem.write_space),
+    )
+    assert mem.recall("billing database")
+    mem.reflect()
+    mem.close()

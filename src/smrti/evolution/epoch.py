@@ -1,9 +1,14 @@
 """Consolidation epoch: the main memory evolution loop."""
 from __future__ import annotations
 
+import logging
+import time
+import uuid
+
 from smrti.core.atomspace import VECTOR_MISSING, AtomSpace, embedding_text
 from smrti.core.models import (
     PERMANENT_PROBABILITY,
+    STRUCTURAL_RELATIONS,
     SUPERSEDED_PROBABILITY,
     EpochResult,
     TruthValue,
@@ -12,15 +17,21 @@ from smrti.core.models import (
 from smrti.core.provenance import (
     ATOM_FORGOTTEN,
     ATOM_METADATA_JSON,
-    ATOM_OWN_INTENSITY,
-    ATOM_OWN_VALENCE,
     ATOM_SOURCE,
+    SEVERE_RETAINED_SQL,
+    SOURCE_AGENT,
+    SOURCE_USER,
+    claim_current_sql,
+    forgotten_sql,
 )
-from smrti.evolution.attention import propagate_sti
+from smrti.evolution.attention import sti_moves
 from smrti.evolution.connections import discover_connections
 from smrti.evolution.healing import heal_orphaned_episodes
 from smrti.evolution.truth import update_truth
-from smrti.evolution.valence import propagate_valence
+from smrti.evolution.valence import NUDGE_SQL, nudge_params
+from smrti.personality.params import personality_params
+
+logger = logging.getLogger("smrti.epoch")
 
 # Atoms are pruned below an LTI of 0.05, so a floor above that line makes a
 # memory permanent. What the user stated keeps one; what the model volunteered
@@ -42,6 +53,141 @@ _LTI_FLOOR_CRITICAL = 0.5
 # never fades — the one thing agent-source decay exists to prevent.
 _PERMANENCE_UNREACHABLE = 2.0
 
+# A decayed attention or confidence value under this is stored as zero.
+# Multiplicative decay never reaches zero by itself, so without the cut every
+# atom that ever held attention was rewritten on every epoch for thousands of
+# epochs, each write changing a number too small to move any ranking.
+_NEGLIGIBLE = 1e-6
+
+# How long a reflector may go without renewing its hold on a space before
+# another process may take the space over. The epoch renews it between
+# phases, so this bounds one phase, not the whole epoch.
+_LEASE_SECONDS = 300.0
+
+# The relations that record how the graph is built rather than a fact about
+# the world, as an SQL list.
+_STRUCTURAL = ", ".join(f"'{relation}'" for relation in STRUCTURAL_RELATIONS)
+
+_ID_CHUNK = 400
+
+_FORGOTTEN_BRIDGE = (
+    f"({ATOM_FORGOTTEN} AND (CASE WHEN json_valid(metadata) "
+    f"THEN json_extract(metadata, '$.bridge_source_a') END) IS NOT NULL)"
+)
+
+
+class LeaseLost(RuntimeError):
+    """Another process took over the space while this epoch was running."""
+
+
+def _chunks(ids: list[str]):
+    for start in range(0, len(ids), _ID_CHUNK):
+        yield ids[start : start + _ID_CHUNK]
+
+
+def _take_lease(tenant_id: str, space: str, db) -> tuple[str, int] | None:
+    """Claim the space for one epoch and count it, or None when another holds it.
+
+    One reflector per space at a time, across processes: every step of an
+    epoch moves values by a fraction of what they are, so two epochs that
+    interleave on one space decay it twice and propagate twice. A lease
+    whose holder died stops blocking once it expires. The epoch is counted
+    in the same transaction, so a refused run leaves no trace.
+    """
+    owner = uuid.uuid4().hex
+    now = time.time()
+    with db.transaction() as conn:
+        held = conn.execute(
+            "SELECT owner, expires_at FROM epoch_lease WHERE tenant_id = ? AND space = ?",
+            (tenant_id, space),
+        ).fetchone()
+        if held is not None and held["owner"] is not None and held["expires_at"] > now:
+            return None
+        conn.execute(
+            """INSERT INTO epoch_lease (tenant_id, space, owner, expires_at)
+               VALUES (?, ?, ?, ?)
+               ON CONFLICT (tenant_id, space) DO UPDATE
+               SET owner = excluded.owner, expires_at = excluded.expires_at""",
+            (tenant_id, space, owner, now + _LEASE_SECONDS),
+        )
+        conn.execute(
+            "UPDATE personality SET epoch_count = epoch_count + 1 WHERE tenant_id = ? AND space = ?",
+            (tenant_id, space),
+        )
+        row = conn.execute(
+            "SELECT epoch_count FROM personality WHERE tenant_id = ? AND space = ?",
+            (tenant_id, space),
+        ).fetchone()
+    return owner, (row["epoch_count"] if row else 1)
+
+
+def _hold_lease(tenant_id: str, space: str, db, owner: str) -> None:
+    """Extend the lease, or stop the epoch if another process has taken it.
+
+    Called between phases, so a holder that outlived its lease stops before
+    its next write rather than decaying the space a second time alongside
+    the process that took over.
+    """
+    cursor = db.execute(
+        "UPDATE epoch_lease SET expires_at = ? WHERE tenant_id = ? AND space = ? AND owner = ?",
+        (time.time() + _LEASE_SECONDS, tenant_id, space, owner),
+    )
+    if cursor.rowcount != 1:
+        raise LeaseLost(f"epoch lease on tenant={tenant_id} space={space} was taken over")
+
+
+def _fence(conn, tenant_id: str, space: str, owner: str) -> None:
+    """Hold the lease inside the caller's write transaction, or stop the epoch.
+
+    The check between phases cannot fence a write: a holder that stalls
+    after renewing, past its lease, resumes after another process took the
+    space and decays it a second time. Made here, in the transaction that
+    writes, the check and the write are one: a stale holder's write is
+    rolled back instead of committed.
+    """
+    cursor = conn.execute(
+        "UPDATE epoch_lease SET expires_at = ? WHERE tenant_id = ? AND space = ? AND owner = ?",
+        (time.time() + _LEASE_SECONDS, tenant_id, space, owner),
+    )
+    if cursor.rowcount != 1:
+        raise LeaseLost(f"epoch lease on tenant={tenant_id} space={space} was taken over")
+
+
+def _release_lease(
+    tenant_id: str, space: str, db, owner: str, completed_epoch: int | None
+) -> None:
+    """Give the space back, recording the epoch when it ran to completion.
+
+    The recorded number is what tells a duplicate run from the next one: the
+    personality row counts every epoch that started, this one only those
+    that finished.
+    """
+    if completed_epoch is None:
+        db.execute(
+            "UPDATE epoch_lease SET owner = NULL, expires_at = 0 "
+            "WHERE tenant_id = ? AND space = ? AND owner = ?",
+            (tenant_id, space, owner),
+        )
+        return
+    db.execute(
+        """UPDATE epoch_lease SET owner = NULL, expires_at = 0,
+                  completed_epoch = ?, completed_at = datetime('now')
+           WHERE tenant_id = ? AND space = ? AND owner = ?""",
+        (completed_epoch, tenant_id, space, owner),
+    )
+
+
+def empty_result() -> EpochResult:
+    """What an epoch that changed nothing reports."""
+    return EpochResult(
+        beliefs_updated=0,
+        atoms_decayed=0,
+        atoms_pruned=0,
+        lti_promoted=0,
+        new_connections=0,
+        contradictions_resolved=0,
+    )
+
 
 def _param(personality: dict, key: str, default: float) -> float:
     """Read a personality hyperparameter, tolerating absent and NULL columns.
@@ -56,6 +202,14 @@ def _param(personality: dict, key: str, default: float) -> float:
 
 
 def _repair_vectors(tenant_id: str, space: str, db, embed_engine) -> None:
+    """File the vectors of atoms stored without one.
+
+    A failure here is logged and ends the repair, never the epoch: decay has
+    already been applied by the time it runs, and an epoch that raised after
+    it left the space marked as used, so an idle space aged again on every
+    interval for as long as the encoder stayed down. The atoms keep their
+    mark and are retried next epoch.
+    """
     rows = db.fetchall(
         f"""SELECT * FROM atoms WHERE tenant_id = ? AND space = ? AND type != 'relation'
             AND NOT {ATOM_FORGOTTEN}
@@ -66,123 +220,89 @@ def _repair_vectors(tenant_id: str, space: str, db, embed_engine) -> None:
     atomspace = AtomSpace(db, embed_engine)
     for row in rows:
         atom = atom_from_row(row)
-        atomspace.file_vector(atom, list(embed_engine.embed(embedding_text(atom))))
+        try:
+            atomspace.file_vector(atom, list(embed_engine.embed(embedding_text(atom))))
+        except Exception:
+            logger.warning(
+                "vector repair stopped at atom %s in tenant=%s space=%s; "
+                "the rest stay marked for the next epoch",
+                atom.id, tenant_id, space, exc_info=True,
+            )
+            return
 
 
-def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
-    """Single deterministic consolidation pass for a (tenant_id, space) pair.
+def _apply_evidence(tenant_id: str, space: str, db, lr: float, fence=None) -> int:
+    """Revise truth values with the space's pending evidence.
 
-    Executes in order:
-      1. Apply pending evidence to update belief probabilities/confidence
-      2. Decay STI, LTI, and confidence for all atoms in this space
-         (user-stated episodes/beliefs/goals hold a confidence floor at the
-         surfacing threshold so they stay recallable, and one asserted as
-         permanent keeps the confidence it was asserted with)
-      3. Propagate STI and valence to 1-hop neighbors of active atoms
-      4. Heal orphaned episodes (link to most salient person)
-      5. Promote high-STI atoms to LTI
-      6. Resolve contradictions: weaken the loser the edge names, else the
-         less confident endpoint
-      7. Discover associations between similar high-LTI atoms (every 10th
-         epoch)
-      8. Prune dead atoms below confidence and LTI floors
+    The rows are read, the atoms they bear on are read and revised, and the
+    rows are marked processed, all in one write transaction: no other
+    process can read them as pending in between, so none can apply them a
+    second time. Evidence against an atom outside the space, or against one
+    forget() sank, is retired unapplied — leaving it pending would make every
+    later epoch re-scan it, and applying it to a forgotten atom lifted it
+    back over the surfacing floor, where the floor then held it forever.
 
-    Bridge spaces are no longer grown here. An earlier version compared the
-    space against every other space in the tenant every tenth epoch and
-    materialised ``a_x_b`` atoms wherever the overlap cleared a threshold
-    nobody had set — a quadratic scan on a timer that wrote atoms into spaces
-    nobody had asked for. Bridging is an explicit call now: ``space_merge``.
+    Returns how many rows bore on an atom here.
     """
-    db.execute(
-        "UPDATE personality SET epoch_count = epoch_count + 1 WHERE tenant_id = ? AND space = ?",
+    # Most epochs find nothing pending, and a plain read says so without
+    # taking the write lock.
+    if not db.fetchall(
+        "SELECT 1 FROM evidence WHERE processed = 0 AND tenant_id = ? AND space = ? LIMIT 1",
         (tenant_id, space),
-    )
-    epoch_row = db.fetchone(
-        "SELECT epoch_count FROM personality WHERE tenant_id = ? AND space = ?",
-        (tenant_id, space),
-    )
-    epoch_count = epoch_row["epoch_count"] if epoch_row else 1
-
-    beliefs_updated = 0
-    atoms_pruned = 0
-    lti_promoted = 0
-    new_connections = 0
-    contradictions_resolved = 0
-
-    personality = db.fetchone(
-        "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
-        (tenant_id, space),
-    )
-    if not personality:
-        return EpochResult(
-            beliefs_updated=0,
-            atoms_decayed=0,
-            atoms_pruned=0,
-            lti_promoted=0,
-            new_connections=0,
-            contradictions_resolved=0,
+    ):
+        return 0
+    applied = 0
+    with db.transaction() as conn:
+        if fence:
+            fence(conn)
+        pending = conn.execute(
+            """SELECT id, atom_id, observed_probability, weight FROM evidence
+               WHERE processed = 0 AND tenant_id = ? AND space = ? ORDER BY created_at""",
+            (tenant_id, space),
+        ).fetchall()
+        by_atom: dict[str, list] = {}
+        for ev in pending:
+            by_atom.setdefault(ev["atom_id"], []).append(ev)
+        atoms = {}
+        for chunk in _chunks(list(by_atom)):
+            ph = ",".join("?" * len(chunk))
+            for row in conn.execute(
+                f"""SELECT id, probability, confidence FROM atoms
+                    WHERE id IN ({ph}) AND tenant_id = ? AND space = ? AND NOT {ATOM_FORGOTTEN}""",
+                (*chunk, tenant_id, space),
+            ):
+                atoms[row["id"]] = row
+        revised = []
+        for atom_id, evs in by_atom.items():
+            row = atoms.get(atom_id)
+            if row is None:
+                continue
+            current = TruthValue(probability=row["probability"], confidence=row["confidence"])
+            for ev in evs:
+                current = update_truth(current, ev["observed_probability"], ev["weight"], lr)
+            revised.append((current.probability, current.confidence, atom_id, tenant_id, space))
+            applied += len(evs)
+        conn.executemany(
+            "UPDATE atoms SET probability = ?, confidence = ?, updated_at = datetime('now') "
+            "WHERE id = ? AND tenant_id = ? AND space = ?",
+            revised,
         )
-
-    p = dict(personality)
-    lr = _param(p, "confidence_update_lr", 0.3)
-
-    # 1. Process pending evidence — each atom's truth update and its evidence
-    # marks commit in one transaction so a crash cannot double-count evidence.
-    pending = db.fetchall(
-        "SELECT * FROM evidence WHERE processed = 0 AND tenant_id = ? AND space = ? ORDER BY created_at",
-        (tenant_id, space),
-    )
-    pending_by_atom: dict[str, list] = {}
-    for ev in pending:
-        pending_by_atom.setdefault(ev["atom_id"], []).append(ev)
-    for atom_id, evs in pending_by_atom.items():
-        # The atom must live in the space being consolidated. Evidence filed
-        # against an atom elsewhere — an overlay read recorded before the
-        # resolver was scoped, or a row left behind by a since-moved atom —
-        # would otherwise let this epoch rewrite another space's truth values.
-        # Such rows are retired rather than skipped: leaving them pending makes
-        # every future epoch re-scan them forever.
-        atom_row = db.fetchone(
-            "SELECT * FROM atoms WHERE id = ? AND tenant_id = ? AND space = ?",
-            (atom_id, tenant_id, space),
+        conn.executemany(
+            "UPDATE evidence SET processed = 1 WHERE id = ?",
+            [(ev["id"],) for ev in pending],
         )
-        if not atom_row:
-            db.execute_many(
-                "UPDATE evidence SET processed = 1 WHERE id = ?",
-                [(ev["id"],) for ev in evs],
-            )
-            continue
-        current = TruthValue(
-            probability=atom_row["probability"],
-            confidence=atom_row["confidence"],
-        )
-        for ev in evs:
-            current = update_truth(
-                current, ev["observed_probability"], ev["weight"], lr
-            )
-        statements = [
-            (
-                "UPDATE atoms SET probability = ?, confidence = ?, updated_at = datetime('now') "
-                "WHERE id = ? AND tenant_id = ? AND space = ?",
-                (current.probability, current.confidence, atom_id, tenant_id, space),
-            ),
-        ]
-        statements += [
-            ("UPDATE evidence SET processed = 1 WHERE id = ?", (ev["id"],))
-            for ev in evs
-        ]
-        db.execute_batch(statements)
-        beliefs_updated += len(evs)
+    return applied
 
-    # 2. Decay STI, LTI, and confidence for all atoms in this space.
-    # LTI must decay: promotion only ever raises it, so without a downward
-    # force any atom that trends briefly salient is pinned above the prune
-    # floor permanently and the graph can never shed anything.
-    decay_count_row = db.fetchone(
-        "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ?",
-        (tenant_id, space),
-    )
-    atoms_decayed = decay_count_row["n"] if decay_count_row else 0
+
+def _decay(tenant_id: str, space: str, db, p: dict, fence=None) -> None:
+    """Decay STI, LTI and confidence, writing only the rows whose values change.
+
+    Each new value is computed by one expression, and the same expression,
+    compared with the stored value, decides whether the row is written at
+    all. Rewriting every row every epoch made the epoch's cost, and the
+    write-ahead log it grew, proportional to the whole graph however little
+    of it was still moving.
+    """
     # Agent-authored content decays faster in proportion to how little it is
     # trusted, so model output the user never picked up fades on its own while
     # user-stated facts persist. Atoms with no recorded source predate
@@ -233,66 +353,304 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # An unstamped atom below the surfacing floor predates stamping and is
     # left where it is — nothing tells a legacy forget from a decay victim.
     #
-    # The stamp also releases the LTI floors. A forgotten memory is one the
+    # The stamp also releases every floor. A forgotten memory is one the
     # caller asked to be rid of; holding it at the testimony floor, or at the
     # critical-error floor, would keep it out of the pruner's reach forever.
+    def decayed(column: str, rate: str) -> str:
+        return (
+            f"(CASE WHEN {column} * (1.0 - :{rate}) < :negligible THEN 0.0 "
+            f"ELSE {column} * (1.0 - :{rate}) END)"
+        )
+
+    new_sti = decayed("sti", "sti_rate")
+    new_lti = f"""MAX({decayed("lti", "lti_rate")},
+                      CASE WHEN {ATOM_FORGOTTEN} THEN 0.0
+                           WHEN {SEVERE_RETAINED_SQL} THEN :critical_floor
+                           WHEN lti >= :lti_floor THEN :lti_floor
+                           ELSE 0.0 END)"""
+    new_confidence = f"""MAX(CASE WHEN type = 'belief' AND probability >= :permanent_at
+                                  THEN CASE
+                                      WHEN {ATOM_FORGOTTEN} THEN confidence
+                                      WHEN confidence >= :conf_floor
+                                          THEN MAX(confidence, probability)
+                                      ELSE confidence END
+                                  ELSE {decayed("confidence", "conf_rate")} END,
+                             CASE WHEN type IN ('episode', 'belief', 'goal')
+                                       AND NOT {ATOM_FORGOTTEN}
+                                       AND confidence >= :conf_floor THEN :conf_floor
+                                  ELSE 0.0 END)"""
     min_conf = _param(p, "min_confidence_to_surface", 0.1)
-    decay_sql = f"""UPDATE atoms SET
-               sti        = sti        * (1.0 - ?),
-               lti        = MAX(lti * (1.0 - ?),
-                                CASE WHEN {ATOM_FORGOTTEN} THEN 0.0
-                                     WHEN {ATOM_OWN_VALENCE} < -0.7
-                                          AND {ATOM_OWN_INTENSITY} > 0.7 THEN ?
-                                     WHEN lti >= ? THEN ?
-                                     ELSE 0.0 END),
-               confidence = MAX(CASE WHEN type = 'belief' AND probability >= ?
-                                     THEN CASE
-                                         WHEN {ATOM_FORGOTTEN} THEN confidence
-                                         WHEN confidence >= ?
-                                             THEN MAX(confidence, probability)
-                                         ELSE confidence END
-                                     ELSE confidence * (1.0 - ?) END,
-                                CASE WHEN type IN ('episode', 'belief', 'goal')
-                                          AND confidence >= ? THEN ?
-                                     ELSE 0.0 END),
-               updated_at = datetime('now')
-           WHERE tenant_id = ? AND space = ?
-             AND {ATOM_SOURCE} {{}} 'agent'"""
-    for comparison, multiplier, floor, conf_floor, permanent_at in (
-        ("!=", 1.0, _LTI_FLOOR_USER, min_conf, PERMANENT_PROBABILITY),
-        ("=", agent_multiplier, _LTI_FLOOR_AGENT, 0.0, _PERMANENCE_UNREACHABLE),
+    with db.transaction() as conn:
+        if fence:
+            fence(conn)
+        for comparison, multiplier, lti_floor, conf_floor, permanent_at in (
+            ("!=", 1.0, _LTI_FLOOR_USER, min_conf, PERMANENT_PROBABILITY),
+            ("=", agent_multiplier, _LTI_FLOOR_AGENT, 0.0, _PERMANENCE_UNREACHABLE),
+        ):
+            sti_rate, lti_rate, conf_rate = (
+                min(rate * multiplier, 1.0) for rate in base_rates
+            )
+            conn.execute(
+                f"""UPDATE atoms SET
+                        sti = {new_sti}, lti = {new_lti}, confidence = {new_confidence},
+                        updated_at = datetime('now')
+                    WHERE tenant_id = :tenant_id AND space = :space
+                      AND {ATOM_SOURCE} {comparison} 'agent'
+                      AND (sti != {new_sti} OR lti != {new_lti}
+                           OR confidence != {new_confidence})""",
+                {
+                    "tenant_id": tenant_id, "space": space,
+                    "sti_rate": sti_rate, "lti_rate": lti_rate, "conf_rate": conf_rate,
+                    "negligible": _NEGLIGIBLE, "critical_floor": _LTI_FLOOR_CRITICAL,
+                    "lti_floor": lti_floor, "conf_floor": conf_floor,
+                    "permanent_at": permanent_at,
+                },
+            )
+
+
+def _far_ends(
+    tenant_id: str, space: str, db, ids: list[str], near: str, far: str
+) -> dict[str, list[str]]:
+    """For each of *ids*, the *far* end of every edge in this space whose
+    *near* end it is, in the order the edges were written."""
+    ends: dict[str, list[str]] = {}
+    for chunk in _chunks(ids):
+        ph = ",".join("?" * len(chunk))
+        for edge in db.fetchall(
+            f"""SELECT {near} AS near, {far} AS far FROM atoms
+                WHERE {near} IN ({ph}) AND type = 'relation' AND tenant_id = ? AND space = ?
+                ORDER BY rowid""",
+            (*chunk, tenant_id, space),
+        ):
+            if edge["far"]:
+                ends.setdefault(edge["near"], []).append(edge["far"])
+    return ends
+
+
+def _neighbours(tenant_id: str, space: str, db, active) -> dict[str, list[str]]:
+    """Each active atom's 1-hop neighbours, read a chunk of atoms at a time.
+
+    A relation atom's neighbours are its endpoints, which it stores in its
+    own columns; any other atom's are the far ends of the edges in this
+    space that touch it, outgoing first. Looking these up two queries per
+    atom was what an epoch spent nearly all its time on — 17,000 lookups and
+    three to four minutes at twenty thousand atoms.
+    """
+    found = {
+        row["id"]: [x for x in (row["source_id"], row["target_id"]) if x]
+        for row in active
+        if row["type"] == "relation"
+    }
+    plain = [row["id"] for row in active if row["type"] != "relation"]
+    outgoing = _far_ends(tenant_id, space, db, plain, "source_id", "target_id")
+    incoming = _far_ends(tenant_id, space, db, plain, "target_id", "source_id")
+    for atom_id in plain:
+        found[atom_id] = outgoing.get(atom_id, []) + incoming.get(atom_id, [])
+    return found
+
+
+def _creditable(tenant_id: str, space: str, db, ids: list[str]) -> set[str]:
+    """Which of *ids* this space can credit: atoms in it that were not forgotten.
+
+    A bridge edge's far end sits in another space, where an update is a
+    no-op, and charging the source for a share nobody received would
+    destroy activation. A forgotten atom receives nothing either: forget()
+    zeroed its attention, and propagation handing it back would undo that.
+    """
+    found: set[str] = set()
+    for chunk in _chunks(ids):
+        ph = ",".join("?" * len(chunk))
+        found.update(
+            r["id"]
+            for r in db.fetchall(
+                f"""SELECT id FROM atoms
+                    WHERE id IN ({ph}) AND tenant_id = ? AND space = ? AND NOT {ATOM_FORGOTTEN}""",
+                (*chunk, tenant_id, space),
+            )
+        )
+    return found
+
+
+def _propagation_statements(
+    tenant_id: str, space: str, active, neighbours, creditable, p: dict
+) -> list[tuple]:
+    """Each active atom's moves and nudges, source by source, as statements."""
+    sti_factor = _param(p, "sti_propagation_factor", 0.15)
+    valence_factor = _param(p, "valence_propagation", 0.1)
+    mood_inertia = _param(p, "mood_inertia", 0.8)
+    statements: list[tuple] = []
+    for row in active:
+        ids = [n for n in neighbours.get(row["id"], []) if n in creditable]
+        if sti_factor > 0 and row["sti"] > 0.3:
+            statements += sti_moves(row["id"], row["sti"], sti_factor, ids, tenant_id, space)
+        if valence_factor > 0 and abs(row["valence"]) > 0.3 and row["intensity"] > 0.3:
+            nudges = nudge_params(
+                row["valence"], row["intensity"], valence_factor, ids,
+                tenant_id, space, mood_inertia,
+            )
+            statements += [(NUDGE_SQL, params) for params in nudges]
+    return statements
+
+
+def _propagate(tenant_id: str, space: str, db, p: dict, fence=None) -> None:
+    """Spread STI and valence one hop from every active atom, in one transaction.
+
+    The statements are the ones the per-atom propagation issues, in the same
+    order — each source's moves read from one snapshot of the active atoms,
+    the blends applied in turn — so the values land exactly where they would
+    one atom at a time, and commit once. Forgotten atoms neither spread nor
+    receive.
+    """
+    if (
+        _param(p, "sti_propagation_factor", 0.15) <= 0
+        and _param(p, "valence_propagation", 0.1) <= 0
     ):
-        sti_rate, lti_rate, conf_rate = (
-            min(rate * multiplier, 1.0) for rate in base_rates
+        return
+    active = db.fetchall(
+        f"""SELECT id, type, source_id, target_id, sti, valence, intensity FROM atoms
+            WHERE tenant_id = ? AND space = ? AND NOT {ATOM_FORGOTTEN}
+              AND (sti > 0.3 OR (ABS(valence) > 0.3 AND intensity > 0.3))""",
+        (tenant_id, space),
+    )
+    if not active:
+        return
+    neighbours = _neighbours(tenant_id, space, db, active)
+    creditable = _creditable(
+        tenant_id, space, db, list(dict.fromkeys(n for ids in neighbours.values() for n in ids))
+    )
+    statements = _propagation_statements(tenant_id, space, active, neighbours, creditable, p)
+    if statements:
+        with db.transaction() as conn:
+            if fence:
+                fence(conn)
+            for sql, params in statements:
+                conn.execute(sql, params)
+
+
+# Whether a current claim the user made, not forgotten, names the atom in the
+# outer query as an endpoint. Two EXISTS rather than one with an OR, so each
+# is answered from its own index.
+def _user_claim_names(endpoint: str) -> str:
+    return f"""EXISTS (
+        SELECT 1 FROM atoms claim
+        WHERE claim.{endpoint} = atoms.id AND claim.type = 'relation'
+          AND claim.tenant_id = atoms.tenant_id
+          AND claim.relation NOT IN ({_STRUCTURAL})
+          AND {claim_current_sql('claim')}
+          AND NOT {forgotten_sql('claim')}
+          AND COALESCE(CASE WHEN json_valid(claim.metadata)
+                            THEN json_extract(claim.metadata, '$.source') END,
+                       '{SOURCE_USER}') != '{SOURCE_AGENT}')"""
+
+
+_USER_CLAIM_ENDPOINT = f"({_user_claim_names('source_id')} OR {_user_claim_names('target_id')})"
+
+
+def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
+    """One consolidation pass for a (tenant_id, space) pair.
+
+    Returns an empty result, having changed nothing, when another process is
+    consolidating the space (see :func:`try_epoch`).
+    """
+    result = try_epoch(tenant_id, space, db, embed_engine)
+    return empty_result() if result is None else result
+
+
+def try_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult | None:
+    """Run one epoch under the space's lease, or return None when another holds it.
+
+    The lease is released however the epoch ends, and the epoch is recorded
+    as completed only when it ran to the end.
+    """
+    lease = _take_lease(tenant_id, space, db)
+    if lease is None:
+        return None
+    owner, epoch_count = lease
+    completed = None
+    try:
+        result = _consolidate(
+            tenant_id, space, db, embed_engine, epoch_count,
+            hold=lambda: _hold_lease(tenant_id, space, db, owner),
+            fence=lambda conn: _fence(conn, tenant_id, space, owner),
         )
-        db.execute(
-            decay_sql.format(comparison),
-            (sti_rate, lti_rate, _LTI_FLOOR_CRITICAL, floor, floor,
-             permanent_at, conf_floor, conf_rate, conf_floor, conf_floor,
-             tenant_id, space),
-        )
+        completed = epoch_count
+        return result
+    finally:
+        _release_lease(tenant_id, space, db, owner, completed)
+
+
+def _consolidate(
+    tenant_id: str, space: str, db, embed_engine, epoch_count: int, hold, fence
+) -> EpochResult:
+    """Single deterministic consolidation pass for a (tenant_id, space) pair.
+
+    Executes in order:
+      1. Apply pending evidence to update belief probabilities/confidence
+      2. Decay STI, LTI, and confidence for all atoms in this space
+         (user-stated episodes/beliefs/goals hold a confidence floor at the
+         surfacing threshold so they stay recallable, and one asserted as
+         permanent keeps the confidence it was asserted with)
+      3. Propagate STI and valence to 1-hop neighbors of active atoms
+      4. Heal orphaned episodes (link to most salient person)
+      5. Promote high-STI atoms to LTI
+      6. Resolve contradictions: weaken the loser the edge names, else the
+         less confident endpoint
+      7. Discover associations between similar high-LTI atoms (every 10th
+         epoch)
+      8. Prune dead atoms below confidence and LTI floors
+      9. File the vectors of atoms stored without one
+
+    Bridge spaces are no longer grown here. An earlier version compared the
+    space against every other space in the tenant every tenth epoch and
+    materialised ``a_x_b`` atoms wherever the overlap cleared a threshold
+    nobody had set — a quadratic scan on a timer that wrote atoms into spaces
+    nobody had asked for. Bridging is an explicit call now: ``space_merge``.
+    """
+    atoms_pruned = 0
+    lti_promoted = 0
+    new_connections = 0
+    contradictions_resolved = 0
+
+    personality = db.fetchone(
+        "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
+        (tenant_id, space),
+    )
+    if not personality:
+        return empty_result()
+
+    p = personality_params(personality)
+
+    # 1. Process pending evidence.
+    beliefs_updated = _apply_evidence(
+        tenant_id, space, db, _param(p, "confidence_update_lr", 0.3), fence
+    )
+
+    # 2. Decay STI, LTI, and confidence for all atoms in this space.
+    # LTI must decay: promotion only ever raises it, so without a downward
+    # force any atom that trends briefly salient is pinned above the prune
+    # floor permanently and the graph can never shed anything.
+    hold()
+    decay_count_row = db.fetchone(
+        "SELECT COUNT(*) as n FROM atoms WHERE tenant_id = ? AND space = ?",
+        (tenant_id, space),
+    )
+    atoms_decayed = decay_count_row["n"] if decay_count_row else 0
+    _decay(tenant_id, space, db, p, fence)
 
     # 2b. Propagate STI and valence to 1-hop neighbors
-    propagation_factor = _param(p, "sti_propagation_factor", 0.15)
-    valence_prop_factor = _param(p, "valence_propagation", 0.1)
-    mood_inertia = _param(p, "mood_inertia", 0.8)
-    if propagation_factor > 0 or valence_prop_factor > 0:
-        active = db.fetchall(
-            "SELECT id, sti, valence, intensity FROM atoms WHERE tenant_id = ? AND space = ? AND (sti > 0.3 OR (ABS(valence) > 0.3 AND intensity > 0.3))",
-            (tenant_id, space),
-        )
-        for row in active:
-            if propagation_factor > 0 and row["sti"] > 0.3:
-                propagate_sti(row["id"], row["sti"], propagation_factor, db, tenant_id, space)
-            if valence_prop_factor > 0 and abs(row["valence"]) > 0.3 and row["intensity"] > 0.3:
-                propagate_valence(row["id"], row["valence"], row["intensity"], valence_prop_factor, db, tenant_id, space, mood_inertia=mood_inertia)
+    hold()
+    _propagate(tenant_id, space, db, p, fence)
 
     # 2c. Heal orphaned episodes (link to most salient person)
+    hold()
     orphans_healed = heal_orphaned_episodes(tenant_id, space, db)
 
-    # 3. Promote high-STI atoms to LTI (capped at 1.0)
+    # 3. Promote high-STI atoms to LTI (capped at 1.0). A forgotten atom is
+    # never promoted: its attention was zeroed, and anything that raised it
+    # since must not buy it a long-term floor.
+    hold()
     promoted_rows = db.fetchall(
-        "SELECT id FROM atoms WHERE tenant_id = ? AND space = ? AND sti > ?",
+        f"SELECT id FROM atoms WHERE tenant_id = ? AND space = ? AND sti > ? AND NOT {ATOM_FORGOTTEN}",
         (tenant_id, space, _param(p, "lti_promotion_threshold", 0.7)),
     )
     lti_promoted = len(promoted_rows)
@@ -301,7 +659,8 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
         # unclamped sti * 0.5 pins LTI to its ceiling on a single promotion,
         # which decay can then never walk back.
         db.execute(
-            "UPDATE atoms SET lti = MIN(MAX(lti, MIN(sti, 1.0) * 0.5), 1.0) WHERE tenant_id = ? AND space = ? AND sti > ?",
+            f"UPDATE atoms SET lti = MIN(MAX(lti, MIN(sti, 1.0) * 0.5), 1.0) "
+            f"WHERE tenant_id = ? AND space = ? AND sti > ? AND NOT {ATOM_FORGOTTEN}",
             (tenant_id, space, _param(p, "lti_promotion_threshold", 0.7)),
         )
 
@@ -314,6 +673,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # mind — because there the older claim loses by definition, and it is
     # usually the *more* confident of the two, having had time to be mentioned
     # again; the confidence rule alone would weaken the update instead.
+    hold()
     contradictions = db.fetchall(
         """SELECT id, source_id, target_id,
                   CASE WHEN json_valid(metadata)
@@ -373,9 +733,14 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
             ])
             contradictions_resolved += 1
 
-    # 5. Association discovery between similar high-LTI atoms (every 10th epoch)
+    # 5. Association discovery between similar high-LTI atoms (every 10th
+    # epoch), and on the same cadence a refresh of the statistics the query
+    # planner chooses indexes by — without them it can pick the partition
+    # index over the edge indexes and scan the whole space per lookup.
     if epoch_count % 10 == 0:
+        hold()
         new_connections = discover_connections(tenant_id, space, db, embed_engine)
+        db.optimize()
 
     # 6. Prune atoms below both confidence and LTI floors.
     # User-authored episodes, beliefs and goals are exempt from direct pruning unless
@@ -383,14 +748,29 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # model turn the user never picked up can leave the graph once it has
     # decayed. Relations are never pruned directly — they cascade with their
     # endpoints (see loop below).
+    #
+    # Nor is an endpoint of a current claim the user made. Pruning a concept
+    # takes every edge on it, and an extracted entity nobody mentions again —
+    # the city the user lives in — fell under both floors around epoch 80 and
+    # took the user's own lives_in claim with it, though nothing had replaced
+    # it. A superseded claim is history and protects nothing, and neither does
+    # a claim read from an agent turn: model output the user never adopted
+    # must still be able to leave the graph.
+    hold()
+    min_conf = _param(p, "min_confidence_to_surface", 0.1)
+    # A forgotten bridge atom is the tombstone that keeps its pair from being
+    # bridged again; it is never recalled, and pruning it let the next merge
+    # recreate exactly what the caller forgot.
     dead_rows = db.fetchall(
         f"""SELECT id FROM atoms
            WHERE tenant_id = ? AND space = ?
              AND confidence < ? AND lti < 0.05
              AND type != 'relation'
-             AND (type NOT IN ('episode', 'belief', 'goal')
-                  OR {ATOM_SOURCE} = 'agent'
-                  OR {ATOM_FORGOTTEN})""",
+             AND NOT {_FORGOTTEN_BRIDGE}
+             AND ({ATOM_FORGOTTEN}
+                  OR ((type NOT IN ('episode', 'belief', 'goal')
+                       OR {ATOM_SOURCE} = 'agent')
+                      AND NOT {_USER_CLAIM_ENDPOINT}))""",
         (tenant_id, space, min_conf),
     )
     atoms_pruned = len(dead_rows)
@@ -407,6 +787,7 @@ def run_epoch(tenant_id: str, space: str, db, embed_engine) -> EpochResult:
     # failed keeps the atom and marks it; until the mark is cleared the atom
     # is reachable by word alone and embedded afresh on every recall that
     # finds it.
+    hold()
     _repair_vectors(tenant_id, space, db, embed_engine)
 
     return EpochResult(

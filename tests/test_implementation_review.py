@@ -238,6 +238,10 @@ def test_clear_space_survives_a_supersession(mem):
 def test_the_pruner_survives_a_supersession(mem):
     _supersession_graph(mem)
     mem.db.execute("UPDATE atoms SET confidence = 0.0, lti = 0.0, sti = 0.0")
+    # A current user claim keeps its endpoints from the pruner, so the
+    # entities are forgotten to put the whole supersession in its way.
+    for row in mem.db.fetchall("SELECT id FROM atoms WHERE type != 'relation'"):
+        _stamp_forgotten(mem, row["id"])
     result = mem.reflect()
     assert result.atoms_pruned > 0
     assert mem.db.fetchone("SELECT COUNT(*) AS n FROM atoms WHERE type = 'relation'")["n"] == 0

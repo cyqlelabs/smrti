@@ -47,16 +47,35 @@ def mem(db_path):
 
 # ── run_*_server ──────────────────────────────────────────────────────────────
 
+def _served_config(run, **kwargs):
+    """The uvicorn config a server runner built, with the server's run() stubbed."""
+    import uvicorn
+
+    configs = []
+    def _run(self):
+        configs.append(self.config)
+        self.started = True
+
+    with patch.object(uvicorn.Server, "run", _run):
+        run(**kwargs)
+    assert len(configs) == 1
+    return configs[0]
+
+
 def test_run_rest_server_hands_the_app_to_uvicorn():
-    with patch("uvicorn.run") as uvicorn_run:
-        rest_mod.run_rest_server(host="127.0.0.1", port=9001)
-    uvicorn_run.assert_called_once_with(rest_mod.app, host="127.0.0.1", port=9001)
+    from smrti.servers.common import GRACEFUL_SHUTDOWN_SECONDS
+
+    config = _served_config(rest_mod.run_rest_server, host="127.0.0.1", port=9001)
+    assert (config.app, config.host, config.port) == (rest_mod.app, "127.0.0.1", 9001)
+    assert config.timeout_graceful_shutdown == GRACEFUL_SHUTDOWN_SECONDS
 
 
 def test_run_proxy_server_hands_the_app_to_uvicorn():
-    with patch("uvicorn.run") as uvicorn_run:
-        proxy_mod.run_proxy_server(host="127.0.0.1", port=9002)
-    uvicorn_run.assert_called_once_with(proxy_mod.app, host="127.0.0.1", port=9002)
+    from smrti.servers.common import GRACEFUL_SHUTDOWN_SECONDS
+
+    config = _served_config(proxy_mod.run_proxy_server, host="127.0.0.1", port=9002)
+    assert (config.app, config.host, config.port) == (proxy_mod.app, "127.0.0.1", 9002)
+    assert config.timeout_graceful_shutdown == GRACEFUL_SHUTDOWN_SECONDS
 
 
 def test_rest_get_mem_creates_the_instance_once(mem):
@@ -161,14 +180,15 @@ def _stream_client(lines, status=200):
 def _collect_stream(lines):
     async def _run():
         chunks = []
-        with patch("smrti.servers.proxy.get_http", return_value=_stream_client(lines)):
-            with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
-                gen = proxy_mod._stream_proxy(
-                    {"model": "gpt-4o"}, [{"role": "user", "content": "Hi"}],
-                    "default", "default", {}, {"kind": "chat"}, 0.0,
-                )
-                async for chunk in gen:
-                    chunks.append(chunk)
+        client = _stream_client(lines)
+        response = await client.stream().__aenter__()
+        with patch("smrti.servers.proxy._store_exchange", new_callable=AsyncMock):
+            gen = proxy_mod._stream_proxy(
+                response, AsyncMock(), {"model": "gpt-4o"}, [{"role": "user", "content": "Hi"}],
+                "default", "default", {}, {"kind": "chat"}, 0.0,
+            )
+            async for chunk in gen:
+                chunks.append(chunk)
         return b"".join(chunks)
 
     return run(_run())
@@ -202,19 +222,15 @@ def test_stream_reraises_cancellation():
         response = MagicMock()
         response.status_code = 200
         response.aiter_lines = _aiter_lines
-        ctx = MagicMock()
-        ctx.__aenter__ = AsyncMock(return_value=response)
-        ctx.__aexit__ = AsyncMock(return_value=None)
-        client = MagicMock()
-        client.stream = MagicMock(return_value=ctx)
+        close = AsyncMock()
 
-        with patch("smrti.servers.proxy.get_http", return_value=client):
-            gen = proxy_mod._stream_proxy(
-                {"model": "gpt-4o"}, [], "default", "default", {}, {"kind": "chat"}, 0.0,
-            )
-            with pytest.raises(asyncio.CancelledError):
-                async for _ in gen:
-                    pass
+        gen = proxy_mod._stream_proxy(
+            response, close, {"model": "gpt-4o"}, [], "default", "default", {}, {"kind": "chat"}, 0.0,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            async for _ in gen:
+                pass
+        close.assert_awaited_once()  # the upstream connection is released either way
 
     run(_run())
 
@@ -320,7 +336,7 @@ def test_metrics_skips_personality_params_that_are_unset(client, mem):
             "valence_weight": None,
         },
     }
-    with patch.object(mem, "status", return_value=status):
+    with patch.object(viz_routes._Reader, "status", return_value=status):
         response = client.get("/metrics")
     body = response.text
     assert response.status_code == 200
@@ -338,9 +354,14 @@ async def _timeout_immediately(awaitable, timeout=None):
 
 
 def _stream_endpoint():
-    """The /llm-calls/stream handler, taken from a freshly built viz router."""
+    """The /llm-calls/stream handler, taken from a freshly built viz router,
+    bound to a request that carries no key — the one every record is visible to."""
+    from starlette.requests import Request
+
     router = viz_routes.create_viz_router(lambda tenant, space: None)
-    return next(r.endpoint for r in router.routes if r.path == "/llm-calls/stream")
+    endpoint = next(r.endpoint for r in router.routes if r.path == "/llm-calls/stream")
+    request = Request({"type": "http", "method": "GET", "headers": [], "query_string": b""})
+    return lambda: endpoint(request)
 
 
 def test_llm_call_stream_emits_appended_entries():

@@ -7,26 +7,39 @@ import json
 import logging
 import os
 import re
+import threading
 import time
 import uuid
+import weakref
 from collections import OrderedDict
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from datetime import datetime, timezone
 from typing import AsyncIterator, Optional
 
 import httpx
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 
 from smrti import Smrti
+from smrti.call_log import redact
 from smrti.core.models import RecallResult
 from smrti.core.provenance import SOURCE_AGENT, claim_current_sql, forgotten_sql
 from smrti.retrieval.classify import classify_memory
 from smrti.servers import config as cfg
+from smrti.servers.common import (
+    BodyLimit,
+    api_key_middleware,
+    api_root,
+    cached_instance,
+    drain,
+    serve,
+    tenant_for,
+    upstream_authorization,
+)
 from smrti.servers.mcp import create_smrti
 from smrti.servers.reflect_loop import run_reflect_loop
-from smrti.servers.viz_routes import api_key_middleware, create_viz_router
+from smrti.servers.viz_routes import create_viz_router
 
 
 logger = logging.getLogger("smrti.proxy")
@@ -40,17 +53,17 @@ async def lifespan(app: FastAPI):
     task.cancel()
     # An exchange is stored after its answer has gone out, so at shutdown the
     # ones still in flight are memories the user was already told they have.
-    if _background_tasks:
-        await asyncio.gather(*list(_background_tasks), return_exceptions=True)
+    await drain(_background_tasks)
 
 
 app = FastAPI(title="Smrti Proxy", version="0.1.0", lifespan=lifespan)
+app.add_middleware(BodyLimit)  # inside the auth middleware, as on REST
 app.middleware("http")(api_key_middleware)
 if cfg.CORS_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=cfg.CORS_ORIGINS,
-        allow_methods=["GET", "DELETE"],
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["*"],
     )
 
@@ -66,6 +79,11 @@ _http: Optional[httpx.AsyncClient] = None
 # Strong references to fire-and-forget tasks so the GC cannot cancel them mid-flight
 _background_tasks: set[asyncio.Task] = set()
 
+# The most stores and extractions the proxy keeps in flight. Each holds a
+# conversation and, with extraction on, waits on a model call; under a burst
+# the set grew without bound.
+_BACKGROUND_MAX = 64
+
 
 def _spawn(coro) -> asyncio.Task:
     task = asyncio.create_task(coro)
@@ -73,8 +91,37 @@ def _spawn(coro) -> asyncio.Task:
     task.add_done_callback(_background_tasks.discard)
     return task
 
+
+# Stores running at once, per event loop (an asyncio semaphore belongs to the
+# loop it was first used on).
+_store_slots: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, asyncio.Semaphore] = (
+    weakref.WeakKeyDictionary()
+)
+
+
+def _spawn_store(coro) -> asyncio.Task:
+    """Store an exchange in the background, at most _BACKGROUND_MAX at once.
+
+    The limit is taken inside the task, never on the response path: waiting
+    for a slot before answering made every reply wait on memory writes — each
+    up to two model calls — whenever the proxy was busy. A burst queues its
+    stores instead of losing them.
+    """
+    loop = asyncio.get_running_loop()
+    slots = _store_slots.get(loop)
+    if slots is None:
+        slots = _store_slots[loop] = asyncio.Semaphore(_BACKGROUND_MAX)
+
+    async def in_turn():
+        async with slots:
+            return await coro
+
+    return _spawn(in_turn())
+
 _UPSTREAM = os.environ.get("SMRTI_UPSTREAM_URL", "https://api.openai.com")
-_RECALL_TOP_K = int(os.environ.get("SMRTI_RECALL_TOP_K", "5"))
+# Ten, not five: on LongMemEval-S the evidence reached the prompt for 31 of 40
+# questions at ten against 27 at five, for at most twice the injected text.
+_RECALL_TOP_K = int(os.environ.get("SMRTI_RECALL_TOP_K", "10"))
 # Unset means the personality's own surfacing floor (min_confidence_to_surface);
 # the variable overrides it rather than replacing it with a second default.
 _raw_min_conf = os.environ.get("SMRTI_RECALL_MIN_CONFIDENCE", "").strip()
@@ -92,27 +139,29 @@ def _bootstrap() -> tuple[str, str, str]:
         _default_tenant_id = default.tenant_id
         _default_write_space = default.write_space
         _default_db_path = cfg.DB
-        _instances[(_default_tenant_id, _default_write_space)] = default
+        with _mints:
+            _instances[(_default_tenant_id, _default_write_space)] = default
     return _default_tenant_id, _default_write_space, _default_db_path  # type: ignore[return-value]
 
 
+# Guards the instance cache's dictionary (see cached_instance).
+_mints = threading.Lock()
+
+
 def get_mem(tenant_id: str, write_space: str) -> Smrti:
-    key = (tenant_id, write_space)
-    if key not in _instances:
-        _, _, db_path = _bootstrap()
-        if key not in _instances:  # _bootstrap may have registered the default key
-            while len(_instances) >= _INSTANCES_MAX:
-                _instances.popitem(last=False)
-            _instances[key] = Smrti(
-                db_path=db_path,
-                personality=cfg.PERSONALITY,
-                tenant_id=tenant_id,
-                write_space=write_space,
-                ignore_patterns=cfg.IGNORE_PATTERNS or None,
-                temporal=cfg.TEMPORAL,
-            )
-    _instances.move_to_end(key)
-    return _instances[key]
+    _, _, db_path = _bootstrap()
+    return cached_instance(
+        _instances, (tenant_id, write_space),
+        lambda: Smrti(
+            db_path=db_path,
+            personality=cfg.PERSONALITY,
+            tenant_id=tenant_id,
+            write_space=write_space,
+            ignore_patterns=cfg.IGNORE_PATTERNS or None,
+            temporal=cfg.TEMPORAL,
+        ),
+        _mints, _INSTANCES_MAX, _background_tasks,
+    )
 
 
 app.include_router(create_viz_router(get_mem))
@@ -125,11 +174,22 @@ def get_http() -> httpx.AsyncClient:
     return _http
 
 
+# A tenant or space name is a partition key on every atom, a cache key for an
+# instance and a personality row of its own — the same cap REST puts on space
+# names, so a malformed header cannot become any of those.
+_NAME_MAX_LEN = 128
+_READ_SPACES_MAX = 32
+
+
 def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
-    """Extract (tenant_id, write_space, read_spaces) from request headers."""
+    """Extract (tenant_id, write_space, read_spaces) from request headers.
+
+    The tenant is the one the auth middleware resolved for a key bound to
+    tenants — already checked against the key — and the header otherwise.
+    """
     default_tenant, default_space, _ = _bootstrap()
 
-    tenant_id = request.headers.get("x-smrti-tenant-id") or default_tenant
+    tenant_id = tenant_for(request, request.headers.get("x-smrti-tenant-id"), default_tenant)
     write_space = request.headers.get("x-smrti-write-space") or default_space
 
     raw_read = request.headers.get("x-smrti-read-spaces", "")
@@ -137,16 +197,42 @@ def _parse_request_identity(request: Request) -> tuple[str, str, list[str]]:
     if not read_spaces:
         read_spaces = [write_space]
 
+    if any(len(name) > _NAME_MAX_LEN for name in (tenant_id, write_space, *read_spaces)):
+        raise HTTPException(400, f"Tenant and space names are limited to {_NAME_MAX_LEN} characters")
+    if len(read_spaces) > _READ_SPACES_MAX:
+        raise HTTPException(400, f"X-Smrti-Read-Spaces names at most {_READ_SPACES_MAX} spaces")
     return tenant_id, write_space, read_spaces
 
 
 async def _recall(query: str, tenant_id: str, write_space: str, read_spaces: list[str]) -> list:
-    mem = get_mem(tenant_id, write_space)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
+    return await asyncio.get_running_loop().run_in_executor(
         None,
-        lambda: mem.recall(query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces),
+        lambda: get_mem(tenant_id, write_space).recall(
+            query, top_k=_RECALL_TOP_K, min_confidence=_RECALL_MIN_CONF, read_spaces=read_spaces
+        ),
     )
+
+
+async def _beyond_recall(
+    query: str, memories: list, tenant_id: str, write_space: str, read_spaces: list[str]
+) -> tuple[list, dict]:
+    """The stated warnings recall did not return, and the superseded claims
+    about what it did return.
+
+    Warnings are found apart from recall's pool and top_k and are injected
+    outside the budget: a warning cut by a small top_k, or outranked by
+    seventy more similar memories, is still the one the model must not act
+    against.
+    """
+    def work():
+        mem = get_mem(tenant_id, write_space)
+        shown = {r.atom.id for r in memories}
+        warnings = [
+            w for w in mem.find_warnings(query, read_spaces=read_spaces) if w.atom.id not in shown
+        ]
+        return warnings, mem.superseded_claims([r.atom.id for r in memories], read_spaces=read_spaces)
+
+    return await asyncio.get_running_loop().run_in_executor(None, work)
 
 
 def _stated_tone(request: Request) -> tuple[float, float | None] | None:
@@ -187,6 +273,20 @@ async def _remember(
     source: str = "user",
     tone: tuple[float, float | None] | None = None,
 ) -> str:
+    """Store one turn as an episode, off the event loop — the dedup lookup
+    waits on the read pool and the write on any epoch's transaction."""
+    return await asyncio.get_running_loop().run_in_executor(
+        None, _remember_now, content, tenant_id, write_space, source, tone
+    )
+
+
+def _remember_now(
+    content: str,
+    tenant_id: str,
+    write_space: str,
+    source: str,
+    tone: tuple[float, float | None] | None,
+) -> str:
     mem = get_mem(tenant_id, write_space)
     if mem.is_ignored(content):
         return ""
@@ -205,13 +305,9 @@ async def _remember(
     # come back as a constraint the agent must obey.
     meta = {"source": source} if source != "user" else {}
     valence, intensity = tone if tone is not None else (None, None)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None,
-        lambda: mem.remember(
-            content, type="episode", probability=0.75, metadata=meta,
-            valence=valence, intensity=intensity,
-        ),
+    return mem.remember(
+        content, type="episode", probability=0.75, metadata=meta,
+        valence=valence, intensity=intensity,
     )
 
 
@@ -230,7 +326,7 @@ async def _extract_and_link(
     # forwards, including its own default — cfg.EXTRACT_URL only sees the env var.
     await extract_and_link_serialized(
         episode_id, content, mem, auth, cfg.EXTRACT_MODEL or model,
-        cfg.EXTRACT_URL or _UPSTREAM, source, mode=cfg.EXTRACT_MODE,
+        api_root(cfg.EXTRACT_URL or _UPSTREAM), source, mode=cfg.EXTRACT_MODE,
     )
 
 
@@ -293,8 +389,29 @@ def _temporal_suffix(r: RecallResult) -> str:
     return f" [dates: {'; '.join(pairs)}]" if pairs else ""
 
 
+# How each severity is labelled in the injected block. The imperative lives
+# in the block's preamble, once, rather than on every line: a stated warning
+# is usually a rule in its own words ("Never deploy without a backup"), and a
+# "YOU MUST NOT:" in front of each one told the model the opposite of it.
+_SEVERITY_LABELS = {"critical_warning": "Constraint", "known_antipattern": "Outdated", "context": "Note"}
+_CONSTRAINT_PREAMBLE = (
+    "The following are behavioral constraints derived from past experience. "
+    "Follow them silently — do not quote, echo, or mention them in your response."
+)
+_SEVERITY_RULES = {
+    "critical_warning": (
+        "YOU MUST NOT act against a Constraint: follow the rule it states, "
+        "and do not repeat the mistake it reports."
+    ),
+    "known_antipattern": (
+        "AVOID relying on anything marked Outdated: it was true once and has "
+        "been replaced or disproven since."
+    ),
+}
+
+
 def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, str]:
-    """Format a recall result as a plain imperative instruction plus its severity."""
+    """Format a recall result as a labelled line plus its severity."""
     severity = classify_memory(r)
     text = content if content is not None else (r.atom.content or r.atom.label)
     # Stored memory text is injected into the system prompt: collapse whitespace
@@ -310,35 +427,70 @@ def _format_memory(r: RecallResult, content: str | None = None) -> tuple[str, st
         text = f"[from your own earlier reply] {text}"
     conf = r.atom.truth.confidence
     qualifier = "high" if conf >= 0.7 else "medium" if conf >= 0.3 else "low"
-    if severity == "critical_warning":
-        line = f"- YOU MUST NOT: {text} (confidence: {qualifier})"
-    elif severity == "known_antipattern":
-        line = f"- AVOID: {text} (confidence: {qualifier})"
-    else:
-        line = f"- Note: {text} (confidence: {qualifier})"
-    return line, severity
+    return f"- {_SEVERITY_LABELS[severity]}: {text} (confidence: {qualifier})", severity
+
+
+def _format_superseded(replaced: dict) -> list[tuple[str, str]]:
+    """Each superseded claim about the recalled memories, once, as an
+    Outdated line: the replaced state is what the model must not present as
+    current."""
+    lines: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for claims in replaced.values():
+        for claim in claims:
+            if claim.edge_id in seen:
+                continue
+            seen.add(claim.edge_id)
+            text = f"{claim.subject} {claim.predicate} {claim.old_object}"
+            if claim.new_object:
+                text += f" → {claim.new_object}"
+            text = re.sub(r"\s+", " ", text).strip()[: cfg.INJECT_MAX_CHARS]
+            lines.append((f"- {_SEVERITY_LABELS['known_antipattern']}: {text}", "known_antipattern"))
+    return lines
+
+
+def _text_of(content) -> str:
+    """The text of a message's content.
+
+    OpenAI content is a string or a list of parts, and the text parts of a
+    list are what a memory can hold; images, audio and other parts are left
+    out. A multipart turn used to be neither recalled with nor stored, and a
+    list-valued reply raised and lost both turns of its exchange.
+    """
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(
+            part["text"] for part in content
+            if isinstance(part, dict) and part.get("type") == "text" and isinstance(part.get("text"), str)
+        )
+    return ""
+
+
+def _last_user_text(messages: list[dict]) -> str:
+    """The text of the last user turn — empty when that turn has none.
+
+    The last turn and no earlier one: falling back to an earlier turn when
+    the last was an image stored a question that had already been stored.
+    """
+    last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
+    return _text_of(last_user.get("content")) if last_user else ""
 
 
 def _build_query(messages: list[dict]) -> str | None:
     """Build a recall query from conversation messages based on configured mode."""
     if _QUERY_MODE == "concat":
         recent = [
-            m["content"]
+            text
             for m in messages[-_QUERY_CONTEXT_MSGS:]
-            if m.get("role") in ("user", "assistant") and isinstance(m.get("content"), str)
+            if m.get("role") in ("user", "assistant") and (text := _text_of(m.get("content")))
         ]
         if not recent:
             return None
         joined = " ".join(recent)
         return joined[-_QUERY_MAX_CHARS:]
     # "last" mode: original behavior
-    last_user = next(
-        (m["content"] for m in reversed(messages) if m.get("role") == "user"),
-        None,
-    )
-    if not last_user or not isinstance(last_user, str):
-        return None
-    return last_user
+    return _last_user_text(messages) or None
 
 
 async def _inject_context(
@@ -357,57 +509,83 @@ async def _inject_context(
         return body, "", []
 
     memories = await _recall(query, tenant_id, write_space, read_spaces)
+    # Asked even when recall found nothing: a warning stored without a vector,
+    # or phrased unlike the question, can be missing from the pool and still
+    # be the one memory the model must not act against.
+    warnings, replaced = await _beyond_recall(query, memories, tenant_id, write_space, read_spaces)
+    memories = [*warnings, *memories]
     if not memories:
         return body, "", []
 
     mem = get_mem(tenant_id, write_space)
-    enriched_contents = [_enrich_content(r, mem) for r in memories]
+    enriched_contents = await asyncio.get_running_loop().run_in_executor(
+        None, lambda: [_enrich_content(r, mem) for r in memories]
+    )
     formatted = [_format_memory(r, c) for r, c in zip(memories, enriched_contents)]
-
     memory_dicts = [
-        {
-            "id": r.atom.id,
-            "label": r.atom.label,
-            "content": c,
-            "severity": sev,
-            "source": r.atom.metadata.get("source") or "user",
-            "confidence": round(r.atom.truth.confidence, 3),
-            "probability": round(r.atom.truth.probability, 3),
-            "valence": round(r.atom.valence.valence, 3),
-            "salience": round(r.salience, 3),
-            "evidence": None if r.evidence is None else round(r.evidence, 3),
-        }
-        for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
+        _memory_record(r, c, sev) for r, c, (_, sev) in zip(memories, enriched_contents, formatted)
     ]
+    injection = _render_injection([*formatted, *_format_superseded(replaced)])
+    return {**body, "messages": _with_system(messages, injection)}, injection, memory_dicts
 
-    warning_lines = [line for line, sev in formatted if sev in ("critical_warning", "known_antipattern")]
+
+def _memory_record(r: RecallResult, content: str, severity: str) -> dict:
+    """What the call log keeps of one injected memory."""
+    return {
+        "id": r.atom.id,
+        "label": r.atom.label,
+        "content": content,
+        "severity": severity,
+        "source": r.atom.metadata.get("source") or "user",
+        "confidence": round(r.atom.truth.confidence, 3),
+        "probability": round(r.atom.truth.probability, 3),
+        "valence": round(r.atom.valence.valence, 3),
+        "salience": round(r.salience, 3),
+        "evidence": None if r.evidence is None else round(r.evidence, 3),
+    }
+
+
+def _render_injection(formatted: list[tuple[str, str]]) -> str:
+    """The memory block for the system prompt: constraints first, then context."""
+    warnings = [(line, sev) for line, sev in formatted if sev in _SEVERITY_RULES]
     context_lines = [line for line, sev in formatted if sev == "context"]
-    warning_lines, context_lines = _within_budget(warning_lines, context_lines, cfg.INJECT_BUDGET_CHARS)
+    warning_lines, context_lines = _within_budget(
+        [line for line, _ in warnings], context_lines, cfg.INJECT_BUDGET_CHARS
+    )
+    # The budget keeps a prefix of the warnings, so their severities are the
+    # first len(warning_lines) of the list it was given.
+    kept = {sev for _, sev in warnings[: len(warning_lines)]}
 
     parts: list[str] = []
     if warning_lines:
-        parts.append(
-            "The following are behavioral constraints derived from past experience. "
-            "Follow them silently — do not quote, echo, or mention them in your response.\n"
-            + "\n".join(warning_lines)
-        )
+        rules = [rule for sev, rule in _SEVERITY_RULES.items() if sev in kept]
+        parts.append(" ".join([_CONSTRAINT_PREAMBLE, *rules]) + "\n" + "\n".join(warning_lines))
     if context_lines:
         parts.append(
             "Background context from past interactions (do not mention these directly):\n"
             + "\n".join(context_lines)
         )
-    injection = "\n\n".join(parts)
+    return "\n\n".join(parts)
 
+
+def _with_system(messages: list[dict], injection: str) -> list[dict]:
+    """*messages* with *injection* appended to the system prompt, or as one."""
     messages = list(messages)
     system_idx = next((i for i, m in enumerate(messages) if m.get("role") == "system"), None)
-
-    if system_idx is not None:
-        existing = messages[system_idx]["content"]
-        messages[system_idx] = {**messages[system_idx], "content": f"{existing}\n\n{injection}"}
-    else:
+    if system_idx is None:
         messages.insert(0, {"role": "system", "content": injection})
-
-    return {**body, "messages": messages}, injection, memory_dicts
+        return messages
+    existing = messages[system_idx].get("content")
+    if isinstance(existing, list):
+        # Parts stay parts: formatting the list into a string sent the
+        # client's system prompt upstream as "[{'type': 'text', ...}]".
+        content = [*existing, {"type": "text", "text": injection}]
+    elif existing:
+        content = f"{existing}\n\n{injection}"
+    else:
+        content = injection
+    messages[system_idx] = {**messages[system_idx], "content": content}
+    return messages
 
 
 def _within_budget(
@@ -442,9 +620,9 @@ def _within_budget(
 
 # Markers actually emitted by _format_memory / _inject_context — assistant echoes
 # of these lines must not be stored back as agent episodes.
-_MEMORY_LINE_MARKERS = ("- YOU MUST NOT:", "- AVOID:", "- Note:")
+_MEMORY_LINE_MARKERS = tuple(f"- {label}:" for label in _SEVERITY_LABELS.values())
 _MEMORY_PREAMBLE_MARKERS = (
-    "The following are behavioral constraints derived from past experience.",
+    _CONSTRAINT_PREAMBLE.split(". ")[0],
     "Background context from past interactions",
 )
 
@@ -475,11 +653,7 @@ async def _store_exchange(
     request (the full history is passed in messages on every turn). ``tone`` is the valence
     the client stated for the user message (see ``_stated_tone``); the reply never takes it.
     """
-    last_user = next(
-        (m["content"] for m in reversed(messages)
-         if m.get("role") == "user" and isinstance(m.get("content"), str)),
-        None,
-    )
+    last_user = _last_user_text(messages)
     clean_assistant = ""
     if assistant_text:
         clean = _scrub_injected_memory(assistant_text).strip()
@@ -510,28 +684,43 @@ async def _store_exchange(
                     logger.warning("extraction failed for episode %s", eid, exc_info=True)
 
 
-def _first_choice(payload: dict) -> dict:
-    """The first choice of a completion or chunk, or nothing.
+def _first_choice(payload) -> dict:
+    """Choice 0 of a completion or chunk, or nothing.
 
     A stream's final usage chunk carries ``choices: []``; indexing it raised,
     the client got an error frame instead of ``[DONE]``, and the exchange
-    was never stored.
+    was never stored. With ``n`` > 1 the chunks of every choice arrive
+    interleaved, each naming its index, and joining them all stored one
+    reply spliced from several; choice 0 is the reply remembered. A choice
+    without an index is choice 0, since a single-choice upstream may omit it.
     """
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], dict):
-        return choices[0]
+    choices = payload.get("choices") if isinstance(payload, dict) else None
+    if isinstance(choices, list):
+        for choice in choices:
+            if isinstance(choice, dict) and choice.get("index", 0) == 0:
+                return choice
     return {}
+
+
+def _upstream_url(route: str) -> str:
+    """The upstream URL of an OpenAI route such as ``/chat/completions``."""
+    return f"{api_root(_UPSTREAM)}/v1{route}"
 
 
 def _upstream_headers(request: Request) -> dict:
     headers = {"Content-Type": "application/json"}
-    auth = request.headers.get("authorization") or request.headers.get("Authorization")
+    auth = upstream_authorization(request)
     if auth:
         headers["Authorization"] = auth
     return headers
 
 
 _DROP_RESPONSE_HEADERS = {"content-encoding", "transfer-encoding", "content-length"}
+
+
+def _passthrough_headers(response: httpx.Response) -> dict:
+    return {k: v for k, v in response.headers.items() if k.lower() not in _DROP_RESPONSE_HEADERS}
+
 
 # Allowlist: only structurally-interesting headers are logged verbatim; every
 # other header value (cookies, API keys, custom auth schemes, …) is masked.
@@ -545,11 +734,61 @@ def _sanitize_headers(headers: dict) -> dict:
     }
 
 
+async def _chat_body(request: Request) -> dict:
+    """The request body, or a 400 for one no chat completion can be made of.
+
+    A body that was not JSON, not an object, or whose messages were not a
+    list of objects failed further in and came back as a 500.
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        raise HTTPException(400, "The request body must be a JSON object")
+    messages = body.get("messages", []) if isinstance(body, dict) else None
+    if not isinstance(messages, list) or not all(isinstance(m, dict) for m in messages):
+        raise HTTPException(400, "The request body must be a JSON object with a list of message objects")
+    return body
+
+
+def _upstream_failure(log_entry: dict, t0: float, message: str, code: str) -> JSONResponse:
+    """A 502 for an upstream that could not be reached or answered nonsense."""
+    from smrti.call_log import update as _update_log
+
+    log_entry["status"] = 502
+    log_entry["error"] = message
+    log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+    _update_log(log_entry)
+    return JSONResponse(
+        status_code=502,
+        content={"error": {"message": message, "type": "upstream_error", "code": code}},
+    )
+
+
+@app.get("/v1/models", response_model=None)
+async def list_models(request: Request) -> Response:
+    """The upstream's model list, passed through: clients list models before
+    they chat, and a 404 here stopped them before the first message."""
+    try:
+        response = await get_http().get(_upstream_url("/models"), headers=_upstream_headers(request))
+    except httpx.HTTPError as exc:
+        return JSONResponse(
+            status_code=502,
+            content={"error": {
+                "message": f"upstream request failed: {redact(str(exc))}",
+                "type": "upstream_error", "code": "upstream_unreachable",
+            }},
+        )
+    return Response(
+        content=response.content, status_code=response.status_code,
+        headers=_passthrough_headers(response),
+    )
+
+
 @app.post("/v1/chat/completions", response_model=None)
-async def chat_completions(request: Request) -> StreamingResponse | JSONResponse:
+async def chat_completions(request: Request) -> Response:
     from smrti.call_log import append as _log
 
-    raw_body: dict = await request.json()
+    raw_body = await _chat_body(request)
     tenant_id, write_space, read_spaces = _parse_request_identity(request)
     tone = _stated_tone(request)
 
@@ -584,12 +823,8 @@ async def chat_completions(request: Request) -> StreamingResponse | JSONResponse
     _log(log_entry)
 
     if body.get("stream", False):
-        return StreamingResponse(
-            _stream_proxy(body, post_inject_messages, tenant_id, write_space,
-                          upstream_hdrs, log_entry, t0, tone),
-            media_type="text/event-stream",
-            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
-        )
+        return await _open_stream(body, post_inject_messages, tenant_id, write_space,
+                                  upstream_hdrs, log_entry, t0, tone)
 
     return await _non_stream_proxy(body, post_inject_messages, tenant_id, write_space,
                                    upstream_hdrs, log_entry, t0, tone)
@@ -607,48 +842,123 @@ async def _non_stream_proxy(
 ) -> JSONResponse:
     from smrti.call_log import update as _update_log
 
-    def _upstream_error(message: str, code: str) -> JSONResponse:
-        log_entry["status"] = 502
-        log_entry["error"] = message
-        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
-        _update_log(log_entry)
-        return JSONResponse(
-            status_code=502,
-            content={"error": {"message": message, "type": "upstream_error", "code": code}},
-        )
-
     try:
         response = await get_http().post(
-            f"{_UPSTREAM}/v1/chat/completions",
+            _upstream_url("/chat/completions"),
             headers=headers,
             json=body,
         )
     except httpx.HTTPError as exc:
-        return _upstream_error(f"upstream request failed: {exc}", "upstream_unreachable")
+        return _upstream_failure(
+            log_entry, t0, f"upstream request failed: {redact(str(exc))}", "upstream_unreachable"
+        )
+    if not response.is_success:
+        # The upstream's refusal is the client's to read: parsed here, a
+        # text/plain 429 or an HTML 502 became this proxy's own 502, and the
+        # status and Retry-After were lost.
+        log_entry["status"] = response.status_code
+        log_entry["error"] = redact(response.text[:500])
+        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _update_log(log_entry)
+        return Response(
+            content=response.content,
+            status_code=response.status_code,
+            headers=_passthrough_headers(response),
+            media_type=response.headers.get("content-type"),
+        )
     try:
         data = response.json()
     except ValueError as exc:
-        return _upstream_error(f"upstream returned non-JSON body: {exc}", "upstream_invalid_response")
+        return _upstream_failure(
+            log_entry, t0, f"upstream returned non-JSON body: {exc}", "upstream_invalid_response"
+        )
 
-    assistant_text = _first_choice(data).get("message", {}).get("content", "")
+    assistant_text = _text_of((_first_choice(data).get("message") or {}).get("content"))
     log_entry["status"] = response.status_code
-    log_entry["response_snippet"] = (assistant_text or "")[:500]
+    log_entry["response_snippet"] = assistant_text[:500]
     log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
     _update_log(log_entry)
 
-    auth = headers.get("Authorization", "")
-    model = body.get("model", "")
-    _spawn(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model, tone))
+    # Only an answered exchange is remembered. A refused or failed request
+    # used to store its user turn — a question nobody answered — while a
+    # stream cut short stored nothing; neither stores anything now.
+    if response.is_success:
+        auth = headers.get("Authorization", "")
+        model = body.get("model", "")
+        _spawn_store(_store_exchange(original_messages, assistant_text, tenant_id, write_space, auth, model, tone))
 
-    passthrough_headers = {
-        k: v
-        for k, v in response.headers.items()
-        if k.lower() not in _DROP_RESPONSE_HEADERS
-    }
-    return JSONResponse(content=data, status_code=response.status_code, headers=passthrough_headers)
+    return JSONResponse(
+        content=data, status_code=response.status_code, headers=_passthrough_headers(response)
+    )
+
+
+async def _open_stream(
+    body: dict,
+    original_messages: list[dict],
+    tenant_id: str,
+    write_space: str,
+    headers: dict,
+    log_entry: dict,
+    t0: float,
+    tone: tuple[float, float | None] | None = None,
+) -> Response:
+    """Open the upstream stream, and answer with its status before relaying it.
+
+    The status line leaves with the first byte of the response, so it is
+    settled here, before any: an upstream 401 or 429 used to reach the
+    client as a 200 carrying a bare JSON line, with no Retry-After to back
+    off by. A refusal is now passed through as it came — status, headers
+    and body — and only a 2xx stream is relayed.
+    """
+    from smrti.call_log import update as _update_log
+
+    stack = AsyncExitStack()
+    try:
+        upstream = await stack.enter_async_context(
+            get_http().stream("POST", _upstream_url("/chat/completions"), headers=headers, json=body)
+        )
+    except httpx.HTTPError as exc:
+        await stack.aclose()
+        return _upstream_failure(
+            log_entry, t0, f"upstream request failed: {redact(str(exc))}", "upstream_unreachable"
+        )
+    if not upstream.is_success:
+        try:
+            content = await upstream.aread()
+        except httpx.HTTPError as exc:
+            return _upstream_failure(
+                log_entry, t0, f"upstream request failed: {redact(str(exc))}", "upstream_unreachable"
+            )
+        finally:
+            await stack.aclose()
+        log_entry["status"] = upstream.status_code
+        log_entry["response_snippet"] = content[:500].decode(errors="replace")
+        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _update_log(log_entry)
+        return Response(
+            content=content, status_code=upstream.status_code,
+            headers=_passthrough_headers(upstream),
+        )
+    return StreamingResponse(
+        _stream_proxy(upstream, stack.aclose, body, original_messages, tenant_id, write_space,
+                      headers, log_entry, t0, tone),
+        media_type="text/event-stream",
+        headers={"X-Accel-Buffering": "no", "Cache-Control": "no-cache"},
+    )
+
+
+def _read_chunk(chunk: dict, accumulated: list[str]) -> bool:
+    """Add choice 0's text in a stream chunk to *accumulated*; True once it finished."""
+    choice = _first_choice(chunk)
+    piece = (choice.get("delta") or {}).get("content")
+    if isinstance(piece, str) and piece:
+        accumulated.append(piece)
+    return bool(choice.get("finish_reason"))
 
 
 async def _stream_proxy(
+    upstream,
+    close,
     body: dict,
     original_messages: list[dict],
     tenant_id: str,
@@ -658,64 +968,69 @@ async def _stream_proxy(
     t0: float,
     tone: tuple[float, float | None] | None = None,
 ) -> AsyncIterator[bytes]:
+    """Relay an open 2xx upstream stream, then remember the exchange.
+
+    ``close`` releases the upstream connection and runs however the relay
+    ends. The exchange is stored once the reply is complete: at ``[DONE]``,
+    or at the end of a stream that omits it once choice 0 has reported a
+    ``finish_reason``. A stream cut off before either is not stored, as a
+    failed request is not.
+    """
+    from smrti.call_log import update as _update_log
+
     accumulated: list[str] = []
+    finished = False
     auth = headers.get("Authorization", "")
     model = body.get("model", "")
+
+    async def _complete() -> None:
+        full_text = "".join(accumulated)
+        log_entry["response_snippet"] = full_text[:500]
+        log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
+        _update_log(log_entry)
+        _spawn_store(_store_exchange(original_messages, full_text, tenant_id, write_space, auth, model, tone))
+
     try:
-        async with get_http().stream(
-            "POST", f"{_UPSTREAM}/v1/chat/completions", headers=headers, json=body
-        ) as upstream:
-            log_entry["status"] = upstream.status_code
-            async for line in upstream.aiter_lines():
-                if not line:
-                    yield b"\n"
-                    continue
+        log_entry["status"] = upstream.status_code
+        async for line in upstream.aiter_lines():
+            if not line:
+                yield b"\n"
+                continue
 
-                if line.startswith(":"):
-                    yield f"{line}\n\n".encode()
-                    continue
+            # SSE comments (":"), event names and any other non-data line.
+            if not line.startswith("data: "):
+                yield f"{line}\n\n".encode()
+                continue
 
-                if not line.startswith("data: "):
-                    yield f"{line}\n\n".encode()
-                    continue
+            payload = line[6:]
 
-                payload = line[6:]
+            if payload.strip() == "[DONE]":
+                await _complete()
+                yield b"data: [DONE]\n\n"
+                return
 
-                if payload.strip() == "[DONE]":
-                    full_text = "".join(accumulated)
-                    log_entry["response_snippet"] = full_text[:500]
-                    log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
-                    from smrti.call_log import update as _update_log
-                    _update_log(log_entry)
-                    _spawn(
-                        _store_exchange(original_messages, full_text, tenant_id, write_space, auth, model, tone)
-                    )
-                    yield b"data: [DONE]\n\n"
-                    return
+            try:
+                chunk = json.loads(payload)
+            except json.JSONDecodeError:
+                yield f"data: {payload}\n\n".encode()
+                continue
 
-                try:
-                    chunk = json.loads(payload)
-                except json.JSONDecodeError:
-                    yield f"data: {payload}\n\n".encode()
-                    continue
-
-                piece = _first_choice(chunk).get("delta", {}).get("content", "")
-                if piece:
-                    accumulated.append(piece)
-
-                yield f"data: {json.dumps(chunk)}\n\n".encode()
+            finished = _read_chunk(chunk, accumulated) or finished
+            yield f"data: {json.dumps(chunk)}\n\n".encode()
+        if finished:
+            await _complete()
     except asyncio.CancelledError:
         raise
     except Exception as exc:
         log_entry["status"] = 500
-        log_entry["error"] = str(exc)
+        log_entry["error"] = redact(str(exc))
         log_entry["duration_ms"] = round((time.monotonic() - t0) * 1000, 1)
-        from smrti.call_log import update as _update_log
         _update_log(log_entry)
-        err = {"error": {"message": str(exc), "type": "proxy_error"}}
+        err = {"error": {"message": log_entry["error"], "type": "proxy_error"}}
         yield f"data: {json.dumps(err)}\n\ndata: [DONE]\n\n".encode()
+    finally:
+        await close()
 
 
 def run_proxy_server(host: str = "0.0.0.0", port: int = 8421) -> None:
-    import uvicorn
-    uvicorn.run(app, host=host, port=port)
+    serve(app, host, port)

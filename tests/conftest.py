@@ -4,6 +4,53 @@ import asyncio
 import pytest
 
 
+@pytest.fixture(autouse=True, scope="session")
+def never_open_the_users_memory(tmp_path_factory):
+    """No test may open a database under ~/.smrti.
+
+    The servers' default database is ``~/.smrti/memory.db``, the file a live
+    server on the same machine is serving, and every database opened runs
+    this checkout's migrations. Proxy tests that stub ``_recall`` but not
+    ``get_mem`` opened that file for every run of the suite — writing a
+    personality row for their tenant and, once the code under test changed
+    the schema, migrating the user's memory to it. Every default now points
+    at a scratch directory, and opening anything under ~/.smrti fails the
+    test that tried.
+    """
+    import os
+
+    from smrti.core import db as db_module
+    from smrti.servers import config as cfg
+
+    home = tmp_path_factory.mktemp("smrti-home")
+    patch = pytest.MonkeyPatch()
+    patch.setenv("SMRTI_DB", str(home / "memory.db"))
+    patch.setenv("SMRTI_HOME", str(home))
+    patch.setenv("SMRTI_RUN_DIR", str(home / "run"))
+    patch.setenv("SMRTI_TOWN_DB", str(home / "town.db"))
+    patch.setattr(cfg, "DB", str(home / "memory.db"))
+    # Read once at import, like cfg.DB: tests that start or stop a server
+    # wrote and removed PID files beside the user's live servers'.
+    from pathlib import Path
+
+    from smrti import cli
+
+    patch.setattr(cli, "_RUN_DIR", Path(home) / "run")
+
+    protected = os.path.realpath(os.path.expanduser("~/.smrti"))
+    original_init = db_module.Database.__init__
+
+    def guarded_init(self, db_path, *args, **kwargs):
+        resolved = os.path.realpath(os.path.expanduser(db_path))
+        if resolved == protected or resolved.startswith(protected + os.sep):
+            raise RuntimeError(f"a test tried to open the user's database {db_path!r}")
+        original_init(self, db_path, *args, **kwargs)
+
+    patch.setattr(db_module.Database, "__init__", guarded_init)
+    yield
+    patch.undo()
+
+
 @pytest.fixture(autouse=True)
 def reset_event_loop():
     """Create a new event loop before each test and set it as current."""
@@ -86,3 +133,17 @@ def reset_db_registry():
         entries = [(p, _registry.pop(p)) for p in new_paths]
     for _, db in entries:
         db.close()
+    # A server module caches one instance per tenant and space; one whose
+    # database was just closed must not serve the next test.
+    import sys
+
+    closed = {id(db) for _, db in entries}
+    for name, attr in (
+        ("smrti.servers.proxy", "_instances"),
+        ("smrti.servers.rest", "_space_mems"),
+        ("smrti.servers.rest", "_tenant_mems"),
+    ):
+        cache = getattr(sys.modules.get(name), attr, None)
+        if cache:
+            for key in [k for k, m in cache.items() if id(getattr(m, "db", None)) in closed]:
+                cache.pop(key, None)

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from collections import OrderedDict
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional
@@ -11,9 +12,19 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 
 from smrti import Smrti
 from smrti.servers import config as cfg
+from smrti.servers.common import (
+    BodyLimit,
+    api_key_middleware,
+    api_root,
+    cached_instance,
+    drain,
+    serve,
+    tenant_for,
+    upstream_authorization,
+)
 from smrti.servers.mcp import create_smrti, handle_tool
 from smrti.servers.reflect_loop import run_reflect_loop
-from smrti.servers.viz_routes import api_key_middleware, create_viz_router
+from smrti.servers.viz_routes import create_viz_router
 
 
 @asynccontextmanager
@@ -21,6 +32,9 @@ async def lifespan(app: FastAPI):
     task = asyncio.create_task(run_reflect_loop(_all_mems))
     yield
     task.cancel()
+    # The extractions still running are graphs for memories the client was
+    # already told it stored; they used to be dropped at shutdown.
+    await drain(_background_tasks)
 
 
 app = FastAPI(
@@ -29,6 +43,10 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+# Inside the auth middleware, which a request passes first: its receive
+# wrapper runs the route in a task group, and a 413 raised from beneath it
+# reached FastAPI's body parser as some other error and became a 400.
+app.add_middleware(BodyLimit)
 app.middleware("http")(api_key_middleware)
 
 _mem: Optional[Smrti] = None
@@ -39,47 +57,102 @@ _mem: Optional[Smrti] = None
 _space_mems: OrderedDict[str, Smrti] = OrderedDict()
 _SPACE_MEMS_MAX = 64
 
+# Instances for tenants other than the configured one — reached only by a key
+# bound to them (SMRTI_API_KEYS) — keyed by (tenant, space) and bounded the
+# same way. A space of "" is that tenant's view of the configured space.
+_tenant_mems: OrderedDict[tuple[str, str], Smrti] = OrderedDict()
+
+# Guards both caches' dictionaries (see cached_instance). Instances are also
+# resolved in the executor: minting one writes its personality row, which
+# waits on any epoch holding the write lock, and on the event loop that wait
+# stalled every other request.
+_mints = threading.Lock()
+
 # Strong references to fire-and-forget tasks so the GC cannot cancel them mid-flight
 _background_tasks: set[asyncio.Task] = set()
 
 
-def get_mem(space: Optional[str] = None) -> Smrti:
+def get_mem(space: Optional[str] = None, tenant: Optional[str] = None) -> Smrti:
     """Return the Smrti instance for *space* — the env-configured one when unset.
 
     An unset or empty space keeps the exact pre-space behavior (including the
     SMRTI_READ_SPACES overlay); any other name gets its own instance writing to
-    that space and reading only it unless the request says otherwise.
+    that space and reading only it unless the request says otherwise. An unset
+    *tenant* is the configured one; another tenant gets the same treatment in
+    its own partition.
 
-    Called from the event loop thread only — every route resolves its instance
-    before handing the blocking work to ``_run_sync``, so ``_space_mems`` needs
-    no lock. Keep it that way: minting also writes this space's personality
-    row, and moving that into the executor would race the cache.
+    Routes call it from the executor (see ``_amem_for``); ``_mints`` guards
+    the caches (see :func:`cached_instance`).
     """
-    global _mem
-    if _mem is None:
-        _mem = create_smrti()
-    if not space or space == _mem.write_space:
-        return _mem
-    if space not in _space_mems:
-        while len(_space_mems) >= _SPACE_MEMS_MAX:
-            _space_mems.popitem(last=False)
-        _space_mems[space] = Smrti(
+    home = _home()
+    if tenant and tenant != home.tenant_id:
+        return _tenant_mem(tenant, space or "")
+    if not space or space == home.write_space:
+        return home
+    return cached_instance(
+        _space_mems, space,
+        lambda: Smrti(
             db_path=cfg.DB,
             personality=cfg.PERSONALITY,
             tenant_id=cfg.TENANT_ID,
             write_space=space,
             ignore_patterns=cfg.IGNORE_PATTERNS or None,
             temporal=cfg.TEMPORAL,
-        )
-    _space_mems.move_to_end(space)
-    return _space_mems[space]
+        ),
+        _mints, _SPACE_MEMS_MAX, _background_tasks,
+    )
+
+
+def _home() -> Smrti:
+    """The configured instance, built once."""
+    global _mem
+    if _mem is None:
+        fresh = create_smrti()
+        with _mints:
+            if _mem is None:
+                _mem = fresh
+    return _mem
+
+
+def _tenant_mem(tenant: str, space: str) -> Smrti:
+    if space == cfg.SPACE:
+        space = ""  # the configured space by name is the same partition and overlay
+    return cached_instance(
+        _tenant_mems, (tenant, space),
+        lambda: Smrti(
+            db_path=cfg.DB,
+            personality=cfg.PERSONALITY,
+            tenant_id=tenant,
+            write_space=space or cfg.SPACE,
+            read_spaces=None if space else cfg.READ_SPACES,
+            ignore_patterns=cfg.IGNORE_PATTERNS or None,
+            temporal=cfg.TEMPORAL,
+        ),
+        _mints, _SPACE_MEMS_MAX, _background_tasks,
+    )
+
+
+def _mem_for(request: Request, space: Optional[str] = None) -> Smrti:
+    """The instance a request acts on: its space, in the tenant its key allows.
+
+    REST serves the configured tenant, as it always has. A key bound to
+    tenants (SMRTI_API_KEYS) acts on its first instead, or on another of its
+    own named with X-Smrti-Tenant-Id, which the auth middleware has checked.
+    """
+    tenant = tenant_for(request, None, cfg.TENANT_ID)
+    return get_mem(space) if tenant == cfg.TENANT_ID else get_mem(space, tenant)
+
+
+async def _amem_for(request: Request, space: Optional[str] = None) -> Smrti:
+    """:func:`_mem_for`, resolved off the event loop."""
+    return await _run_sync(_mem_for, request, space)
 
 
 def _all_mems() -> list[Smrti]:
     """Every live instance, for the reflect loop — each space gets its own epochs."""
-    mems: list[Smrti] = [get_mem()]
-    mems.extend(_space_mems.values())
-    return mems
+    home = _home()
+    with _mints:
+        return [home, *_space_mems.values(), *_tenant_mems.values()]
 
 
 async def _run_sync(fn, *args):
@@ -88,7 +161,7 @@ async def _run_sync(fn, *args):
     return await loop.run_in_executor(None, fn, *args)
 
 
-def _other_space_mem(space: Optional[str], other_space: str) -> Smrti:
+def _other_space_mem(request: Request, space: Optional[str], other_space: str) -> Smrti:
     """Resolve the instance for a two-space operation, refusing a self-compare.
 
     Both operations are defined between *different* spaces. Against itself
@@ -97,7 +170,7 @@ def _other_space_mem(space: Optional[str], other_space: str) -> Smrti:
     ``x_x_x`` bridge of every atom paired with itself, permanently, in a space
     nothing else writes. Refusing costs the caller one 400 and no graph.
     """
-    mem = get_mem(space)
+    mem = _mem_for(request, space)
     if other_space == mem.write_space:
         raise HTTPException(
             status_code=400,
@@ -184,6 +257,8 @@ class ForgetRequest(BaseModel):
     # memories a caller recalled and inspected. Ids win when both are given.
     query: Optional[str] = None
     atom_ids: Optional[list[AtomId]] = Field(default=None, min_length=1, max_length=64)
+    # Also forget what extraction derived only from the forgotten memories.
+    cascade: bool = False
     reason: Optional[str] = None
     space: Optional[SpaceName] = None
 
@@ -232,16 +307,16 @@ class SpaceMergeRequest(BaseModel):
 
 @app.post("/remember")
 async def remember(req: RememberRequest, request: Request):
-    mem = get_mem(req.space)
+    mem = await _amem_for(request, req.space)
     result = await _run_sync(handle_tool, mem, "smrti_remember", req.model_dump())
     if cfg.EXTRACT:
         episode_id = result.get("atom_id", "")
         if episode_id:
             from smrti.extraction.extract import extract_and_link_serialized
-            auth = request.headers.get("Authorization", "")
+            auth = upstream_authorization(request)
             task = asyncio.create_task(
                 extract_and_link_serialized(
-                    episode_id, req.content, mem, auth, cfg.EXTRACT_MODEL, cfg.EXTRACT_URL,
+                    episode_id, req.content, mem, auth, cfg.EXTRACT_MODEL, api_root(cfg.EXTRACT_URL),
                     req.source, mode=cfg.EXTRACT_MODE,
                 )
             )
@@ -251,20 +326,19 @@ async def remember(req: RememberRequest, request: Request):
 
 
 @app.post("/recall")
-async def recall(req: RecallRequest):
-    return await _run_sync(handle_tool, get_mem(req.space), "smrti_recall", req.model_dump())
+async def recall(req: RecallRequest, request: Request):
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_recall", req.model_dump())
 
 
 @app.post("/reflect")
-async def reflect(req: Optional[ReflectRequest] = None):
-    return await _run_sync(handle_tool, get_mem(req.space if req else None), "smrti_reflect", {})
+async def reflect(request: Request, req: Optional[ReflectRequest] = None):
+    return await _run_sync(handle_tool, await _amem_for(request, req.space if req else None), "smrti_reflect", {})
 
 
 @app.post("/reinforce")
-async def reinforce(req: ReinforceRequest):
+async def reinforce(req: ReinforceRequest, request: Request):
     """Report that these memories were used, so being used can build confidence."""
-    return await _run_sync(
-        handle_tool, get_mem(req.space), "smrti_reinforce", req.model_dump()
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_reinforce", req.model_dump()
     )
 
 
@@ -274,56 +348,74 @@ class AttendRequest(BaseModel):
 
 
 @app.post("/attend")
-async def attend(req: AttendRequest):
+async def attend(req: AttendRequest, request: Request):
     """Give these memories the access boost recall would have given them.
 
     For a caller that recalled with a wide ``top_k`` and no boost, reranked
     the candidates itself and injected a few: the few it read are boosted,
     the rest are not. Attention, not evidence — ``/reinforce`` is the other.
     """
-    return await _run_sync(handle_tool, get_mem(req.space), "smrti_attend", req.model_dump())
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_attend", req.model_dump())
 
 
 @app.post("/believe")
-async def believe(req: BelieveRequest):
-    return await _run_sync(handle_tool, get_mem(req.space), "smrti_believe", req.model_dump())
+async def believe(req: BelieveRequest, request: Request):
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_believe", req.model_dump())
 
 
 @app.post("/forget")
-async def forget(req: ForgetRequest):
-    return await _run_sync(handle_tool, get_mem(req.space), "smrti_forget", req.model_dump())
+async def forget(req: ForgetRequest, request: Request):
+    return await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_forget", req.model_dump())
 
 
 @app.get("/personality")
-async def get_personality(space: Optional[SpaceName] = Query(None)):
-    return await _run_sync(handle_tool, get_mem(space), "smrti_personality", {"action": "get"})
+async def get_personality(request: Request, space: Optional[SpaceName] = Query(None)):
+    """The personality row of a space, or {} for a space nobody has written.
+
+    Read straight from the database rather than through the space's
+    instance: minting one writes its personality row, so asking about three
+    unused spaces used to create three rows.
+    """
+    home = get_mem()
+    tenant = tenant_for(request, None, cfg.TENANT_ID)
+    row = await _run_sync(
+        home.db.fetchone,
+        "SELECT * FROM personality WHERE tenant_id = ? AND space = ?",
+        (tenant, space or home.write_space),
+    )
+    return dict(row) if row else {}
 
 
 @app.put("/personality")
-async def set_personality(req: PersonalityRequest):
-    return await _run_sync(handle_tool, get_mem(req.space), "smrti_personality", req.model_dump())
+async def set_personality(req: PersonalityRequest, request: Request):
+    result = await _run_sync(handle_tool, await _amem_for(request, req.space), "smrti_personality", req.model_dump()
+    )
+    # A profile the engine refuses is the caller's mistake; answering 200 with
+    # the refusal inside the body let a client believe the change took.
+    if "error" in result:
+        raise HTTPException(status_code=422, detail=result["error"])
+    return result
 
 
 @app.post("/space_query")
-async def space_query(req: SpaceQueryRequest):
+async def space_query(req: SpaceQueryRequest, request: Request):
     """Compare two spaces: op=overlap (Jaccard), op=intersection, op=diff."""
-    mem = _other_space_mem(req.space, req.other_space)
+    mem = await _run_sync(_other_space_mem, request, req.space, req.other_space)
     return await _run_sync(handle_tool, mem, "smrti_space_query", req.model_dump())
 
 
 @app.post("/space_merge")
-async def space_merge(req: SpaceMergeRequest):
+async def space_merge(req: SpaceMergeRequest, request: Request):
     """Materialize a bridge space from the overlap between two spaces."""
-    mem = _other_space_mem(req.space, req.other_space)
+    mem = await _run_sync(_other_space_mem, request, req.space, req.other_space)
     return await _run_sync(handle_tool, mem, "smrti_space_merge", req.model_dump())
 
 
 @app.delete("/spaces/current")
-async def clear_current_space(space: Optional[SpaceName] = Query(None)):
-    count = await _run_sync(get_mem(space).clear_space)
+async def clear_current_space(request: Request, space: Optional[SpaceName] = Query(None)):
+    count = await _run_sync((await _amem_for(request, space)).clear_space)
     return {"status": "ok", "deleted": count}
 
 
 def run_rest_server(host: str = "0.0.0.0", port: int = 8420) -> None:
-    import uvicorn
-    uvicorn.run(app, host=host, port=port)
+    serve(app, host, port)

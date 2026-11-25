@@ -173,7 +173,9 @@ def test_an_unsupported_question_opens_no_cooldown(server):
     from smrti.decisions import DecisionEngine
     from smrti.decisions.policies import DecisionPolicy
 
-    engine = DecisionEngine(DecisionPolicy.from_env({"SMRTI_DECISIONS_URL": server}), RemoteProvider(server))
+    engine = DecisionEngine(
+        DecisionPolicy.from_env({"SMRTI_DECISIONS": "active", "SMRTI_DECISIONS_URL": server}), RemoteProvider(server)
+    )
     assert engine.decide("entity", "s", {"identity": Choice("which?", {"c0": "a", "none": "b"})},
                          tenant_id="t", space="s") is None
     # The next question, one the student answers, is asked rather than
@@ -185,24 +187,27 @@ def test_an_unsupported_question_opens_no_cooldown(server):
 def test_the_remote_provider_sends_a_student_a_whole_head_at_once(server):
     provider = RemoteProvider(server)
     provider.ask({"message": "hola"}, ROUTING_QUESTIONS, timeout=5.0)
-    assert provider._per_call() == 256
+    assert provider._per_call(time.monotonic() + 5.0) == 256
     provider.close()
 
 
 def test_a_failed_probe_is_not_remembered_as_laya():
     # The provider asks /health once to learn whether a whole head may ride
     # one call. A probe that fails — the student still loading — must not
-    # settle the question for the provider's lifetime.
+    # settle the question for the provider's lifetime, nor be paid again
+    # before every call while the window it earned is open.
     placeholder = socket.socket()
     placeholder.bind(("127.0.0.1", 0))
     port = placeholder.getsockname()[1]
     placeholder.close()
     provider = RemoteProvider(f"http://127.0.0.1:{port}")
-    assert provider._per_call() == 1
+    assert provider._per_call(time.monotonic() + 5.0) == 1
     srv = ThreadingHTTPServer(("127.0.0.1", port), _handler(_Stub(), threading.Lock()))
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     try:
-        assert provider._per_call() == 256
+        assert provider._per_call(time.monotonic() + 5.0) == 1
+        provider._health_retry_at = 0.0  # the window has passed
+        assert provider._per_call(time.monotonic() + 5.0) == 256
     finally:
         provider.close()
         srv.shutdown()

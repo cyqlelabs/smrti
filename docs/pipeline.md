@@ -30,8 +30,7 @@ flowchart TD
     subgraph UNDERSTAND ["  ② Understand  "]
         NER["🔍 Named Entity Recognition\n16 types: person · organization · project\nrole · technology · skill · topic\nmedia · health · location · event & more"]
         RESOLVE["🔗 Entity Resolution\nMerge on exact or folded labels\na near match makes a new entity"]
-        PRONOUNS["👥 Pronoun Disambiguation\n'she' → Alice\n'we' → Acme"]
-        CLAIMS["🧠 Claim Extraction\nRelations · Beliefs · Goals\nConstraints · Preferences"]
+        CLAIMS["🧠 Claim Extraction\nRelations · Beliefs · Goals\nConstraints · Preferences\n'she' → Alice from known entities"]
         CONTEXT["📚 Memory Context Injection\nKnown entities from graph\nfed back into extraction"]
     end
 
@@ -60,7 +59,7 @@ flowchart TD
         EXPAND["🌐 Graph Expansion\nFollow relation edges\nto related concepts"]
         SALIENCE["🏆 Salience Ranking\nSimilarity · Attention\nConfidence · Valence"]
         JUDGE["⚖️ Evidence Judgement\nlocal model · off by default\nanswers? links? superseded? contradicts?"]
-        DIVERSE["🎛️ Diversity Cap\nOne moment cannot fill\nmore than a sixth of the answer"]
+        DIVERSE["🎛️ Diversity Cap\nRepeats from one moment\nyield to other evidence"]
     end
 
     subgraph CLASSIFY ["  ⑥ Classify  "]
@@ -76,8 +75,7 @@ flowchart TD
     WHEN --> SENTIMENT
     SENTIMENT --> NER
     NER --> RESOLVE
-    RESOLVE --> PRONOUNS
-    PRONOUNS --> CLAIMS
+    RESOLVE --> CLAIMS
     CONTEXT -.->|"known entities"| CLAIMS
     CLAIMS --> ATOMS
     ATOMS --> TV & AV & VAL & EDGES
@@ -105,7 +103,7 @@ flowchart TD
 
     class USER userNode
     class GATE,SENTIMENT,WHEN receiveNode
-    class NER,RESOLVE,PRONOUNS,CLAIMS,CONTEXT understandNode
+    class NER,RESOLVE,CLAIMS,CONTEXT understandNode
     class ATOMS,TV,AV,VAL,EDGES storeNode
     class REVISE,DECAY,PROPAGATE,HEAL,PROMOTE,CONTRADICT,PRUNE evolveNode
     class KNN,BM25,FUSE,EXPAND,SALIENCE,JUDGE,DIVERSE retrieveNode

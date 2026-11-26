@@ -167,33 +167,21 @@ One consolidation epoch: revise pending evidence, decay attention and confidence
 
 ### Semantic decisions
 
-At five points a rule cannot tell what a sentence means. Instead of a generative LLM call, the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice among options, a score) and never writes prose. It runs as an int8 ONNX graph with no PyTorch, and peaked at 746 MB resident on the tone benchmark. Each task's default follows its measurement (table below): only `tone` is on. You can set any task to `active`, `shadow` (ask and record, apply nothing) or `off`. A failure or timeout falls back to the deterministic path, and with the defaults recall never waits on the model, because `tone` runs on the write path only.
+At five points a rule cannot tell what a sentence means. There the engine asks [Laya](https://github.com/NandhaKishorM/laya), a local multilingual model that answers typed questions (a probability, a choice, a score) instead of writing prose. It runs as an int8 ONNX graph without PyTorch. Each task's default follows its measurement, so only `tone` is on; it runs on the write path, so recall never waits on the model. A failure or timeout falls back to the deterministic path.
 
-The runtime installs with Smrti; the weights do not. The first decision fetches them once (250MB, checked against a checksum) into `~/.smrti/decision-model`, or reuses `~/.factor/decision-model` when [Factor](https://github.com/cyqlelabs/factor) already holds a copy. Fetch and load run on their own thread, and a call that arrives before the model is ready takes the deterministic path. `SMRTI_DECISIONS_MODEL` points at a directory you unpacked yourself. `SMRTI_DECISIONS_URL` asks a server that already holds the model (Factor's EdgeJev on loopback, `smrti serve decisions`, or any `POST /v1/systemone`) and loads nothing here, since a small machine can hold one copy of the model, not two. `SMRTI_DECISIONS=off` downloads nothing at all.
+| Task | Decides | Default | Measured |
+| ---- | ------- | ------- | -------- |
+| `routing` | Whether an episode needs LLM claim extraction | `off` | Avoided 1 of 11 skippable LLM calls but skipped 2 of 11 durable facts (`make bench-decisions`) |
+| `rerank` | Whether each shortlisted memory answers the question; blended with salience | `off` | LongMemEval-S hit rate at `top_k=5` fell from 0.675 to 0.650 (0.23.0's vectors), and each uncached recall took about 4.5 s longer |
+| `supersession` | Whether a new claim replaces an older one; when unsure, both stay | `off` | Blocked 12 of 13 wrong cuts of a current fact, but also 7 of 8 real updates (`make bench-supersession`) |
+| `entity` | Which existing atom an uncertain mention names; when unsure, a duplicate is made | `off` | No answer on 17 cases reached the 0.6 line: no wrong merges, and none of the 9 true ones (`make bench-entity`) |
+| `tone` | Whether an estimated negative valence describes the thing or the speaker's mood; mood is damped so an apology does not persist like the failure it is about | `active` | Damped 2 of 14 speaker-toned sentences, both apologies, and none of 15 about a failure, bug, rule or preference (`make bench-tone`) |
 
-Laya needs AVX2. Without it, a 2011 dual-core took 30 to 48 seconds per decision against a 5-second deadline. So on a CPU without AVX2, or a machine with less than 4 GB of memory, a smaller student model answers instead: a 6-layer multilingual encoder trained on Laya's answers, fetched once (93 MB) into `~/.smrti/student-model`. It answers in 0.1 to 2.3 seconds on that same dual-core and agrees with Laya on 75–94% of Smrti's questions. It cannot judge `entity`, because the candidates change with every call, so entity matches there take the deterministic path. `SMRTI_DECISIONS_ENGINE` forces either model. `smrti serve decisions` serves the student on `:8731` so Factor and several Smrti processes can share one copy through `SMRTI_DECISIONS_URL`.
+Set one task with `SMRTI_DECISIONS_<TASK>=off|shadow|active`, or all five with `SMRTI_DECISIONS`; `SMRTI_DECISIONS=off` also skips the download. A `DecisionPolicy()` built in code starts with every task active. A decision never restores a forgotten atom, confers permanence, changes tenant or space, or mints a critical warning, and its confidence never enters a truth value.
 
-| Task           | Decides | Default | Measurement behind the default |
-| -------------- | ------- | ------- | ------------------------------ |
-| `routing`      | Whether an episode needs the LLM claim extraction. Chatter skips it; a durable fact that names no entity can force it. | `off` | On the gate set (`make bench-decisions`) it avoided 1 of 11 skippable LLM calls and skipped claim extraction for 2 of 11 durable facts. "Never deploy on Fridays." was not forced to the LLM. |
-| `rerank`       | Whether each shortlisted memory answers the question, links to the answer, describes a replaced state, or contradicts the premise; blended with salience. | `off` | LongMemEval-S at `top_k=5`, with 0.23.0's vectors: hit rate 0.650 with it, 0.675 without. It added about 4.5 s to each uncached recall. |
-| `supersession` | Whether a new claim replaces an older one. Ambiguity keeps both. | `off` | On 25 English and Spanish pairs (`make bench-supersession`) it blocked 12 of 13 wrong cuts of a current fact but let one through, and blocked 7 of 8 real updates. |
-| `entity`       | Which existing atom an uncertain mention names. Under the confidence line, a duplicate is made rather than a wrong merge. | `off` | On 17 cases (`make bench-entity`) no answer reached the 0.6 line: no wrong merges, and none of the 9 true ones. |
-| `tone`         | Whose an *estimated* negative valence is: about the thing the memory describes, or the speaker's own mood. Mood is damped so an apology does not rank and persist like the failure it is about; a stated valence is never questioned. | `active` | On 29 sentences (`make bench-tone`) it damped 2 of 14 speaker-toned ones, both apologies, and none of the 15 about a failure, bug, rule or preference. |
+The weights download on first use, or come from [Factor](https://github.com/cyqlelabs/factor)'s copy; until they load, every call takes the deterministic path. Laya needs AVX2, so on a CPU without it, or a machine with under 4 GB of memory, a smaller student distilled from Laya answers instead: 0.1 to 2.3 s per decision on a 2011 dual-core where Laya took 30 to 48 s, agreeing with Laya on 75–94% of Smrti's questions. The student cannot judge `entity`. To share one model between processes, point `SMRTI_DECISIONS_URL` at a server that holds it: Factor, or `smrti serve decisions` (the student, on `:8731`).
 
-Turn a task on with `SMRTI_DECISIONS_<TASK>=active` (for example `SMRTI_DECISIONS_RERANK=active`); `SMRTI_DECISIONS=active` turns on all five, and `SMRTI_DECISIONS=off` turns off `tone` too. A `DecisionPolicy()` built in code starts with every task active.
-
-A decision never restores a forgotten atom, confers permanence, changes tenant or space, or mints a critical warning. Its confidence is logged, never written into a truth value.
-
-```bash
-export SMRTI_DECISIONS=off                      # deterministic only
-export SMRTI_DECISIONS_RERANK=active            # per task: off | shadow | active
-export SMRTI_DECISIONS_MODEL=/models/laya-int8  # a directory you unpacked; no download
-export SMRTI_DECISIONS_ENGINE=student           # auto | laya | student
-export SMRTI_DECISIONS_THREADS=2                # cap the cores inference may hold
-```
-
-`GET /decisions` lists every decision, and `/metrics` counts them as `smrti_decisions_total`. `make bench-decisions` scores the routing gate, `make bench-tone` the tone check, `make bench-supersession` and `make bench-entity` the two verification tasks, and `make distill` retrains the student. Thresholds are in the [Configuration Reference](#configuration-reference).
+`GET /decisions` lists every decision, `/metrics` counts them as `smrti_decisions_total`, and `make distill` retrains the student. Model paths, engine choice and thresholds are in the [Configuration Reference](#configuration-reference).
 
 ## Server Modes
 
@@ -520,65 +508,28 @@ Each preset tunes 17 hyperparameters. To create a custom personality, start from
 ## Architecture
 
 ```mermaid
-graph TD
-    subgraph Facade
-        S["Smrti<br/><small>remember · recall · find_warnings · attend · believe · reinforce · reflect · forget · status</small>"]
-    end
+flowchart TB
+    SRV["Servers<br/><small>MCP stdio · REST :8420<br/>OpenAI proxy :8421</small>"]
+    S["Smrti facade<br/><small>remember · recall · forget · reflect</small>"]
+    EXT["Extraction<br/><small>extract · resolve<br/>aliases · temporal</small>"]
+    RET["Retrieval<br/><small>fan_out · salience<br/>diversify · classify</small>"]
+    EVO["Evolution<br/><small>epoch · truth · reinforcement<br/>connections · healing</small>"]
+    SPA["Spaces<br/><small>set_ops<br/>emergence</small>"]
+    DEC["Decisions<br/><small>Laya or student<br/>local or served</small>"]
+    CORE["Core<br/><small>AtomSpace · Database · Models<br/>Embedder: MiniLM-L12-v2, 384d</small>"]
+    SQL[("SQLite<br/><small>sqlite-vec · FTS5</small>")]
 
-    subgraph Servers
-        MCP["mcp.py<br/><small>MCP stdio</small>"]
-        REST["rest.py<br/><small>FastAPI :8420</small>"]
-        PROXY["proxy.py<br/><small>OpenAI proxy :8421</small>"]
-    end
-
-    subgraph Core
-        AS["AtomSpace"]
-        DB["Database"]
-        EMB["Embedder"]
-        MOD["Models"]
-    end
-
-    subgraph Retrieval
-        FAN["fan_out<br/><small>vector + BM25, fused</small>"]
-        SAL["salience"]
-        DIV["diversify"]
-        CLS["classify"]
-    end
-
-    subgraph Evolution
-        EPO["epoch"]
-        TRU["truth"]
-        REI["reinforcement"]
-        CON["connections"]
-        HEA["healing"]
-    end
-
-    subgraph Spaces
-        SOP["set_ops"]
-        EMG["emergence"]
-    end
-
-    subgraph Extraction
-        EXT["extract"]
-        RES["resolve"]
-        ALI["aliases"]
-        TMP["temporal"]
-    end
-
-    subgraph Decisions
-        DEC["engine · policies · audit<br/><small>core · tone on by default</small>"]
-        LAYA["laya · student · remote<br/><small>multilingual int8 ONNX · local or served · typed judgements</small>"]
-    end
-
-    subgraph Storage
-        SQL["SQLite + sqlite-vec<br/><small>multilingual-MiniLM-L12-v2 · 384d · ONNX CPU</small>"]
-    end
-
-    MCP & REST & PROXY --> S
-    S --> Core & Retrieval & Evolution & Extraction & Spaces
-    Retrieval & Extraction -.->|"shortlist · route · verify"| DEC
-    DEC --> LAYA
-    Core & Retrieval & Evolution & Extraction & Spaces --> SQL
+    SRV --> S
+    SRV -->|extract| EXT
+    S -->|recall| RET
+    S -->|reflect| EVO
+    S -->|"query · merge"| SPA
+    S -->|remember| CORE
+    S -.->|tone| DEC
+    EXT -.->|"route · verify"| DEC
+    RET -.->|rerank| DEC
+    EXT & RET & EVO & SPA --> CORE
+    CORE --> SQL
 ```
 
 **Retrieval:** embed the query → vector + BM25 search, fused → 1-hop graph expansion → salience ranking → evidence judgement (the `rerank` task, off by default) → diversity cap → top-k → access boost on what was returned. Stated warnings are looked up apart from that list. **Consolidation:** the epoch steps under [`reflect()`](#reflect).
@@ -618,44 +569,36 @@ pytest tests/ -v
 
 Two harnesses in `bench/` ingest a published dataset as episodes and answer its questions through `recall`. Retrieval and answering are scored separately, so a strong answering model cannot hide a retrieval regression.
 
-**Retrieval** (2026-11-25): [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval), 40 questions taken one per ability in turn · extraction off · no consolidation epochs · `deterministic` preset · decisions off unless the row says otherwise.
+**Retrieval** (2026-11-25): [LongMemEval-S](https://github.com/xiaowu0162/LongMemEval), 40 questions taken one per ability in turn · extraction off · no consolidation epochs · `deterministic` preset · decisions off.
 
-| `top_k` | Decisions | Hit rate | Evidence recall | Session hit rate |
-| ------- | --------- | -------- | --------------- | ---------------- |
-| 5 | off | **0.775** | 0.634 | 0.950 |
-| 10 (proxy, MCP and Python default) | off | **0.825** | 0.737 | 0.975 |
-| 50 | off | **0.950** | 0.928 | 1.000 |
+| `top_k` | Hit rate | Evidence recall | Session hit rate |
+| ------- | -------- | --------------- | ---------------- |
+| 5 | **0.775** | 0.634 | 0.950 |
+| 10 (proxy, MCP and Python default) | **0.825** | 0.737 | 0.975 |
+| 50 | **0.950** | 0.928 | 1.000 |
 
-0.23.1 embeds an episode's text once, where earlier versions embedded its opening twice. On the same 40 questions that gained four at `top_k=5` (0.675 before), two at 10 (0.775) and lost one temporal-reasoning question at 50 (0.975). At `top_k=50` four of six abilities retrieve without a miss (multi-session and temporal reasoning miss 1 of 7 each). At `top_k=5` the weakest are questions about the assistant's own words (2 of 6). With 0.23.0's vectors, turning every decision task on lowered `top_k=5` from 0.675 to 0.650 (evidence recall 0.533 to 0.481); that has not been re-run.
+0.23.1 embeds an episode's text once instead of embedding its opening twice. That raised `top_k=5` from 0.675 and `top_k=10` from 0.775, and cost one temporal-reasoning question at 50 (0.975 before).
 
-**Answers** (2026-08-26, older ranking formula): `top_k=50` · gemini-3.7-flash answering and judging · otherwise the same config. Re-run before reading these against the current engine.
+**Answers** (2026-08-26, older ranking formula; re-run before comparing with the current engine): `top_k=50` · gemini-3.7-flash answering and judging · otherwise the same config.
 
 | Benchmark | Scope | Answers | Notes |
 | --------- | ----- | ------- | ----- |
 | LongMemEval-S | 40 questions | **0.900** | |
 | [HaluMem](https://huggingface.co/datasets/IAAR-Shanghai/HaluMem) | 3 personas, 180 questions | **0.517** correct | hallucination 0.394 · omission 0.089 |
 
+- **Strong** (August answer run). Every temporal-reasoning and assistant's-own-words question was answered correctly at `top_k=50`. On HaluMem's memory-boundary questions (things the user never said), smrti answered 97% correctly and invented something 2.9% of the time.
+- **Weak.** At `top_k=10`, 7 of 40 questions retrieve none of their annotated evidence (9 at `top_k=5`, where only 2 of 6 assistant's-own-words questions hit). HaluMem's synthesis categories hallucinated heavily (dynamic update 71%, multi-hop inference 63%, generalization 62%), and smrti rarely declined to answer: 8.9% omission, against 17–35% for published systems.
+- **Unmeasured.** The entity graph (about 1.25 s and one LLM call per turn) and consolidation epochs. HaluMem's memory-extraction and memory-update tasks are not implemented.
+
 ```bash
 make datasets        # fetch both into data/ (265MB + 32MB, once)
 make bench           # fails if the retrieval hit rate drops
 make bench-halumem   # fails if the hallucination rate rises
-
-# add --extract-url/--extract-model to either to build the entity graph
-# add --epochs N to consolidate each history N times before querying it
-# add --top-k 10 to measure at the proxy's and the MCP tool's default injection budget
 ```
 
-Each benchmark locks its config beside a recorded baseline and refuses to compare across configs; `--epochs` and `--top-k` join the fingerprint when set. The harness runs with every decision task off unless `--decisions shadow|active` is passed, which joins the fingerprint too: the gate measures the deterministic retrieval path the baselines were recorded on, and a decision-mode run needs its own baseline (`--update-baseline` under that mode). `--decisions active` refuses to run when the decision model cannot load. HaluMem's fingerprint also records the extraction model and mode when set, and the answering and judging models. Neither benchmark is a CI gate: both need the datasets, the embedding model, and a judge key.
+Pass flags through `BENCH_ARGS`: `--extract-url`/`--extract-model` build the entity graph, `--epochs N` consolidates each history first, and `--top-k` and `--decisions shadow|active` change what is measured. Each joins the config fingerprint, and a run is compared only against a baseline recorded under the same one (`--update-baseline` records it). Neither harness is a CI gate: both need the datasets and a judge key.
 
-**Where it is strong** (August answer run). Temporal reasoning and assistant's-own-words questions were answered perfectly at `top_k=50`. On HaluMem's *memory boundary* questions (things the user never said), smrti answered correctly 97% of the time and invented something 2.9% of the time.
-
-**Where it is weak.** At `top_k=10`, the proxy's default, 9 of 40 questions retrieve none of their annotated evidence (13 at `top_k=5`). HaluMem's synthesis categories hallucinated heavily: dynamic update 71%, multi-hop inference 63%, generalization 62%. smrti rarely declined to answer (8.9% omission, where published systems omit 17–35%), so an unknown often came out as an assertion.
-
-**Unmeasured.** The entity graph (`--extract-url`, about 1.25 s and one LLM call per turn) and consolidation (`--epochs`). HaluMem's memory-extraction and memory-update tasks are not implemented.
-
-These numbers are not directly comparable to published results: the subsets are small (40 to 180 questions, so one question moves a category by several points), a single judge grades them where published protocols average three, and the answering model differs.
-
-> **Leaderboard figures measure something else.** Published LongMemEval results (MemOS 77.8, Memobase 72.4, Mem0 66.4, Zep 63.8) are answer accuracy on all 500 questions. The retrieval table above is the share of 40 questions whose annotated evidence reached the returned memories, so the two cannot be ranked against each other.
+> **Not comparable to published results.** The subsets are small (one question moves a category by several points), one judge grades where published protocols average three, and the answering model differs. Leaderboard LongMemEval figures (MemOS 77.8, Memobase 72.4, Mem0 66.4, Zep 63.8) are answer accuracy on all 500 questions; the retrieval table counts questions whose evidence reached the returned memories, so the two cannot be ranked against each other.
 
 ## Upgrading
 
